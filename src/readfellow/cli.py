@@ -21,6 +21,13 @@ from .graph import (
     write_graph,
 )
 from .ollama import OllamaEmbedder, OllamaGenerator
+from .models import (
+    ChunkContext,
+    GraphQueryResult,
+    GraphRelation,
+    IndexManifest,
+    QueryChunkFields,
+)
 from .progress import ProgressFilter, build_progress_filter
 from .store import (
     chunk_to_doc,
@@ -179,16 +186,16 @@ def command_index(args: argparse.Namespace) -> int:
         rebuild=args.rebuild,
     )
 
-    manifest = {
-        "collection": args.collection,
-        "collection_path": str(collection_path(args.index_dir, args.collection)),
-        "source_path": relative_source,
-        "model": args.model,
-        "embedding_dimension": dimension,
-        "chunk_count": len(chunks),
-        "chunk_chars": args.chunk_chars,
-        "overlap_chars": args.overlap_chars,
-    }
+    manifest = IndexManifest(
+        collection=args.collection,
+        collection_path=str(collection_path(args.index_dir, args.collection)),
+        source_path=relative_source,
+        model=args.model,
+        embedding_dimension=dimension,
+        chunk_count=len(chunks),
+        chunk_chars=args.chunk_chars,
+        overlap_chars=args.overlap_chars,
+    )
     write_manifest(
         metadata_dir=args.metadata_dir,
         collection=args.collection,
@@ -206,12 +213,17 @@ def command_index(args: argparse.Namespace) -> int:
             output_fields=["text_hash"],
             include_vector=False,
         )
-        missing = [chunk for chunk in batch if existing.get(chunk.id) is None]
+        existing_hashes = {
+            chunk.id: QueryChunkFields.model_validate(existing[chunk.id].fields).text_hash
+            for chunk in batch
+            if existing.get(chunk.id) is not None
+        }
+        missing = [chunk for chunk in batch if chunk.id not in existing_hashes]
         changed = [
             chunk
             for chunk in batch
-            if existing.get(chunk.id) is not None
-            and existing[chunk.id].fields.get("text_hash") != chunk.text_hash
+            if chunk.id in existing_hashes
+            and existing_hashes[chunk.id] != chunk.text_hash
         ]
         pending = missing + changed
         skipped += len(batch) - len(pending)
@@ -262,13 +274,13 @@ def print_docs(docs) -> None:
         print("no results")
         return
     for index, doc in enumerate(docs, start=1):
-        fields = doc.fields
-        chapter = fields.get("chapter") or "(no chapter)"
-        text = fields.get("text", "").strip()
+        fields = QueryChunkFields.model_validate(doc.fields)
+        chapter = fields.chapter or "(no chapter)"
+        text = fields.text.strip()
         preview = re.sub(r"\s+", " ", text)[:260]
         print(
             f"\n[{index}] id={doc.id} score={doc.score:.6f} "
-            f"{fields.get('source_path')}:{fields.get('line_start')}-{fields.get('line_end')}"
+            f"{fields.source_path}:{fields.line_start}-{fields.line_end}"
         )
         print(f"chapter: {chapter}")
         print(preview)
@@ -280,7 +292,7 @@ def command_search(args: argparse.Namespace) -> int:
     progress = progress_from_args(args, manifest=manifest)
     embedder = OllamaEmbedder(
         base_url=args.ollama_url,
-        model=manifest.get("model", args.model),
+        model=manifest.model or args.model,
         keep_alive=args.keep_alive,
     )
     vector = embedder.embed_one(args.query)
@@ -306,7 +318,8 @@ def command_fetch(args: argparse.Namespace) -> int:
     if doc is None:
         print(f"chunk not found: {args.chunk_id}", file=sys.stderr)
         return 1
-    if not progress.allows(doc.fields):
+    fields = QueryChunkFields.model_validate(doc.fields)
+    if not progress.allows(fields):
         print_progress(progress)
         print(
             f"chunk {args.chunk_id} is outside the configured reading progress",
@@ -314,15 +327,14 @@ def command_fetch(args: argparse.Namespace) -> int:
         )
         return 1
     print_progress(progress)
-    fields = doc.fields
     print(
-        f"id={doc.id} {fields.get('source_path')}:{fields.get('line_start')}-"
-        f"{fields.get('line_end')}"
+        f"id={doc.id} {fields.source_path}:{fields.line_start}-"
+        f"{fields.line_end}"
     )
-    if fields.get("chapter"):
-        print(f"chapter: {fields['chapter']}")
+    if fields.chapter:
+        print(f"chapter: {fields.chapter}")
     print()
-    print(fields.get("text", "").rstrip())
+    print(fields.text.rstrip())
     return 0
 
 
@@ -350,7 +362,7 @@ def command_graph_index(args: argparse.Namespace) -> int:
         )
 
     processed = set() if args.rebuild else processed_chunk_ids(graph)
-    pending = [chunk for chunk in chunks if chunk.get("id") not in processed]
+    pending = [chunk for chunk in chunks if chunk.id not in processed]
     update_graph_metadata(
         graph,
         collection=args.collection,
@@ -380,7 +392,7 @@ def command_graph_index(args: argparse.Namespace) -> int:
     )
 
     for index, chunk in enumerate(pending, start=1):
-        chunk_id = chunk.get("id", "")
+        chunk_id = chunk.id
         print(f"[{index:>5}/{len(pending)}] extracting graph from {chunk_id}", flush=True)
         prompt = build_extraction_prompt(chunk)
         try:
@@ -400,14 +412,14 @@ def command_graph_index(args: argparse.Namespace) -> int:
         )
         write_graph(path, graph)
         print(
-            f"        entities={len(extraction['entities'])}, "
-            f"relations={len(extraction['relations'])}",
+            f"        entities={len(extraction.entities)}, "
+            f"relations={len(extraction.relations)}",
             flush=True,
         )
 
     print(
         f"done: collection={args.collection}, graph={path}, "
-        f"entities={graph['entity_count']}, relations={graph['relation_count']}"
+        f"entities={graph.entity_count}, relations={graph.relation_count}"
     )
     return 0
 
@@ -426,9 +438,9 @@ def command_graph_query(args: argparse.Namespace) -> int:
     return 0
 
 
-def print_graph_results(result: dict[str, list[dict]]) -> None:
-    entities = result.get("entities", [])
-    relations = result.get("relations", [])
+def print_graph_results(result: GraphQueryResult) -> None:
+    entities = result.entities
+    relations = result.relations
     if not entities and not relations:
         print("no graph results")
         return
@@ -437,16 +449,16 @@ def print_graph_results(result: dict[str, list[dict]]) -> None:
         print("entities:")
         for entity in entities:
             suffixes = []
-            if entity.get("types"):
-                suffixes.append("types=" + ", ".join(entity["types"]))
-            if entity.get("aliases"):
-                suffixes.append("aliases=" + ", ".join(entity["aliases"]))
+            if entity.types:
+                suffixes.append("types=" + ", ".join(entity.types))
+            if entity.aliases:
+                suffixes.append("aliases=" + ", ".join(entity.aliases))
             suffix = f" ({'; '.join(suffixes)})" if suffixes else ""
-            print(f"- {entity['name']}{suffix}")
-            for mention in entity.get("mentions", [])[:3]:
+            print(f"- {entity.name}{suffix}")
+            for mention in entity.mentions[:3]:
                 print(f"  mention: {format_graph_location(mention)}")
-            for evidence in entity.get("evidence", [])[:2]:
-                preview = re.sub(r"\s+", " ", evidence.get("text", ""))[:180]
+            for evidence in entity.evidence[:2]:
+                preview = re.sub(r"\s+", " ", evidence.text)[:180]
                 print(f"  evidence: {preview} ({format_graph_location(evidence)})")
 
     if relations:
@@ -455,23 +467,23 @@ def print_graph_results(result: dict[str, list[dict]]) -> None:
         print("relations:")
         for index, relation in enumerate(relations, start=1):
             print(
-                f"[{index}] {relation['subject']} --{relation['relation']}--> "
-                f"{relation['object']}"
+                f"[{index}] {relation.subject} --{relation.relation}--> "
+                f"{relation.object}"
             )
-            if relation.get("evidence"):
-                preview = re.sub(r"\s+", " ", relation["evidence"])[:220]
+            if relation.evidence:
+                preview = re.sub(r"\s+", " ", relation.evidence)[:220]
                 print(f"    evidence: {preview}")
             print(
-                f"    chunk: {relation.get('chunk_id', '')} "
+                f"    chunk: {relation.chunk_id} "
                 f"{format_graph_location(relation)}"
             )
 
 
-def format_graph_location(item: dict) -> str:
-    chapter = item.get("chapter") or "(no chapter)"
+def format_graph_location(item: ChunkContext | GraphRelation) -> str:
+    chapter = item.chapter or "(no chapter)"
     return (
-        f"{item.get('source_path')}:{item.get('line_start')}-"
-        f"{item.get('line_end')} chapter={chapter}"
+        f"{item.source_path}:{item.line_start}-"
+        f"{item.line_end} chapter={chapter}"
     )
 
 
@@ -489,7 +501,7 @@ def open_or_create_existing(args: argparse.Namespace):
 def progress_from_args(
     args: argparse.Namespace,
     *,
-    manifest: dict | None,
+    manifest: IndexManifest | None,
 ) -> ProgressFilter:
     return build_progress_filter(
         manifest=manifest,

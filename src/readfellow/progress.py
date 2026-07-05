@@ -1,35 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 from .chunking import CHAPTER_RE, read_text_units
-
-
-@dataclass(frozen=True)
-class ChapterBoundary:
-    index: int
-    title: str
-    line_start: int
-
-
-@dataclass(frozen=True)
-class ProgressFilter:
-    expression: str | None
-    description: str
-    max_line_end: int | None = None
-    max_chunk_index: int | None = None
-
-    def allows(self, fields: dict[str, Any]) -> bool:
-        if self.max_line_end is not None and int(fields["line_end"]) > self.max_line_end:
-            return False
-        if (
-            self.max_chunk_index is not None
-            and int(fields["chunk_index"]) > self.max_chunk_index
-        ):
-            return False
-        return True
+from .models import ChapterBoundary, IndexManifest, ProgressFilter
 
 
 def chapter_boundaries(source: Path) -> list[ChapterBoundary]:
@@ -48,8 +22,8 @@ def chapter_boundaries(source: Path) -> list[ChapterBoundary]:
     return boundaries
 
 
-def source_from_manifest(manifest: dict[str, Any]) -> Path:
-    source = Path(str(manifest["source_path"]))
+def source_from_manifest(manifest: IndexManifest) -> Path:
+    source = Path(manifest.source_path)
     return source if source.is_absolute() else Path.cwd() / source
 
 
@@ -74,7 +48,7 @@ def line_limit_for_chapter(source: Path, max_chapter: int) -> tuple[int, Chapter
 
 def build_progress_filter(
     *,
-    manifest: dict[str, Any] | None = None,
+    manifest: IndexManifest | None = None,
     max_chapter: int | None = None,
     max_line: int | None = None,
     max_chunk_index: int | None = None,

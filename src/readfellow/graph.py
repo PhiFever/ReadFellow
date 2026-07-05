@@ -1,13 +1,28 @@
 from __future__ import annotations
 
-from copy import deepcopy
-from datetime import datetime, timezone
+from collections.abc import Mapping
 import json
 from pathlib import Path
 import re
+from types import MappingProxyType
 from typing import Any
 
-from .progress import ProgressFilter
+from pydantic import BaseModel
+
+from .models import (
+    Chunk,
+    ChunkContext,
+    GraphEntity,
+    GraphEvidence,
+    GraphExtraction,
+    GraphExtractionRecord,
+    GraphQueryResult,
+    GraphRelation,
+    IndexManifest,
+    KnowledgeGraph,
+    ProgressFilter,
+    utc_now_iso,
+)
 from .store import metadata_path
 
 
@@ -31,43 +46,47 @@ RELATION_TYPES = (
     "别名是",
 )
 
-_TYPE_ALIASES = {
-    "person": "人物",
-    "people": "人物",
-    "character": "人物",
-    "角色": "人物",
-    "人": "人物",
-    "place": "地点",
-    "location": "地点",
-    "loc": "地点",
-    "地点": "地点",
-    "organization": "组织",
-    "organisation": "组织",
-    "org": "组织",
-    "组织": "组织",
-    "item": "物品",
-    "object": "物品",
-    "thing": "物品",
-    "物": "物品",
-    "物品": "物品",
-    "event": "事件",
-    "事件": "事件",
-    "concept": "概念",
-    "概念": "概念",
-}
+_TYPE_ALIASES = MappingProxyType(
+    {
+        "person": "人物",
+        "people": "人物",
+        "character": "人物",
+        "角色": "人物",
+        "人": "人物",
+        "place": "地点",
+        "location": "地点",
+        "loc": "地点",
+        "地点": "地点",
+        "organization": "组织",
+        "organisation": "组织",
+        "org": "组织",
+        "组织": "组织",
+        "item": "物品",
+        "object": "物品",
+        "thing": "物品",
+        "物": "物品",
+        "物品": "物品",
+        "event": "事件",
+        "事件": "事件",
+        "concept": "概念",
+        "概念": "概念",
+    }
+)
 
-_RELATION_ALIASES = {
-    "参加": "参与事件",
-    "参与": "参与事件",
-    "参与了": "参与事件",
-    "别名": "别名是",
-    "化名": "别名是",
-    "身份": "身份是",
-    "说": "说过",
-    "说过": "说过",
-    "造成": "导致",
-    "引发": "导致",
-}
+_RELATION_ALIASES = MappingProxyType(
+    {
+        "参加": "参与事件",
+        "参与": "参与事件",
+        "参与了": "参与事件",
+        "别名": "别名是",
+        "化名": "别名是",
+        "身份": "身份是",
+        "说": "说过",
+        "说过": "说过",
+        "造成": "导致",
+        "引发": "导致",
+    }
+)
 
 _NAME_KEYS = ("name", "名称", "entity", "实体", "text", "文本")
 _TYPE_KEYS = ("type", "types", "类型", "entity_type", "entity_types")
@@ -82,35 +101,35 @@ def graph_path(metadata_dir: Path, collection: str) -> Path:
     return metadata_path(metadata_dir, collection) / "graph.json"
 
 
-def read_chunks(*, metadata_dir: Path, collection: str) -> list[dict[str, Any]]:
+def read_chunks(*, metadata_dir: Path, collection: str) -> list[Chunk]:
     path = metadata_path(metadata_dir, collection) / "chunks.jsonl"
     if not path.is_file():
         raise FileNotFoundError(
             f"chunk metadata not found: {path}; run the index command first"
         )
 
-    chunks: list[dict[str, Any]] = []
+    chunks: list[Chunk] = []
     with path.open("r", encoding="utf-8") as file:
         for line_number, line in enumerate(file, start=1):
             stripped = line.strip()
             if not stripped:
                 continue
             try:
-                chunks.append(json.loads(stripped))
-            except json.JSONDecodeError as exc:
-                raise ValueError(f"invalid JSON in {path}:{line_number}: {exc}") from exc
+                chunks.append(Chunk.model_validate_json(stripped))
+            except ValueError as exc:
+                raise ValueError(f"invalid chunk metadata in {path}:{line_number}: {exc}") from exc
     return chunks
 
 
-def read_graph(path: Path) -> dict[str, Any]:
-    return json.loads(path.read_text(encoding="utf-8"))
+def read_graph(path: Path) -> KnowledgeGraph:
+    return KnowledgeGraph.model_validate_json(path.read_text(encoding="utf-8"))
 
 
-def write_graph(path: Path, graph: dict[str, Any]) -> None:
+def write_graph(path: Path, graph: KnowledgeGraph) -> None:
     finalize_graph(graph)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        json.dumps(graph, ensure_ascii=False, indent=2) + "\n",
+        json.dumps(graph.model_dump(mode="json"), ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
 
@@ -118,79 +137,55 @@ def write_graph(path: Path, graph: dict[str, Any]) -> None:
 def empty_graph(
     *,
     collection: str,
-    manifest: dict[str, Any] | None = None,
+    manifest: IndexManifest | None = None,
     llm_model: str = "",
-) -> dict[str, Any]:
-    now = _utc_now()
-    return {
-        "schema_version": GRAPH_SCHEMA_VERSION,
-        "collection": collection,
-        "source_path": manifest.get("source_path", "") if manifest else "",
-        "llm_model": llm_model,
-        "created_at": now,
-        "updated_at": now,
-        "progress_limit": "",
-        "processed_chunk_count": 0,
-        "entity_count": 0,
-        "relation_count": 0,
-        "entities": [],
-        "relations": [],
-        "extractions": [],
-    }
+) -> KnowledgeGraph:
+    now = utc_now_iso()
+    return KnowledgeGraph(
+        schema_version=GRAPH_SCHEMA_VERSION,
+        collection=collection,
+        source_path=manifest.source_path if manifest else "",
+        llm_model=llm_model,
+        created_at=now,
+        updated_at=now,
+    )
 
 
 def update_graph_metadata(
-    graph: dict[str, Any],
+    graph: KnowledgeGraph,
     *,
     collection: str,
-    manifest: dict[str, Any],
+    manifest: IndexManifest,
     llm_model: str,
     progress: ProgressFilter,
     selected_chunk_count: int,
 ) -> None:
-    ensure_graph_shape(graph)
-    graph["schema_version"] = GRAPH_SCHEMA_VERSION
-    graph["collection"] = collection
-    graph["source_path"] = manifest.get("source_path", "")
-    graph["llm_model"] = llm_model
-    graph["updated_at"] = _utc_now()
-    graph["progress_limit"] = progress.description
-    graph["selected_chunk_count"] = selected_chunk_count
-    graph["processed_chunk_count"] = len(graph["extractions"])
-    graph["entity_count"] = len(graph["entities"])
-    graph["relation_count"] = len(graph["relations"])
+    graph.schema_version = GRAPH_SCHEMA_VERSION
+    graph.collection = collection
+    graph.source_path = manifest.source_path
+    graph.llm_model = llm_model
+    graph.updated_at = utc_now_iso()
+    graph.progress_limit = progress.description
+    graph.selected_chunk_count = selected_chunk_count
+    graph.processed_chunk_count = len(graph.extractions)
+    graph.entity_count = len(graph.entities)
+    graph.relation_count = len(graph.relations)
 
 
-def ensure_graph_shape(graph: dict[str, Any]) -> None:
-    now = _utc_now()
-    graph.setdefault("schema_version", GRAPH_SCHEMA_VERSION)
-    graph.setdefault("collection", "")
-    graph.setdefault("source_path", "")
-    graph.setdefault("llm_model", "")
-    graph.setdefault("created_at", now)
-    graph.setdefault("updated_at", now)
-    graph.setdefault("progress_limit", "")
-    graph.setdefault("entities", [])
-    graph.setdefault("relations", [])
-    graph.setdefault("extractions", [])
-    graph.setdefault("processed_chunk_count", len(graph["extractions"]))
-    graph.setdefault("entity_count", len(graph["entities"]))
-    graph.setdefault("relation_count", len(graph["relations"]))
-
-
-def processed_chunk_ids(graph: dict[str, Any]) -> set[str]:
-    ensure_graph_shape(graph)
+def processed_chunk_ids(graph: KnowledgeGraph) -> set[str]:
     return {
-        str(extraction.get("chunk_id", ""))
-        for extraction in graph["extractions"]
-        if extraction.get("chunk_id")
+        extraction.chunk_id
+        for extraction in graph.extractions
+        if extraction.chunk_id
     }
 
 
-def build_extraction_prompt(chunk: dict[str, Any]) -> str:
+def build_extraction_prompt(chunk: Chunk | ChunkContext | Mapping[str, Any]) -> str:
+    context = _chunk_context(chunk)
+    text = _chunk_text(chunk)
     entity_types = "、".join(ENTITY_TYPES)
     relation_types = "、".join(RELATION_TYPES)
-    chapter = chunk.get("chapter") or "(无章节)"
+    chapter = context.chapter or "(无章节)"
     return (
         "你是一个面向小说和长文档的本地知识图谱抽取器。只根据给定片段抽取事实，"
         "不要补充片段之外的信息。\n\n"
@@ -206,20 +201,23 @@ def build_extraction_prompt(chunk: dict[str, Any]) -> str:
         f"实体类型只能从这些类型中选择：{entity_types}。\n"
         f"关系尽量从这些类型中选择：{relation_types}。\n"
         "证据必须是片段中的原文短句或短语。没有可抽取内容时返回空数组。\n\n"
-        f"chunk_id: {chunk.get('id', '')}\n"
-        f"source_path: {chunk.get('source_path', '')}\n"
+        f"chunk_id: {context.chunk_id}\n"
+        f"source_path: {context.source_path}\n"
         f"chapter: {chapter}\n"
-        f"lines: {chunk.get('line_start', '')}-{chunk.get('line_end', '')}\n\n"
+        f"lines: {context.line_start}-{context.line_end}\n\n"
         "片段正文：\n"
-        f"{chunk.get('text', '')}"
+        f"{text}"
     )
 
 
-def parse_graph_extraction(raw: str | dict[str, Any], chunk: dict[str, Any]) -> dict[str, Any]:
+def parse_graph_extraction(
+    raw: str | Mapping[str, Any],
+    chunk: Chunk | ChunkContext | Mapping[str, Any],
+) -> GraphExtraction:
     payload = _parse_json_object(raw)
     context = _chunk_context(chunk)
-    entities: list[dict[str, Any]] = []
-    relations: list[dict[str, Any]] = []
+    entities: list[GraphEntity] = []
+    relations: list[GraphRelation] = []
 
     for item in _as_list(_get_any(payload, ("entities", "实体"), [])):
         entity = _parse_entity(item, context)
@@ -233,49 +231,46 @@ def parse_graph_extraction(raw: str | dict[str, Any], chunk: dict[str, Any]) -> 
         if relation is not None:
             relations.append(relation)
 
-    return {"entities": entities, "relations": relations}
+    return GraphExtraction(entities=entities, relations=relations)
 
 
 def merge_extraction(
-    graph: dict[str, Any],
-    extraction: dict[str, Any],
-    chunk: dict[str, Any],
+    graph: KnowledgeGraph,
+    extraction: GraphExtraction,
+    chunk: Chunk | ChunkContext | Mapping[str, Any],
 ) -> None:
-    ensure_graph_shape(graph)
     alias_index = _build_alias_index(graph)
 
-    for entity in extraction.get("entities", []):
+    for entity in extraction.entities:
         _merge_entity(graph, entity, alias_index)
 
-    for relation in extraction.get("relations", []):
+    for relation in extraction.relations:
         subject = _merge_entity(
             graph,
-            {
-                "name": relation["subject"],
-                "types": [],
-                "aliases": [],
-                "mentions": [_chunk_context(relation)],
-                "evidence": [],
-            },
+            GraphEntity(
+                name=relation.subject,
+                mentions=[_chunk_context(relation)],
+            ),
             alias_index,
         )
         object_ = _merge_entity(
             graph,
-            {
-                "name": relation["object"],
-                "types": [],
-                "aliases": [],
-                "mentions": [_chunk_context(relation)],
-                "evidence": [],
-            },
+            GraphEntity(
+                name=relation.object,
+                mentions=[_chunk_context(relation)],
+            ),
             alias_index,
         )
-        relation = deepcopy(relation)
-        relation["subject_entity"] = subject["name"]
-        relation["object_entity"] = object_["name"]
-        if not _has_mapping(
-            graph["relations"],
-            relation,
+        merged_relation = relation.model_copy(
+            update={
+                "subject_entity": subject.name,
+                "object_entity": object_.name,
+            },
+            deep=True,
+        )
+        if not _has_same_values(
+            graph.relations,
+            merged_relation,
             keys=(
                 "subject",
                 "relation",
@@ -286,96 +281,95 @@ def merge_extraction(
                 "line_end",
             ),
         ):
-            graph["relations"].append(relation)
+            graph.relations.append(merged_relation)
 
     _mark_extracted(graph, chunk, extraction)
     finalize_graph(graph)
 
 
-def finalize_graph(graph: dict[str, Any]) -> None:
-    ensure_graph_shape(graph)
-    for entity in graph["entities"]:
-        entity["types"] = sorted(set(_as_strings(entity.get("types"))))
-        aliases = [
-            alias
-            for alias in _as_strings(entity.get("aliases"))
-            if alias != entity.get("name")
-        ]
-        entity["aliases"] = sorted(set(aliases))
-        entity["mentions"] = sorted(
-            entity.get("mentions", []),
+def finalize_graph(graph: KnowledgeGraph) -> None:
+    for entity in graph.entities:
+        entity.types = sorted(set(_as_strings(entity.types)))
+        entity.aliases = sorted(
+            {
+                alias
+                for alias in _as_strings(entity.aliases)
+                if alias != entity.name
+            }
+        )
+        entity.mentions = sorted(
+            entity.mentions,
             key=lambda item: (
-                _int_value(item.get("chunk_index")),
-                _int_value(item.get("line_start")),
+                _int_value(item.chunk_index),
+                _int_value(item.line_start),
             ),
         )
-        entity["evidence"] = sorted(
-            entity.get("evidence", []),
+        entity.evidence = sorted(
+            entity.evidence,
             key=lambda item: (
-                _int_value(item.get("chunk_index")),
-                _int_value(item.get("line_start")),
+                _int_value(item.chunk_index),
+                _int_value(item.line_start),
             ),
         )
 
-    graph["entities"] = sorted(graph["entities"], key=lambda item: item["name"])
-    graph["relations"] = sorted(
-        graph["relations"],
+    graph.entities = sorted(graph.entities, key=lambda item: item.name)
+    graph.relations = sorted(
+        graph.relations,
         key=lambda item: (
-            _int_value(item.get("chunk_index")),
-            _int_value(item.get("line_start")),
-            item.get("subject", ""),
-            item.get("relation", ""),
-            item.get("object", ""),
+            _int_value(item.chunk_index),
+            _int_value(item.line_start),
+            item.subject,
+            item.relation,
+            item.object,
         ),
     )
-    graph["extractions"] = sorted(
-        graph["extractions"],
+    graph.extractions = sorted(
+        graph.extractions,
         key=lambda item: (
-            _int_value(item.get("chunk_index")),
-            str(item.get("chunk_id", "")),
+            _int_value(item.chunk_index),
+            item.chunk_id,
         ),
     )
-    graph["processed_chunk_count"] = len(graph["extractions"])
-    graph["entity_count"] = len(graph["entities"])
-    graph["relation_count"] = len(graph["relations"])
+    graph.processed_chunk_count = len(graph.extractions)
+    graph.entity_count = len(graph.entities)
+    graph.relation_count = len(graph.relations)
 
 
 def query_graph(
-    graph: dict[str, Any],
+    graph: KnowledgeGraph,
     query: str,
     *,
     progress: ProgressFilter | None = None,
-) -> dict[str, list[dict[str, Any]]]:
-    ensure_graph_shape(graph)
+) -> GraphQueryResult:
     needle = _case_key(query)
     if not needle:
-        return {"entities": [], "relations": []}
+        return GraphQueryResult()
 
-    relations: list[dict[str, Any]] = []
+    relations: list[GraphRelation] = []
     relation_entities: set[str] = set()
-    for relation in graph["relations"]:
+    for relation in graph.relations:
         if not _allowed(progress, relation):
             continue
         if _matches_relation(relation, needle):
-            relations.append(deepcopy(relation))
-            relation_entities.add(str(relation.get("subject", "")))
-            relation_entities.add(str(relation.get("object", "")))
-            relation_entities.add(str(relation.get("subject_entity", "")))
-            relation_entities.add(str(relation.get("object_entity", "")))
+            relations.append(relation.model_copy(deep=True))
+            relation_entities.add(relation.subject)
+            relation_entities.add(relation.object)
+            relation_entities.add(relation.subject_entity)
+            relation_entities.add(relation.object_entity)
 
-    entities: list[dict[str, Any]] = []
-    for entity in graph["entities"]:
+    entities: list[GraphEntity] = []
+    for entity in graph.entities:
         filtered = _filter_entity(entity, progress)
         if filtered is None:
             continue
-        if _matches_entity(filtered, needle) or filtered["name"] in relation_entities:
+        if _matches_entity(filtered, needle) or filtered.name in relation_entities:
             entities.append(filtered)
 
-    return {"entities": entities, "relations": relations}
+    return GraphQueryResult(entities=entities, relations=relations)
 
 
-def _parse_json_object(raw: str | dict[str, Any]) -> dict[str, Any]:
-    if isinstance(raw, dict):
+def _parse_json_object(raw: str | Mapping[str, Any]) -> Mapping[str, Any]:
+    if isinstance(raw, Mapping):
         return raw
 
     text = raw.strip()
@@ -388,18 +382,18 @@ def _parse_json_object(raw: str | dict[str, Any]) -> dict[str, Any]:
             raise
         parsed = json.loads(text[start : end + 1])
 
-    if not isinstance(parsed, dict):
+    if not isinstance(parsed, Mapping):
         raise ValueError(f"expected a JSON object, got {type(parsed).__name__}")
     return parsed
 
 
-def _parse_entity(item: Any, context: dict[str, Any]) -> dict[str, Any] | None:
+def _parse_entity(item: Any, context: ChunkContext) -> GraphEntity | None:
     if isinstance(item, str):
         name = _normalize_text(item)
         types: list[str] = []
         aliases: list[str] = []
         evidence = ""
-    elif isinstance(item, dict):
+    elif isinstance(item, Mapping):
         name = _normalize_text(_get_any(item, _NAME_KEYS, ""))
         types = [
             _normalize_entity_type(value)
@@ -416,20 +410,21 @@ def _parse_entity(item: Any, context: dict[str, Any]) -> dict[str, Any] | None:
     if not name:
         return None
 
-    entity = {
-        "name": name,
-        "types": [value for value in types if value],
-        "aliases": [alias for alias in aliases if alias and alias != name],
-        "mentions": [context],
-        "evidence": [],
-    }
+    entity = GraphEntity(
+        name=name,
+        types=[value for value in types if value],
+        aliases=[alias for alias in aliases if alias and alias != name],
+        mentions=[context.model_copy(deep=True)],
+    )
     if evidence:
-        entity["evidence"].append({**context, "text": evidence})
+        entity.evidence.append(
+            GraphEvidence(**context.model_dump(mode="json"), text=evidence)
+        )
     return entity
 
 
-def _parse_relation(item: Any, context: dict[str, Any]) -> dict[str, Any] | None:
-    if not isinstance(item, dict):
+def _parse_relation(item: Any, context: ChunkContext) -> GraphRelation | None:
+    if not isinstance(item, Mapping):
         return None
 
     subject = _normalize_text(_get_any(item, _SUBJECT_KEYS, ""))
@@ -439,59 +434,53 @@ def _parse_relation(item: Any, context: dict[str, Any]) -> dict[str, Any] | None
     if not subject or not relation or not object_:
         return None
 
-    return {
-        "subject": subject,
-        "relation": relation,
-        "object": object_,
-        "evidence": evidence,
-        **context,
-    }
+    return GraphRelation(
+        subject=subject,
+        relation=relation,
+        object=object_,
+        evidence=evidence,
+        **context.model_dump(mode="json"),
+    )
 
 
 def _merge_entity(
-    graph: dict[str, Any],
-    incoming: dict[str, Any],
+    graph: KnowledgeGraph,
+    incoming: GraphEntity,
     alias_index: dict[str, int],
-) -> dict[str, Any]:
-    name = _normalize_text(incoming.get("name", ""))
-    aliases = [_normalize_text(alias) for alias in _as_strings(incoming.get("aliases"))]
+) -> GraphEntity:
+    name = _normalize_text(incoming.name)
+    aliases = [_normalize_text(alias) for alias in _as_strings(incoming.aliases)]
     aliases = [alias for alias in aliases if alias and alias != name]
     index = _find_entity_index(alias_index, [name, *aliases])
 
     if index is None:
-        entity = {
-            "name": name,
-            "types": [],
-            "aliases": [],
-            "mentions": [],
-            "evidence": [],
-        }
-        graph["entities"].append(entity)
-        index = len(graph["entities"]) - 1
+        entity = GraphEntity(name=name)
+        graph.entities.append(entity)
+        index = len(graph.entities) - 1
     else:
-        entity = graph["entities"][index]
-        if name and name != entity["name"]:
+        entity = graph.entities[index]
+        if name and name != entity.name:
             aliases.append(name)
 
-    for type_ in _as_strings(incoming.get("types")):
+    for type_ in _as_strings(incoming.types):
         normalized = _normalize_entity_type(type_)
-        if normalized and normalized not in entity["types"]:
-            entity["types"].append(normalized)
+        if normalized and normalized not in entity.types:
+            entity.types.append(normalized)
     for alias in aliases:
-        if alias not in entity["aliases"]:
-            entity["aliases"].append(alias)
-    for mention in incoming.get("mentions", []):
-        if not _has_mapping(
-            entity["mentions"],
+        if alias not in entity.aliases:
+            entity.aliases.append(alias)
+    for mention in incoming.mentions:
+        if not _has_same_values(
+            entity.mentions,
             mention,
             keys=("chunk_id", "line_start", "line_end"),
         ):
-            entity["mentions"].append(deepcopy(mention))
-    for evidence in incoming.get("evidence", []):
-        if not _has_mapping(entity["evidence"], evidence, keys=("chunk_id", "text")):
-            entity["evidence"].append(deepcopy(evidence))
+            entity.mentions.append(mention.model_copy(deep=True))
+    for evidence in incoming.evidence:
+        if not _has_same_values(entity.evidence, evidence, keys=("chunk_id", "text")):
+            entity.evidence.append(evidence.model_copy(deep=True))
 
-    for value in [entity["name"], *entity["aliases"]]:
+    for value in [entity.name, *entity.aliases]:
         key = _case_key(value)
         if key:
             alias_index[key] = index
@@ -499,26 +488,26 @@ def _merge_entity(
 
 
 def _mark_extracted(
-    graph: dict[str, Any],
-    chunk: dict[str, Any],
-    extraction: dict[str, Any],
+    graph: KnowledgeGraph,
+    chunk: Chunk | ChunkContext | Mapping[str, Any],
+    extraction: GraphExtraction,
 ) -> None:
     record = _chunk_context(chunk)
-    if _has_mapping(graph["extractions"], record, keys=("chunk_id",)):
+    if _has_same_values(graph.extractions, record, keys=("chunk_id",)):
         return
-    graph["extractions"].append(
-        {
-            **record,
-            "entity_count": len(extraction.get("entities", [])),
-            "relation_count": len(extraction.get("relations", [])),
-        }
+    graph.extractions.append(
+        GraphExtractionRecord(
+            **record.model_dump(mode="json"),
+            entity_count=len(extraction.entities),
+            relation_count=len(extraction.relations),
+        )
     )
 
 
-def _build_alias_index(graph: dict[str, Any]) -> dict[str, int]:
+def _build_alias_index(graph: KnowledgeGraph) -> dict[str, int]:
     index: dict[str, int] = {}
-    for entity_index, entity in enumerate(graph.get("entities", [])):
-        for value in [entity.get("name", ""), *_as_strings(entity.get("aliases"))]:
+    for entity_index, entity in enumerate(graph.entities):
+        for value in [entity.name, *_as_strings(entity.aliases)]:
             key = _case_key(value)
             if key:
                 index.setdefault(key, entity_index)
@@ -534,67 +523,90 @@ def _find_entity_index(alias_index: dict[str, int], values: list[str]) -> int | 
 
 
 def _filter_entity(
-    entity: dict[str, Any],
+    entity: GraphEntity,
     progress: ProgressFilter | None,
-) -> dict[str, Any] | None:
-    filtered = deepcopy(entity)
+) -> GraphEntity | None:
+    filtered = entity.model_copy(deep=True)
     if progress is None:
         return filtered
 
-    filtered["mentions"] = [
-        mention for mention in filtered.get("mentions", []) if _allowed(progress, mention)
+    filtered.mentions = [
+        mention for mention in filtered.mentions if _allowed(progress, mention)
     ]
-    filtered["evidence"] = [
-        evidence for evidence in filtered.get("evidence", []) if _allowed(progress, evidence)
+    filtered.evidence = [
+        evidence for evidence in filtered.evidence if _allowed(progress, evidence)
     ]
-    if not filtered["mentions"] and not filtered["evidence"]:
+    if not filtered.mentions and not filtered.evidence:
         return None
     return filtered
 
 
-def _matches_entity(entity: dict[str, Any], needle: str) -> bool:
+def _matches_entity(entity: GraphEntity, needle: str) -> bool:
     values = [
-        entity.get("name", ""),
-        *_as_strings(entity.get("aliases")),
-        *_as_strings(entity.get("types")),
-        *[evidence.get("text", "") for evidence in entity.get("evidence", [])],
+        entity.name,
+        *_as_strings(entity.aliases),
+        *_as_strings(entity.types),
+        *[evidence.text for evidence in entity.evidence],
     ]
     return any(needle in _case_key(value) for value in values)
 
 
-def _matches_relation(relation: dict[str, Any], needle: str) -> bool:
+def _matches_relation(relation: GraphRelation, needle: str) -> bool:
     values = (
-        relation.get("subject", ""),
-        relation.get("subject_entity", ""),
-        relation.get("relation", ""),
-        relation.get("object", ""),
-        relation.get("object_entity", ""),
-        relation.get("evidence", ""),
+        relation.subject,
+        relation.subject_entity,
+        relation.relation,
+        relation.object,
+        relation.object_entity,
+        relation.evidence,
     )
     return any(needle in _case_key(value) for value in values)
 
 
-def _allowed(progress: ProgressFilter | None, fields: dict[str, Any]) -> bool:
+def _allowed(progress: ProgressFilter | None, fields: BaseModel) -> bool:
     if progress is None:
         return True
     try:
         return progress.allows(fields)
-    except KeyError:
+    except ValueError:
         return False
 
 
-def _chunk_context(chunk: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "chunk_id": str(chunk.get("chunk_id") or chunk.get("id") or ""),
-        "source_path": str(chunk.get("source_path", "")),
-        "chunk_index": _int_value(chunk.get("chunk_index")),
-        "line_start": _int_value(chunk.get("line_start")),
-        "line_end": _int_value(chunk.get("line_end")),
-        "chapter": str(chunk.get("chapter", "")),
-    }
+def _chunk_context(chunk: Chunk | ChunkContext | Mapping[str, Any]) -> ChunkContext:
+    if isinstance(chunk, Chunk):
+        return ChunkContext(
+            chunk_id=chunk.id,
+            source_path=chunk.source_path,
+            chunk_index=chunk.chunk_index,
+            line_start=chunk.line_start,
+            line_end=chunk.line_end,
+            chapter=chunk.chapter,
+        )
+    if isinstance(chunk, ChunkContext):
+        return ChunkContext.model_validate(chunk)
+    if isinstance(chunk, BaseModel):
+        data = chunk.model_dump(mode="json")
+    else:
+        data = chunk
+    return ChunkContext(
+        chunk_id=str(data.get("chunk_id") or data.get("id") or ""),
+        source_path=str(data.get("source_path", "")),
+        chunk_index=_int_value(data.get("chunk_index")),
+        line_start=_int_value(data.get("line_start")),
+        line_end=_int_value(data.get("line_end")),
+        chapter=str(data.get("chapter", "")),
+    )
 
 
-def _get_any(mapping: dict[str, Any], keys: tuple[str, ...], default: Any = None) -> Any:
+def _chunk_text(chunk: Chunk | ChunkContext | Mapping[str, Any]) -> str:
+    if isinstance(chunk, Chunk):
+        return chunk.text
+    if isinstance(chunk, BaseModel):
+        return str(getattr(chunk, "text", ""))
+    return str(chunk.get("text", ""))
+
+
+def _get_any(mapping: Mapping[str, Any], keys: tuple[str, ...], default: Any = None) -> Any:
     for key in keys:
         if key in mapping:
             return mapping[key]
@@ -636,20 +648,19 @@ def _case_key(value: Any) -> str:
     return _normalize_text(value).casefold()
 
 
-def _has_mapping(
-    items: list[dict[str, Any]],
-    candidate: dict[str, Any],
+def _has_same_values(
+    items: list[BaseModel],
+    candidate: BaseModel,
     *,
     keys: tuple[str, ...],
 ) -> bool:
-    return any(all(item.get(key) == candidate.get(key) for key in keys) for item in items)
+    return any(
+        all(getattr(item, key) == getattr(candidate, key) for key in keys)
+        for item in items
+    )
 
 
 def _int_value(value: Any) -> int:
     if value in (None, ""):
         return 0
     return int(value)
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()

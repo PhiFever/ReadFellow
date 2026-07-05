@@ -8,6 +8,7 @@ from readfellow.graph import (
     parse_graph_extraction,
     query_graph,
 )
+from readfellow.models import Chunk
 from readfellow.progress import ProgressFilter
 
 
@@ -17,16 +18,21 @@ def chunk(
     line_start: int = 1,
     line_end: int = 8,
     chapter: str = "第一章 开始",
-) -> dict:
-    return {
-        "id": f"chunk_{chunk_index:06d}",
-        "source_path": "corpus/samples/novel.txt",
-        "chunk_index": chunk_index,
-        "line_start": line_start,
-        "line_end": line_end,
-        "chapter": chapter,
-        "text": "向山被人称作武神。他帮助了尤基。",
-    }
+) -> Chunk:
+    text = "向山被人称作武神。他帮助了尤基。"
+    return Chunk(
+        id=f"chunk_{chunk_index:06d}",
+        source_path="corpus/samples/novel.txt",
+        source_hash="source-hash",
+        chunk_index=chunk_index,
+        text=text,
+        text_hash=f"text-hash-{chunk_index}",
+        line_start=line_start,
+        line_end=line_end,
+        byte_start=0,
+        byte_end=len(text.encode("utf-8")),
+        chapter=chapter,
+    )
 
 
 def test_parse_and_merge_graph_extractions() -> None:
@@ -57,15 +63,15 @@ def test_parse_and_merge_graph_extractions() -> None:
     }
     merge_extraction(graph, parse_graph_extraction(second_payload, second), second)
 
-    xiangshan = next(entity for entity in graph["entities"] if entity["name"] == "向山")
-    assert xiangshan["types"] == ["人物"]
-    assert xiangshan["aliases"] == ["武神", "老向"]
-    assert len(xiangshan["mentions"]) == 2
-    assert graph["entity_count"] == 2
-    assert graph["relation_count"] == 3
-    identity = next(relation for relation in graph["relations"] if relation["relation"] == "身份是")
-    assert identity["object"] == "武神"
-    assert identity["object_entity"] == "向山"
+    xiangshan = next(entity for entity in graph.entities if entity.name == "向山")
+    assert xiangshan.types == ["人物"]
+    assert xiangshan.aliases == ["武神", "老向"]
+    assert len(xiangshan.mentions) == 2
+    assert graph.entity_count == 2
+    assert graph.relation_count == 3
+    identity = next(relation for relation in graph.relations if relation.relation == "身份是")
+    assert identity.object == "武神"
+    assert identity.object_entity == "向山"
 
 
 def test_graph_query_matches_entity_alias_and_relation_keyword() -> None:
@@ -82,11 +88,11 @@ def test_graph_query_matches_entity_alias_and_relation_keyword() -> None:
     merge_extraction(graph, parse_graph_extraction(data, chunk()), chunk())
 
     alias_result = query_graph(graph, "武神")
-    assert [entity["name"] for entity in alias_result["entities"]] == ["向山"]
+    assert [entity.name for entity in alias_result.entities] == ["向山"]
 
     relation_result = query_graph(graph, "帮助")
-    assert [relation["relation"] for relation in relation_result["relations"]] == ["帮助"]
-    assert {entity["name"] for entity in relation_result["entities"]} == {"向山", "尤基"}
+    assert [relation.relation for relation in relation_result.relations] == ["帮助"]
+    assert {entity.name for entity in relation_result.entities} == {"向山", "尤基"}
 
 
 def test_graph_query_progress_filters_future_relations() -> None:
@@ -128,12 +134,12 @@ def test_graph_query_progress_filters_future_relations() -> None:
 
     result = query_graph(graph, "向山", progress=progress)
 
-    assert [(r["relation"], r["line_end"], r["chunk_index"]) for r in result["relations"]] == [
+    assert [(r.relation, r.line_end, r.chunk_index) for r in result.relations] == [
         ("帮助", 8, 0)
     ]
-    assert {entity["name"] for entity in result["entities"]} == {"向山", "尤基"}
+    assert {entity.name for entity in result.entities} == {"向山", "尤基"}
     assert all(
-        mention["line_end"] <= 20
-        for entity in result["entities"]
-        for mention in entity["mentions"]
+        mention.line_end <= 20
+        for entity in result.entities
+        for mention in entity.mentions
     )

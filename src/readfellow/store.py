@@ -1,17 +1,15 @@
 from __future__ import annotations
 
-from dataclasses import asdict
 import json
 from pathlib import Path
 import shutil
-from typing import Any
 
 import zvec
 from zvec import CollectionSchema, DataType, Doc, FieldSchema, FtsIndexParam, Query
 from zvec import VectorSchema
 from zvec.model.param.query import Fts
 
-from .chunking import Chunk
+from .models import Chunk, IndexManifest, ZvecChunkFields
 
 
 EMBEDDING_FIELD = "embedding"
@@ -84,22 +82,10 @@ def open_or_create_collection(
 
 
 def chunk_to_doc(chunk: Chunk, vector: list[float], *, model: str) -> Doc:
+    fields = ZvecChunkFields.from_chunk(chunk, model=model)
     return Doc(
         id=chunk.id,
-        fields={
-            "source_path": chunk.source_path,
-            "source_hash": chunk.source_hash,
-            "chunk_index": chunk.chunk_index,
-            "line_start": chunk.line_start,
-            "line_end": chunk.line_end,
-            "byte_start": chunk.byte_start,
-            "byte_end": chunk.byte_end,
-            "chapter": chunk.chapter,
-            "text_hash": chunk.text_hash,
-            "char_count": chunk.char_count,
-            "model": model,
-            TEXT_FIELD: chunk.text,
-        },
+        fields=fields.model_dump(mode="json"),
         vectors={EMBEDDING_FIELD: vector},
     )
 
@@ -108,23 +94,23 @@ def write_manifest(
     *,
     metadata_dir: Path,
     collection: str,
-    manifest: dict[str, Any],
+    manifest: IndexManifest,
     chunks: list[Chunk],
 ) -> None:
     meta = metadata_path(metadata_dir, collection)
     meta.mkdir(parents=True, exist_ok=True)
     (meta / "manifest.json").write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+        json.dumps(manifest.model_dump(mode="json"), ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
     with (meta / "chunks.jsonl").open("w", encoding="utf-8") as file:
         for chunk in chunks:
-            file.write(json.dumps(asdict(chunk), ensure_ascii=False) + "\n")
+            file.write(json.dumps(chunk.model_dump(mode="json"), ensure_ascii=False) + "\n")
 
 
-def read_manifest(*, metadata_dir: Path, collection: str) -> dict[str, Any]:
+def read_manifest(*, metadata_dir: Path, collection: str) -> IndexManifest:
     path = metadata_path(metadata_dir, collection) / "manifest.json"
-    return json.loads(path.read_text(encoding="utf-8"))
+    return IndexManifest.model_validate_json(path.read_text(encoding="utf-8"))
 
 
 def query_vector(coll, vector: list[float], *, top_k: int, filter: str | None = None):

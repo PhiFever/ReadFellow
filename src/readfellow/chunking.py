@@ -1,45 +1,17 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import hashlib
 from pathlib import Path
 import re
 from typing import Iterable
+
+from .models import Chunk, TextUnit
 
 
 CHAPTER_RE = re.compile(
     r"^\s*(第[0-9零〇一二两三四五六七八九十百千万]+[章节卷回部篇].*|"
     r"(序章|楔子|引子|尾声|后记|番外).*)\s*$"
 )
-
-
-@dataclass(frozen=True)
-class TextUnit:
-    text: str
-    line_start: int
-    line_end: int
-    byte_start: int
-    byte_end: int
-    chapter: str
-
-
-@dataclass(frozen=True)
-class Chunk:
-    id: str
-    source_path: str
-    source_hash: str
-    chunk_index: int
-    text: str
-    text_hash: str
-    line_start: int
-    line_end: int
-    byte_start: int
-    byte_end: int
-    chapter: str
-
-    @property
-    def char_count(self) -> int:
-        return len(self.text)
 
 
 def sha256_text(text: str) -> str:

@@ -4,7 +4,21 @@ from pathlib import Path
 
 import pytest
 
+from readfellow.models import IndexManifest
 from readfellow.progress import build_progress_filter, chapter_boundaries
+
+
+def manifest_for(source: Path) -> IndexManifest:
+    return IndexManifest(
+        collection="sample",
+        collection_path="indexes/sample",
+        source_path=str(source),
+        model="test-model",
+        embedding_dimension=2,
+        chunk_count=0,
+        chunk_chars=100,
+        overlap_chars=10,
+    )
 
 
 def test_chapter_boundaries_and_progress_filter(tmp_path: Path) -> None:
@@ -30,7 +44,7 @@ def test_chapter_boundaries_and_progress_filter(tmp_path: Path) -> None:
     ]
 
     progress = build_progress_filter(
-        manifest={"source_path": str(source)},
+        manifest=manifest_for(source),
         max_chapter=2,
     )
 
@@ -45,7 +59,7 @@ def test_progress_filter_combines_line_and_chunk_limits(tmp_path: Path) -> None:
     source.write_text("第一章 开始\n一\n第二章 继续\n二\n", encoding="utf-8")
 
     progress = build_progress_filter(
-        manifest={"source_path": str(source)},
+        manifest=manifest_for(source),
         max_chapter=2,
         max_line=3,
         max_chunk_index=4,
@@ -62,4 +76,4 @@ def test_progress_rejects_unknown_chapter(tmp_path: Path) -> None:
     source.write_text("第一章 开始\n一\n", encoding="utf-8")
 
     with pytest.raises(ValueError, match="exceeds detected chapter count"):
-        build_progress_filter(manifest={"source_path": str(source)}, max_chapter=2)
+        build_progress_filter(manifest=manifest_for(source), max_chapter=2)
