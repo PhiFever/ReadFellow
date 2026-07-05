@@ -95,6 +95,23 @@ def test_graph_query_matches_entity_alias_and_relation_keyword() -> None:
     assert {entity.name for entity in relation_result.entities} == {"向山", "尤基"}
 
 
+def test_parse_skips_unknown_relation_types() -> None:
+    extraction = parse_graph_extraction(
+        {
+            "entities": [{"name": "向山", "type": "人物"}],
+            "relations": [
+                {"subject": "向山", "relation": "相关", "object": "武道"},
+                {"subject": "向山", "relation": "帮助", "object": "尤基"},
+            ],
+        },
+        chunk(),
+    )
+
+    assert [(relation.relation, relation.object) for relation in extraction.relations] == [
+        ("帮助", "尤基")
+    ]
+
+
 def test_graph_query_progress_filters_future_relations() -> None:
     graph = empty_graph(collection="sample")
     early = chunk(chunk_index=0, line_start=1, line_end=8)

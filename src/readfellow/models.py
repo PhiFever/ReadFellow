@@ -221,6 +221,8 @@ class OllamaEmbedResponse(ReadFellowModel):
 
 class OllamaGenerateOptions(ReadFellowModel):
     temperature: float = 0.0
+    num_predict: int = 2048
+    repeat_penalty: float = 1.08
 
 
 class OllamaGenerateRequest(ReadFellowModel):
@@ -233,4 +235,6 @@ class OllamaGenerateRequest(ReadFellowModel):
 
 
 class OllamaGenerateResponse(ReadFellowModel):
+    model_config = ConfigDict(extra="allow")
+
     response: str

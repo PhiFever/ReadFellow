@@ -188,7 +188,7 @@ def build_extraction_prompt(chunk: Chunk | ChunkContext | Mapping[str, Any]) -> 
     chapter = context.chapter or "(无章节)"
     return (
         "你是一个面向小说和长文档的本地知识图谱抽取器。只根据给定片段抽取事实，"
-        "不要补充片段之外的信息。\n\n"
+        "不要补充片段之外的信息。不要输出思考过程，不要使用 <think> 标签。\n\n"
         "返回严格 JSON，不要 Markdown，不要解释。JSON schema:\n"
         "{\n"
         '  "entities": [\n'
@@ -199,8 +199,12 @@ def build_extraction_prompt(chunk: Chunk | ChunkContext | Mapping[str, Any]) -> 
         "  ]\n"
         "}\n"
         f"实体类型只能从这些类型中选择：{entity_types}。\n"
-        f"关系尽量从这些类型中选择：{relation_types}。\n"
-        "证据必须是片段中的原文短句或短语。没有可抽取内容时返回空数组。\n\n"
+        f"关系字段只能从这些类型中选择：{relation_types}。"
+        "不能使用“关系”“相关”“有关”等泛化关系。\n"
+        "最多抽取 12 个最重要实体和 18 条最重要关系。"
+        "同一主体、关系、客体只能出现一次。"
+        "证据必须是片段中的原文短句或短语，不超过 60 个汉字。"
+        "不要把整段正文放入证据。没有可抽取内容时返回空数组。\n\n"
         f"chunk_id: {context.chunk_id}\n"
         f"source_path: {context.source_path}\n"
         f"chapter: {chapter}\n"
@@ -641,7 +645,13 @@ def _normalize_entity_type(value: Any) -> str:
 
 def _normalize_relation(value: Any) -> str:
     text = _normalize_text(value)
-    return _RELATION_ALIASES.get(text.casefold(), _RELATION_ALIASES.get(text, text))
+    normalized = _RELATION_ALIASES.get(
+        text.casefold(),
+        _RELATION_ALIASES.get(text, text),
+    )
+    if normalized not in RELATION_TYPES:
+        return ""
+    return normalized
 
 
 def _case_key(value: Any) -> str:

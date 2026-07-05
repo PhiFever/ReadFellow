@@ -113,6 +113,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="extract only the first N eligible chunks",
     )
     graph_index.add_argument("--llm-model", default=DEFAULT_LLM_MODEL)
+    graph_index.add_argument(
+        "--num-predict",
+        type=int,
+        default=4096,
+        help="maximum generated tokens per chunk for Ollama graph extraction",
+    )
+    graph_index.add_argument(
+        "--retries",
+        type=int,
+        default=2,
+        help="retry failed graph extraction this many times per chunk",
+    )
     graph_index.add_argument("--rebuild", action="store_true")
     add_progress_args(graph_index)
 
@@ -389,17 +401,33 @@ def command_graph_index(args: argparse.Namespace) -> int:
         base_url=args.ollama_url,
         model=args.llm_model,
         keep_alive=args.keep_alive,
+        num_predict=args.num_predict,
     )
 
     for index, chunk in enumerate(pending, start=1):
         chunk_id = chunk.id
         print(f"[{index:>5}/{len(pending)}] extracting graph from {chunk_id}", flush=True)
         prompt = build_extraction_prompt(chunk)
-        try:
-            raw = generator.generate_json(prompt)
-            extraction = parse_graph_extraction(raw, chunk)
-        except Exception as exc:
-            raise RuntimeError(f"failed to extract graph for chunk {chunk_id}: {exc}") from exc
+        last_error: Exception | None = None
+        for attempt in range(args.retries + 1):
+            try:
+                raw = generator.generate_json(prompt)
+                extraction = parse_graph_extraction(raw, chunk)
+                break
+            except Exception as exc:
+                last_error = exc
+                if attempt >= args.retries:
+                    raise RuntimeError(
+                        f"failed to extract graph for chunk {chunk_id}: {exc}"
+                    ) from exc
+                print(
+                    f"        retry {attempt + 1}/{args.retries}: {exc}",
+                    flush=True,
+                )
+        else:
+            raise RuntimeError(
+                f"failed to extract graph for chunk {chunk_id}: {last_error}"
+            )
 
         merge_extraction(graph, extraction, chunk)
         update_graph_metadata(
