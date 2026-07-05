@@ -1,0 +1,78 @@
+# ReadFellow
+
+ReadFellow is an experimental local workflow for indexing large text documents
+with zvec and Ollama embeddings so agents can retrieve relevant original
+passages efficiently.
+
+## Quick Start
+
+Smoke-test indexing with only the first few chunks:
+
+```sh
+uv run readfellow index corpus/samples/<document>.txt --collection sample --rebuild --limit 8
+```
+
+Index a full sample document:
+
+```sh
+uv run readfellow index corpus/samples/<document>.txt --collection sample --rebuild
+```
+
+The index command writes zvec data to `indexes/`, writes provenance metadata to
+`metadata/`, and runs a final `zvec.optimize()` so persisted Chinese FTS remains
+queryable after reopening the collection.
+
+Run semantic search:
+
+```sh
+uv run readfellow search "要查询的问题" --collection sample --top-k 5
+```
+
+Run Chinese full-text search:
+
+```sh
+uv run readfellow fts "关键词" --collection sample --top-k 5
+```
+
+Avoid spoilers by constraining all retrieval to the reader's progress. If the
+reader has finished only the first 50 detected chapters:
+
+```sh
+uv run readfellow search "要查询的问题" --collection sample --max-chapter 50
+uv run readfellow fts "关键词" --collection sample --max-chapter 50
+uv run readfellow fetch <chunk-id> --collection sample --max-chapter 50
+```
+
+`--max-chapter N` excludes chunks that cross into chapter `N + 1`. Lower-level
+guards are also available: `--max-line` and `--max-chunk-index`.
+
+Fetch a chunk by id:
+
+```sh
+uv run readfellow fetch <chunk-id> --collection sample
+```
+
+Build a lightweight local knowledge graph from the stored chunks. This reads
+`metadata/<collection>/chunks.jsonl`, asks an Ollama generation model to extract
+entities and relations, and writes an auditable JSON graph to
+`metadata/<collection>/graph.json`:
+
+```sh
+uv run readfellow graph-index --collection sample --llm-model qwen3:8b --limit 20
+```
+
+Query the graph by entity name, alias, or relation keyword:
+
+```sh
+uv run readfellow graph-query "向山" --collection sample
+uv run readfellow graph-query "武神" --collection sample --max-chapter 10
+```
+
+`graph-index` also supports `--rebuild`, `--max-chapter`, `--max-line`, and
+`--max-chunk-index`, so graph extraction can follow the same spoiler limits as
+search, FTS, and fetch.
+
+The default embedding endpoint is `http://127.0.0.1:11434`, and the default
+model is `qwen3-embedding:8b`.
+
+Generated indexes and manifests are written to `indexes/` and `metadata/`.

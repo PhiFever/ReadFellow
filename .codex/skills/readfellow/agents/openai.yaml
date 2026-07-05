@@ -1,0 +1,4 @@
+interface:
+  display_name: "ReadFellow"
+  short_description: "Query local text without spoilers"
+  default_prompt: "Use $readfellow to answer from the indexed corpus without going beyond my reading progress."
