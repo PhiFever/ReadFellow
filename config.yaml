@@ -1,0 +1,18 @@
+paths:
+  index_dir: indexes
+  metadata_dir: metadata
+ollama:
+  base_url: http://127.0.0.1:11434
+  embedding_model: qwen3-embedding:8b
+  generation_model: qwen3:8b
+  keep_alive: 30m
+indexing:
+  default_collection: sample
+  chunk_chars: 2400
+  overlap_chars: 240
+  batch_size: 8
+search:
+  top_k: 5
+graph:
+  num_predict: 4096
+  retries: 2

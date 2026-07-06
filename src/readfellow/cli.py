@@ -4,46 +4,28 @@ import argparse
 from pathlib import Path
 import re
 import sys
-import time
 
-from .chunking import chunk_document
-from .graph import (
-    build_extraction_prompt,
-    empty_graph,
-    graph_path,
-    merge_extraction,
-    parse_graph_extraction,
-    processed_chunk_ids,
-    query_graph,
-    read_chunks,
-    read_graph,
-    update_graph_metadata,
-    write_graph,
+from .app import (
+    GraphBuildEvent,
+    GraphBuildOptions,
+    IndexDocumentOptions,
+    IndexProgressEvent,
+    ProgressLimit,
+    build_graph as build_graph_workflow,
+    fetch_chunk as fetch_chunk_workflow,
+    fts_search,
+    index_document,
+    query_graph as query_graph_workflow,
+    semantic_search,
 )
-from .ollama import OllamaEmbedder, OllamaGenerator
+from .config import CONFIG_FILE, ReadFellowConfig, load_config
 from .models import (
     ChunkContext,
     GraphQueryResult,
     GraphRelation,
-    IndexManifest,
+    ProgressFilter,
     QueryChunkFields,
 )
-from .progress import ProgressFilter, build_progress_filter
-from .store import (
-    chunk_to_doc,
-    collection_path,
-    fetch_chunk,
-    open_or_create_collection,
-    query_fts,
-    query_vector,
-    read_manifest,
-    write_manifest,
-)
-
-
-DEFAULT_COLLECTION = "sample"
-DEFAULT_MODEL = "qwen3-embedding:8b"
-DEFAULT_LLM_MODEL = "qwen3:8b"
 
 
 def valid_collection_name(value: str) -> str:
@@ -56,22 +38,27 @@ def valid_collection_name(value: str) -> str:
     return normalized
 
 
-def build_parser() -> argparse.ArgumentParser:
+def build_parser(config: ReadFellowConfig) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="readfellow")
-    parser.add_argument("--index-dir", type=Path, default=Path("indexes"))
-    parser.add_argument("--metadata-dir", type=Path, default=Path("metadata"))
-    parser.add_argument("--ollama-url", default="http://127.0.0.1:11434")
-    parser.add_argument("--model", default=DEFAULT_MODEL)
-    parser.add_argument("--keep-alive", default="30m")
+    parser.add_argument("--config", type=Path, default=CONFIG_FILE)
+    parser.add_argument("--index-dir", type=Path, default=config.paths.index_dir)
+    parser.add_argument("--metadata-dir", type=Path, default=config.paths.metadata_dir)
+    parser.add_argument("--ollama-url", default=config.ollama.base_url)
+    parser.add_argument("--model", default=config.ollama.embedding_model)
+    parser.add_argument("--keep-alive", default=config.ollama.keep_alive)
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     index = subparsers.add_parser("index", help="chunk and index a UTF-8 text document")
     index.add_argument("source", type=Path)
-    index.add_argument("--collection", type=valid_collection_name, default=DEFAULT_COLLECTION)
-    index.add_argument("--chunk-chars", type=int, default=2400)
-    index.add_argument("--overlap-chars", type=int, default=240)
-    index.add_argument("--batch-size", type=int, default=8)
+    index.add_argument(
+        "--collection",
+        type=valid_collection_name,
+        default=config.indexing.default_collection,
+    )
+    index.add_argument("--chunk-chars", type=int, default=config.indexing.chunk_chars)
+    index.add_argument("--overlap-chars", type=int, default=config.indexing.overlap_chars)
+    index.add_argument("--batch-size", type=int, default=config.indexing.batch_size)
     index.add_argument("--limit", type=int, default=0, help="index only the first N chunks")
     index.add_argument("--rebuild", action="store_true")
     index.add_argument(
@@ -82,19 +69,31 @@ def build_parser() -> argparse.ArgumentParser:
 
     search = subparsers.add_parser("search", help="semantic vector search")
     search.add_argument("query")
-    search.add_argument("--collection", type=valid_collection_name, default=DEFAULT_COLLECTION)
-    search.add_argument("--top-k", type=int, default=5)
+    search.add_argument(
+        "--collection",
+        type=valid_collection_name,
+        default=config.indexing.default_collection,
+    )
+    search.add_argument("--top-k", type=int, default=config.search.top_k)
     add_progress_args(search)
 
     fts = subparsers.add_parser("fts", help="Chinese full-text search using zvec jieba FTS")
     fts.add_argument("query")
-    fts.add_argument("--collection", type=valid_collection_name, default=DEFAULT_COLLECTION)
-    fts.add_argument("--top-k", type=int, default=5)
+    fts.add_argument(
+        "--collection",
+        type=valid_collection_name,
+        default=config.indexing.default_collection,
+    )
+    fts.add_argument("--top-k", type=int, default=config.search.top_k)
     add_progress_args(fts)
 
     fetch = subparsers.add_parser("fetch", help="fetch one stored chunk by id")
     fetch.add_argument("chunk_id")
-    fetch.add_argument("--collection", type=valid_collection_name, default=DEFAULT_COLLECTION)
+    fetch.add_argument(
+        "--collection",
+        type=valid_collection_name,
+        default=config.indexing.default_collection,
+    )
     add_progress_args(fetch)
 
     graph_index = subparsers.add_parser(
@@ -104,7 +103,7 @@ def build_parser() -> argparse.ArgumentParser:
     graph_index.add_argument(
         "--collection",
         type=valid_collection_name,
-        default=DEFAULT_COLLECTION,
+        default=config.indexing.default_collection,
     )
     graph_index.add_argument(
         "--limit",
@@ -112,17 +111,17 @@ def build_parser() -> argparse.ArgumentParser:
         default=0,
         help="extract only the first N eligible chunks",
     )
-    graph_index.add_argument("--llm-model", default=DEFAULT_LLM_MODEL)
+    graph_index.add_argument("--llm-model", default=config.ollama.generation_model)
     graph_index.add_argument(
         "--num-predict",
         type=int,
-        default=4096,
+        default=config.graph.num_predict,
         help="maximum generated tokens per chunk for Ollama graph extraction",
     )
     graph_index.add_argument(
         "--retries",
         type=int,
-        default=2,
+        default=config.graph.retries,
         help="retry failed graph extraction this many times per chunk",
     )
     graph_index.add_argument("--rebuild", action="store_true")
@@ -133,7 +132,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="query the local JSON knowledge graph",
     )
     graph_query.add_argument("query")
-    graph_query.add_argument("--collection", type=valid_collection_name, default=DEFAULT_COLLECTION)
+    graph_query.add_argument(
+        "--collection",
+        type=valid_collection_name,
+        default=config.indexing.default_collection,
+    )
     add_progress_args(graph_query)
 
     return parser
@@ -157,128 +160,175 @@ def add_progress_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def command_index(args: argparse.Namespace) -> int:
-    source = args.source
-    if not source.is_file():
-        print(f"source file not found: {source}", file=sys.stderr)
+def command_index(args: argparse.Namespace, config: ReadFellowConfig) -> int:
+    if not args.source.is_file():
+        print(f"source file not found: {args.source}", file=sys.stderr)
         return 2
 
-    relative_source = str(source)
-    try:
-        relative_source = str(source.resolve().relative_to(Path.cwd().resolve()))
-    except ValueError:
-        relative_source = str(source.resolve())
-
-    chunks = chunk_document(
-        source,
-        source_path=relative_source,
-        target_chars=args.chunk_chars,
-        overlap_chars=args.overlap_chars,
+    result = index_document(
+        config,
+        args.source,
+        args.collection,
+        options=IndexDocumentOptions(
+            chunk_chars=args.chunk_chars,
+            overlap_chars=args.overlap_chars,
+            batch_size=args.batch_size,
+            limit=args.limit,
+            rebuild=args.rebuild,
+            optimize=not args.no_optimize,
+        ),
+        on_progress=print_index_progress,
     )
-    if args.limit:
-        chunks = chunks[: args.limit]
-    if not chunks:
-        print("no chunks produced", file=sys.stderr)
+    print(
+        f"done: collection={result.collection}, chunks={result.chunk_count}, "
+        f"inserted={result.inserted}, skipped={result.skipped}"
+    )
+    return 0
+
+
+def command_search(args: argparse.Namespace, config: ReadFellowConfig) -> int:
+    result = semantic_search(
+        config,
+        args.query,
+        args.collection,
+        top_k=args.top_k,
+        progress=progress_limit_from_args(args),
+    )
+    print_progress(result.progress)
+    print_docs(result.docs)
+    return 0
+
+
+def command_fts(args: argparse.Namespace, config: ReadFellowConfig) -> int:
+    result = fts_search(
+        config,
+        args.query,
+        args.collection,
+        top_k=args.top_k,
+        progress=progress_limit_from_args(args),
+    )
+    print_progress(result.progress)
+    print_docs(result.docs)
+    return 0
+
+
+def command_fetch(args: argparse.Namespace, config: ReadFellowConfig) -> int:
+    result = fetch_chunk_workflow(
+        config,
+        args.chunk_id,
+        args.collection,
+        progress=progress_limit_from_args(args),
+    )
+    if result.doc is None:
+        print(f"chunk not found: {args.chunk_id}", file=sys.stderr)
+        return 1
+    if not result.allowed:
+        print_progress(result.progress)
+        print(
+            f"chunk {args.chunk_id} is outside the configured reading progress",
+            file=sys.stderr,
+        )
         return 1
 
-    embedder = OllamaEmbedder(
-        base_url=args.ollama_url,
-        model=args.model,
-        keep_alive=args.keep_alive,
+    fields = QueryChunkFields.model_validate(result.doc.fields)
+    print_progress(result.progress)
+    print(
+        f"id={result.doc.id} {fields.source_path}:{fields.line_start}-"
+        f"{fields.line_end}"
     )
-    print(f"probing embedding dimension with {args.model} ...", flush=True)
-    probe_vector = embedder.embed_one(chunks[0].text)
-    dimension = len(probe_vector)
+    if fields.chapter:
+        print(f"chapter: {fields.chapter}")
+    print()
+    print(fields.text.rstrip())
+    return 0
 
-    coll = open_or_create_collection(
-        index_dir=args.index_dir,
-        metadata_dir=args.metadata_dir,
-        collection=args.collection,
-        dimension=dimension,
-        rebuild=args.rebuild,
+
+def command_graph_index(args: argparse.Namespace, config: ReadFellowConfig) -> int:
+    result = build_graph_workflow(
+        config,
+        args.collection,
+        progress=progress_limit_from_args(args),
+        options=GraphBuildOptions(
+            limit=args.limit,
+            llm_model=args.llm_model,
+            num_predict=args.num_predict,
+            retries=args.retries,
+            rebuild=args.rebuild,
+        ),
+        on_progress=print_graph_progress,
     )
-
-    manifest = IndexManifest(
-        collection=args.collection,
-        collection_path=str(collection_path(args.index_dir, args.collection)),
-        source_path=relative_source,
-        model=args.model,
-        embedding_dimension=dimension,
-        chunk_count=len(chunks),
-        chunk_chars=args.chunk_chars,
-        overlap_chars=args.overlap_chars,
-    )
-    write_manifest(
-        metadata_dir=args.metadata_dir,
-        collection=args.collection,
-        manifest=manifest,
-        chunks=chunks,
-    )
-
-    start = time.monotonic()
-    inserted = 0
-    skipped = 0
-    for offset in range(0, len(chunks), args.batch_size):
-        batch = chunks[offset : offset + args.batch_size]
-        existing = coll.fetch(
-            [chunk.id for chunk in batch],
-            output_fields=["text_hash"],
-            include_vector=False,
-        )
-        existing_hashes = {
-            chunk.id: QueryChunkFields.model_validate(existing[chunk.id].fields).text_hash
-            for chunk in batch
-            if existing.get(chunk.id) is not None
-        }
-        missing = [chunk for chunk in batch if chunk.id not in existing_hashes]
-        changed = [
-            chunk
-            for chunk in batch
-            if chunk.id in existing_hashes
-            and existing_hashes[chunk.id] != chunk.text_hash
-        ]
-        pending = missing + changed
-        skipped += len(batch) - len(pending)
-        if not pending:
-            print(
-                f"[{offset + len(batch):>5}/{len(chunks)}] skipped existing chunks",
-                flush=True,
-            )
-            continue
-
-        texts = [chunk.text for chunk in pending]
-        vectors = embedder.embed(texts)
-        docs = [
-            chunk_to_doc(chunk, vector, model=args.model)
-            for chunk, vector in zip(pending, vectors, strict=True)
-        ]
-        missing_count = len(missing)
-        statuses = []
-        if missing_count:
-            statuses.extend(coll.insert(docs[:missing_count]))
-        if len(docs) > missing_count:
-            statuses.extend(coll.update(docs[missing_count:]))
-        if not all(status.ok() for status in statuses):
-            failed = [str(status) for status in statuses if not status.ok()]
-            raise RuntimeError(f"zvec write failed: {failed[:3]}")
-        inserted += len(docs)
-        elapsed = time.monotonic() - start
-        rate = inserted / elapsed if elapsed else 0
+    if result.status == "empty":
+        print(f"done: no chunks selected for collection={result.collection}")
+        return 0
+    if result.status == "up_to_date":
         print(
-            f"[{offset + len(batch):>5}/{len(chunks)}] indexed {inserted}, "
-            f"skipped {skipped}, {rate:.2f} chunks/s",
+            f"done: graph is already up to date for collection={result.collection}, "
+            f"selected_chunks={result.selected_chunk_count}"
+        )
+        return 0
+
+    print(
+        f"done: collection={result.collection}, graph={result.graph_path}, "
+        f"entities={result.entity_count}, relations={result.relation_count}"
+    )
+    return 0
+
+
+def command_graph_query(args: argparse.Namespace, config: ReadFellowConfig) -> int:
+    result = query_graph_workflow(
+        config,
+        args.query,
+        args.collection,
+        progress=progress_limit_from_args(args),
+    )
+    print_progress(result.progress)
+    print_graph_results(result.result)
+    return 0
+
+
+def print_index_progress(event: IndexProgressEvent) -> None:
+    if event.stage == "probe":
+        print(f"probing embedding dimension with {event.model} ...", flush=True)
+        return
+    if event.stage == "optimize":
+        print("optimizing collection ...", flush=True)
+        return
+    if event.stage == "batch" and event.skipped_existing:
+        print(
+            f"[{event.processed:>5}/{event.total}] skipped existing chunks",
+            flush=True,
+        )
+        return
+    if event.stage == "batch":
+        print(
+            f"[{event.processed:>5}/{event.total}] indexed {event.inserted}, "
+            f"skipped {event.skipped}, {event.rate:.2f} chunks/s",
             flush=True,
         )
 
-    if not args.no_optimize:
-        print("optimizing collection ...", flush=True)
-        coll.optimize()
-    coll.flush()
-    print(
-        f"done: collection={args.collection}, chunks={len(chunks)}, "
-        f"inserted={inserted}, skipped={skipped}"
-    )
-    return 0
+
+def print_graph_progress(event: GraphBuildEvent) -> None:
+    if event.stage == "selected" and event.progress is not None:
+        print_progress(event.progress)
+        return
+    if event.stage == "extracting":
+        print(
+            f"[{event.index:>5}/{event.total}] extracting graph from {event.chunk_id}",
+            flush=True,
+        )
+        return
+    if event.stage == "retry":
+        print(
+            f"        retry {event.attempt}/{event.retries}: {event.error}",
+            flush=True,
+        )
+        return
+    if event.stage == "extracted":
+        print(
+            f"        entities={event.entity_count}, "
+            f"relations={event.relation_count}",
+            flush=True,
+        )
 
 
 def print_docs(docs) -> None:
@@ -296,174 +346,6 @@ def print_docs(docs) -> None:
         )
         print(f"chapter: {chapter}")
         print(preview)
-
-
-def command_search(args: argparse.Namespace) -> int:
-    manifest = read_manifest(metadata_dir=args.metadata_dir, collection=args.collection)
-    coll = open_or_create_existing(args)
-    progress = progress_from_args(args, manifest=manifest)
-    embedder = OllamaEmbedder(
-        base_url=args.ollama_url,
-        model=manifest.model or args.model,
-        keep_alive=args.keep_alive,
-    )
-    vector = embedder.embed_one(args.query)
-    print_progress(progress)
-    print_docs(query_vector(coll, vector, top_k=args.top_k, filter=progress.expression))
-    return 0
-
-
-def command_fts(args: argparse.Namespace) -> int:
-    manifest = read_manifest(metadata_dir=args.metadata_dir, collection=args.collection)
-    coll = open_or_create_existing(args)
-    progress = progress_from_args(args, manifest=manifest)
-    print_progress(progress)
-    print_docs(query_fts(coll, args.query, top_k=args.top_k, filter=progress.expression))
-    return 0
-
-
-def command_fetch(args: argparse.Namespace) -> int:
-    manifest = read_manifest(metadata_dir=args.metadata_dir, collection=args.collection)
-    coll = open_or_create_existing(args)
-    progress = progress_from_args(args, manifest=manifest)
-    doc = fetch_chunk(coll, args.chunk_id)
-    if doc is None:
-        print(f"chunk not found: {args.chunk_id}", file=sys.stderr)
-        return 1
-    fields = QueryChunkFields.model_validate(doc.fields)
-    if not progress.allows(fields):
-        print_progress(progress)
-        print(
-            f"chunk {args.chunk_id} is outside the configured reading progress",
-            file=sys.stderr,
-        )
-        return 1
-    print_progress(progress)
-    print(
-        f"id={doc.id} {fields.source_path}:{fields.line_start}-"
-        f"{fields.line_end}"
-    )
-    if fields.chapter:
-        print(f"chapter: {fields.chapter}")
-    print()
-    print(fields.text.rstrip())
-    return 0
-
-
-def command_graph_index(args: argparse.Namespace) -> int:
-    manifest = read_manifest(metadata_dir=args.metadata_dir, collection=args.collection)
-    progress = progress_from_args(args, manifest=manifest)
-    print_progress(progress)
-
-    chunks = [
-        chunk
-        for chunk in read_chunks(metadata_dir=args.metadata_dir, collection=args.collection)
-        if progress.allows(chunk)
-    ]
-    if args.limit:
-        chunks = chunks[: args.limit]
-
-    path = graph_path(args.metadata_dir, args.collection)
-    if path.exists() and not args.rebuild:
-        graph = read_graph(path)
-    else:
-        graph = empty_graph(
-            collection=args.collection,
-            manifest=manifest,
-            llm_model=args.llm_model,
-        )
-
-    processed = set() if args.rebuild else processed_chunk_ids(graph)
-    pending = [chunk for chunk in chunks if chunk.id not in processed]
-    update_graph_metadata(
-        graph,
-        collection=args.collection,
-        manifest=manifest,
-        llm_model=args.llm_model,
-        progress=progress,
-        selected_chunk_count=len(chunks),
-    )
-
-    if not chunks:
-        write_graph(path, graph)
-        print(f"done: no chunks selected for collection={args.collection}")
-        return 0
-
-    if not pending:
-        write_graph(path, graph)
-        print(
-            f"done: graph is already up to date for collection={args.collection}, "
-            f"selected_chunks={len(chunks)}"
-        )
-        return 0
-
-    generator = OllamaGenerator(
-        base_url=args.ollama_url,
-        model=args.llm_model,
-        keep_alive=args.keep_alive,
-        num_predict=args.num_predict,
-    )
-
-    for index, chunk in enumerate(pending, start=1):
-        chunk_id = chunk.id
-        print(f"[{index:>5}/{len(pending)}] extracting graph from {chunk_id}", flush=True)
-        prompt = build_extraction_prompt(chunk)
-        last_error: Exception | None = None
-        for attempt in range(args.retries + 1):
-            try:
-                raw = generator.generate_json(prompt)
-                extraction = parse_graph_extraction(raw, chunk)
-                break
-            except Exception as exc:
-                last_error = exc
-                if attempt >= args.retries:
-                    raise RuntimeError(
-                        f"failed to extract graph for chunk {chunk_id}: {exc}"
-                    ) from exc
-                print(
-                    f"        retry {attempt + 1}/{args.retries}: {exc}",
-                    flush=True,
-                )
-        else:
-            raise RuntimeError(
-                f"failed to extract graph for chunk {chunk_id}: {last_error}"
-            )
-
-        merge_extraction(graph, extraction, chunk)
-        update_graph_metadata(
-            graph,
-            collection=args.collection,
-            manifest=manifest,
-            llm_model=args.llm_model,
-            progress=progress,
-            selected_chunk_count=len(chunks),
-        )
-        write_graph(path, graph)
-        print(
-            f"        entities={len(extraction.entities)}, "
-            f"relations={len(extraction.relations)}",
-            flush=True,
-        )
-
-    print(
-        f"done: collection={args.collection}, graph={path}, "
-        f"entities={graph.entity_count}, relations={graph.relation_count}"
-    )
-    return 0
-
-
-def command_graph_query(args: argparse.Namespace) -> int:
-    manifest = read_manifest(metadata_dir=args.metadata_dir, collection=args.collection)
-    progress = progress_from_args(args, manifest=manifest)
-    path = graph_path(args.metadata_dir, args.collection)
-    if not path.is_file():
-        raise FileNotFoundError(f"graph index not found: {path}; run graph-index first")
-
-    graph = read_graph(path)
-    result = query_graph(graph, args.query, progress=progress)
-    print_progress(progress)
-    print_graph_results(result)
-    return 0
 
 
 def print_graph_results(result: GraphQueryResult) -> None:
@@ -515,24 +397,8 @@ def format_graph_location(item: ChunkContext | GraphRelation) -> str:
     )
 
 
-def open_or_create_existing(args: argparse.Namespace):
-    path = collection_path(args.index_dir, args.collection)
-    if not path.exists():
-        raise FileNotFoundError(
-            f"collection does not exist: {path}; run the index command first"
-        )
-    import zvec
-
-    return zvec.open(str(path), zvec.CollectionOption(read_only=True, enable_mmap=True))
-
-
-def progress_from_args(
-    args: argparse.Namespace,
-    *,
-    manifest: IndexManifest | None,
-) -> ProgressFilter:
-    return build_progress_filter(
-        manifest=manifest,
+def progress_limit_from_args(args: argparse.Namespace) -> ProgressLimit:
+    return ProgressLimit(
         max_chapter=getattr(args, "max_chapter", None),
         max_line=getattr(args, "max_line", None),
         max_chunk_index=getattr(args, "max_chunk_index", None),
@@ -544,22 +410,50 @@ def print_progress(progress: ProgressFilter) -> None:
         print(f"progress limit: {progress.description}", file=sys.stderr)
 
 
+def config_path_from_argv(argv: list[str] | None) -> Path:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--config", type=Path, default=CONFIG_FILE)
+    args, _ = parser.parse_known_args(argv)
+    return args.config
+
+
+def apply_global_overrides(
+    config: ReadFellowConfig,
+    args: argparse.Namespace,
+) -> ReadFellowConfig:
+    effective = config.model_copy(deep=True)
+    effective.paths.index_dir = args.index_dir
+    effective.paths.metadata_dir = args.metadata_dir
+    effective.ollama.base_url = args.ollama_url
+    effective.ollama.embedding_model = args.model
+    effective.ollama.keep_alive = args.keep_alive
+    return effective
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
+    config_path = config_path_from_argv(argv)
+    try:
+        config = load_config(config_path, missing_ok=config_path == CONFIG_FILE)
+    except Exception as exc:
+        print(f"error loading config: {exc}", file=sys.stderr)
+        return 1
+
+    parser = build_parser(config)
     args = parser.parse_args(argv)
+    config = apply_global_overrides(config, args)
     try:
         if args.command == "index":
-            return command_index(args)
+            return command_index(args, config)
         if args.command == "search":
-            return command_search(args)
+            return command_search(args, config)
         if args.command == "fts":
-            return command_fts(args)
+            return command_fts(args, config)
         if args.command == "fetch":
-            return command_fetch(args)
+            return command_fetch(args, config)
         if args.command == "graph-index":
-            return command_graph_index(args)
+            return command_graph_index(args, config)
         if args.command == "graph-query":
-            return command_graph_query(args)
+            return command_graph_query(args, config)
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

@@ -6,6 +6,11 @@ passages efficiently.
 
 ## Quick Start
 
+ReadFellow loads project defaults from the root `config.yaml`. CLI flags such as
+`--index-dir`, `--metadata-dir`, `--ollama-url`, `--model`, `--keep-alive`,
+`--collection`, `--chunk-chars`, `--overlap-chars`, `--batch-size`, `--top-k`,
+and graph extraction settings override that file for a single run.
+
 Smoke-test indexing with only the first few chunks:
 
 ```sh
@@ -72,7 +77,6 @@ uv run readfellow graph-query "武神" --collection sample --max-chapter 10
 `--max-chunk-index`, so graph extraction can follow the same spoiler limits as
 search, FTS, and fetch.
 
-The default embedding endpoint is `http://127.0.0.1:11434`, and the default
-model is `qwen3-embedding:8b`.
+The default embedding endpoint and models are configured in `config.yaml`.
 
 Generated indexes and manifests are written to `indexes/` and `metadata/`.
