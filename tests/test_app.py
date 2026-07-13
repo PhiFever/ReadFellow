@@ -46,7 +46,9 @@ def test_semantic_search_is_configured_application_workflow(
     source_text = "第一章 开始\n这是作为回答依据的原始段落。"
     source.write_text(f"{source_text}\n", encoding="utf-8")
     config = ReadFellowConfig(
-        paths=PathConfig(index_dir=tmp_path / "indexes", metadata_dir=tmp_path / "metadata"),
+        paths=PathConfig(
+            index_dir=tmp_path / "indexes", metadata_dir=tmp_path / "metadata"
+        ),
         ollama=OllamaConfig(
             base_url="http://localhost:9999",
             embedding_model="config-embedding",
@@ -145,12 +147,16 @@ def test_semantic_search_is_configured_application_workflow(
     assert result.progress.description == "through chunk index 3"
 
 
-def test_fts_search_returns_source_grounded_evidence(monkeypatch, tmp_path: Path) -> None:
+def test_fts_search_returns_source_grounded_evidence(
+    monkeypatch, tmp_path: Path
+) -> None:
     source = tmp_path / "novel.txt"
     source_text = "第一章 开始\n这里包含需要精确查找的关键词。"
     source.write_text(f"{source_text}\n", encoding="utf-8")
     config = ReadFellowConfig(
-        paths=PathConfig(index_dir=tmp_path / "indexes", metadata_dir=tmp_path / "metadata")
+        paths=PathConfig(
+            index_dir=tmp_path / "indexes", metadata_dir=tmp_path / "metadata"
+        )
     )
     fake_collection = object()
 
@@ -195,7 +201,9 @@ def test_fetch_chunk_does_not_expose_text_outside_progress(
     source_text = "第一章 开始\n这段原文位于读者当前进度之后。"
     source.write_text(f"{source_text}\n", encoding="utf-8")
     config = ReadFellowConfig(
-        paths=PathConfig(index_dir=tmp_path / "indexes", metadata_dir=tmp_path / "metadata")
+        paths=PathConfig(
+            index_dir=tmp_path / "indexes", metadata_dir=tmp_path / "metadata"
+        )
     )
     stored = Doc(
         id="chunk_000003",
@@ -236,7 +244,9 @@ def test_graph_query_returns_original_chunk_as_evidence(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     config = ReadFellowConfig(
-        paths=PathConfig(index_dir=tmp_path / "indexes", metadata_dir=tmp_path / "metadata")
+        paths=PathConfig(
+            index_dir=tmp_path / "indexes", metadata_dir=tmp_path / "metadata"
+        )
     )
     manifest = manifest_for(source).model_copy(update={"chunk_count": 2})
     original_start = len("第一章 开始\n".encode("utf-8"))
@@ -324,7 +334,9 @@ def test_graph_query_does_not_match_alias_learned_after_progress(
     late_text = "第二章 之后\n人们开始称向山为武神。"
     source.write_text(f"{early_text}\n{late_text}\n", encoding="utf-8")
     config = ReadFellowConfig(
-        paths=PathConfig(index_dir=tmp_path / "indexes", metadata_dir=tmp_path / "metadata")
+        paths=PathConfig(
+            index_dir=tmp_path / "indexes", metadata_dir=tmp_path / "metadata"
+        )
     )
     manifest = manifest_for(source).model_copy(update={"chunk_count": 2})
     early = Chunk(
@@ -373,9 +385,7 @@ def test_graph_query_does_not_match_alias_learned_after_progress(
         graph,
         parse_graph_extraction(
             {
-                "entities": [
-                    {"name": "向山", "type": "人物", "aliases": ["武神"]}
-                ],
+                "entities": [{"name": "向山", "type": "人物", "aliases": ["武神"]}],
                 "relations": [],
             },
             late,

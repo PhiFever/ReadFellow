@@ -15,7 +15,9 @@ from readfellow.config import (
 
 def test_cli_defaults_come_from_config() -> None:
     config = ReadFellowConfig(
-        paths=PathConfig(index_dir=Path("custom-indexes"), metadata_dir=Path("custom-meta")),
+        paths=PathConfig(
+            index_dir=Path("custom-indexes"), metadata_dir=Path("custom-meta")
+        ),
         ollama=OllamaConfig(
             base_url="http://localhost:9999",
             embedding_model="embed-test",

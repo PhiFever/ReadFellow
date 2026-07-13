@@ -64,11 +64,15 @@ class OllamaEmbedder:
             with request.urlopen(req, timeout=self.timeout) as response:
                 raw_payload = response.read().decode("utf-8")
         except error.URLError as exc:
-            raise OllamaError(f"failed to call Ollama at {self.base_url}: {exc}") from exc
+            raise OllamaError(
+                f"failed to call Ollama at {self.base_url}: {exc}"
+            ) from exc
         try:
             payload = OllamaEmbedResponse.model_validate_json(raw_payload)
         except ValidationError as exc:
-            raise OllamaError(f"unexpected Ollama embed response: {raw_payload!r}") from exc
+            raise OllamaError(
+                f"unexpected Ollama embed response: {raw_payload!r}"
+            ) from exc
 
         embeddings = payload.embeddings
         if len(embeddings) != len(batch):
@@ -123,7 +127,9 @@ class OllamaGenerator:
             with request.urlopen(req, timeout=self.timeout) as response:
                 raw_payload = response.read().decode("utf-8")
         except error.URLError as exc:
-            raise OllamaError(f"failed to call Ollama at {self.base_url}: {exc}") from exc
+            raise OllamaError(
+                f"failed to call Ollama at {self.base_url}: {exc}"
+            ) from exc
 
         return parse_generate_response(raw_payload)
 

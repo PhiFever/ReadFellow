@@ -24,14 +24,7 @@ def manifest_for(source: Path) -> IndexManifest:
 def test_chapter_boundaries_and_progress_filter(tmp_path: Path) -> None:
     source = tmp_path / "novel.txt"
     source.write_text(
-        "第一章 开始\n"
-        "一\n"
-        "\n"
-        "第二章 继续\n"
-        "二\n"
-        "\n"
-        "第三章 之后\n"
-        "三\n",
+        "第一章 开始\n一\n\n第二章 继续\n二\n\n第三章 之后\n三\n",
         encoding="utf-8",
     )
 

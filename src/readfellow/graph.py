@@ -117,7 +117,9 @@ def read_chunks(*, metadata_dir: Path, collection: str) -> list[Chunk]:
             try:
                 chunks.append(Chunk.model_validate_json(stripped))
             except ValueError as exc:
-                raise ValueError(f"invalid chunk metadata in {path}:{line_number}: {exc}") from exc
+                raise ValueError(
+                    f"invalid chunk metadata in {path}:{line_number}: {exc}"
+                ) from exc
     return chunks
 
 
@@ -174,9 +176,7 @@ def update_graph_metadata(
 
 def processed_chunk_ids(graph: KnowledgeGraph) -> set[str]:
     return {
-        extraction.chunk_id
-        for extraction in graph.extractions
-        if extraction.chunk_id
+        extraction.chunk_id for extraction in graph.extractions if extraction.chunk_id
     }
 
 
@@ -295,11 +295,7 @@ def finalize_graph(graph: KnowledgeGraph) -> None:
     for entity in graph.entities:
         entity.types = sorted(set(_as_strings(entity.types)))
         entity.aliases = sorted(
-            {
-                alias
-                for alias in _as_strings(entity.aliases)
-                if alias != entity.name
-            }
+            {alias for alias in _as_strings(entity.aliases) if alias != entity.name}
         )
         entity.mentions = sorted(
             entity.mentions,
@@ -617,7 +613,9 @@ def _chunk_text(chunk: Chunk | ChunkContext | Mapping[str, Any]) -> str:
     return str(chunk.get("text", ""))
 
 
-def _get_any(mapping: Mapping[str, Any], keys: tuple[str, ...], default: Any = None) -> Any:
+def _get_any(
+    mapping: Mapping[str, Any], keys: tuple[str, ...], default: Any = None
+) -> Any:
     for key in keys:
         if key in mapping:
             return mapping[key]

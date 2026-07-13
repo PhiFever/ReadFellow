@@ -40,12 +40,27 @@ def test_parse_and_merge_graph_extractions() -> None:
     first = chunk()
     payload = {
         "entities": [
-            {"name": "向山", "type": "人物", "aliases": ["武神"], "evidence": "向山被人称作武神"},
+            {
+                "name": "向山",
+                "type": "人物",
+                "aliases": ["武神"],
+                "evidence": "向山被人称作武神",
+            },
             {"name": "尤基", "type": "人物"},
         ],
         "relations": [
-            {"subject": "向山", "relation": "身份是", "object": "武神", "evidence": "向山被人称作武神"},
-            {"subject": "向山", "relation": "帮助", "object": "尤基", "evidence": "他帮助了尤基"},
+            {
+                "subject": "向山",
+                "relation": "身份是",
+                "object": "武神",
+                "evidence": "向山被人称作武神",
+            },
+            {
+                "subject": "向山",
+                "relation": "帮助",
+                "object": "尤基",
+                "evidence": "他帮助了尤基",
+            },
         ],
     }
 
@@ -58,7 +73,12 @@ def test_parse_and_merge_graph_extractions() -> None:
             {"name": "向山", "types": ["人物"], "aliases": ["老向"]},
         ],
         "relations": [
-            {"subject": "老向", "relation": "认识", "object": "尤基", "evidence": "老向认识尤基"},
+            {
+                "subject": "老向",
+                "relation": "认识",
+                "object": "尤基",
+                "evidence": "老向认识尤基",
+            },
         ],
     }
     merge_extraction(graph, parse_graph_extraction(second_payload, second), second)
@@ -69,7 +89,9 @@ def test_parse_and_merge_graph_extractions() -> None:
     assert len(xiangshan.mentions) == 2
     assert graph.entity_count == 2
     assert graph.relation_count == 3
-    identity = next(relation for relation in graph.relations if relation.relation == "身份是")
+    identity = next(
+        relation for relation in graph.relations if relation.relation == "身份是"
+    )
     assert identity.object == "武神"
     assert identity.object_entity == "向山"
 
@@ -82,7 +104,12 @@ def test_graph_query_matches_entity_alias_and_relation_keyword() -> None:
             {"name": "尤基", "type": "人物"},
         ],
         "relations": [
-            {"subject": "向山", "relation": "帮助", "object": "尤基", "evidence": "向山帮助了尤基"},
+            {
+                "subject": "向山",
+                "relation": "帮助",
+                "object": "尤基",
+                "evidence": "向山帮助了尤基",
+            },
         ],
     }
     merge_extraction(graph, parse_graph_extraction(data, chunk()), chunk())
@@ -107,9 +134,9 @@ def test_parse_skips_unknown_relation_types() -> None:
         chunk(),
     )
 
-    assert [(relation.relation, relation.object) for relation in extraction.relations] == [
-        ("帮助", "尤基")
-    ]
+    assert [
+        (relation.relation, relation.object) for relation in extraction.relations
+    ] == [("帮助", "尤基")]
 
 
 def test_graph_query_progress_filters_future_relations() -> None:
@@ -120,9 +147,17 @@ def test_graph_query_progress_filters_future_relations() -> None:
         graph,
         parse_graph_extraction(
             {
-                "entities": [{"name": "向山", "type": "人物"}, {"name": "尤基", "type": "人物"}],
+                "entities": [
+                    {"name": "向山", "type": "人物"},
+                    {"name": "尤基", "type": "人物"},
+                ],
                 "relations": [
-                    {"subject": "向山", "relation": "帮助", "object": "尤基", "evidence": "向山帮助了尤基"}
+                    {
+                        "subject": "向山",
+                        "relation": "帮助",
+                        "object": "尤基",
+                        "evidence": "向山帮助了尤基",
+                    }
                 ],
             },
             early,
@@ -133,9 +168,17 @@ def test_graph_query_progress_filters_future_relations() -> None:
         graph,
         parse_graph_extraction(
             {
-                "entities": [{"name": "向山", "type": "人物"}, {"name": "组织A", "type": "组织"}],
+                "entities": [
+                    {"name": "向山", "type": "人物"},
+                    {"name": "组织A", "type": "组织"},
+                ],
                 "relations": [
-                    {"subject": "组织A", "relation": "敌对", "object": "向山", "evidence": "组织A开始敌对向山"}
+                    {
+                        "subject": "组织A",
+                        "relation": "敌对",
+                        "object": "向山",
+                        "evidence": "组织A开始敌对向山",
+                    }
                 ],
             },
             late,

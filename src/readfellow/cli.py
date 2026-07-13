@@ -51,9 +51,13 @@ def build_parser(config: ReadFellowConfig) -> argparse.ArgumentParser:
         default=config.indexing.default_collection,
     )
     index.add_argument("--chunk-chars", type=int, default=config.indexing.chunk_chars)
-    index.add_argument("--overlap-chars", type=int, default=config.indexing.overlap_chars)
+    index.add_argument(
+        "--overlap-chars", type=int, default=config.indexing.overlap_chars
+    )
     index.add_argument("--batch-size", type=int, default=config.indexing.batch_size)
-    index.add_argument("--limit", type=int, default=0, help="index only the first N chunks")
+    index.add_argument(
+        "--limit", type=int, default=0, help="index only the first N chunks"
+    )
     index.add_argument("--rebuild", action="store_true")
     index.add_argument(
         "--no-optimize",
@@ -71,7 +75,9 @@ def build_parser(config: ReadFellowConfig) -> argparse.ArgumentParser:
     search.add_argument("--top-k", type=int, default=config.search.top_k)
     add_progress_args(search)
 
-    fts = subparsers.add_parser("fts", help="Chinese full-text search using zvec jieba FTS")
+    fts = subparsers.add_parser(
+        "fts", help="Chinese full-text search using zvec jieba FTS"
+    )
     fts.add_argument("query")
     fts.add_argument(
         "--collection",
@@ -313,8 +319,7 @@ def print_graph_progress(event: GraphBuildEvent) -> None:
         return
     if event.stage == "extracted":
         print(
-            f"        entities={event.entity_count}, "
-            f"relations={event.relation_count}",
+            f"        entities={event.entity_count}, relations={event.relation_count}",
             flush=True,
         )
 
@@ -325,11 +330,7 @@ def print_evidence(items: list[Evidence], *, full_text: bool = False) -> None:
         return
     for index, evidence in enumerate(items, start=1):
         chapter = evidence.chapter or "(no chapter)"
-        score = (
-            f" score={evidence.score:.6f}"
-            if evidence.score is not None
-            else ""
-        )
+        score = f" score={evidence.score:.6f}" if evidence.score is not None else ""
         print(
             f"\n[{index}] id={evidence.chunk_id}{score} "
             f"{evidence.source_path}:{evidence.line_start}-{evidence.line_end}"

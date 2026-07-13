@@ -27,7 +27,9 @@ def source_from_manifest(manifest: IndexManifest) -> Path:
     return source if source.is_absolute() else Path.cwd() / source
 
 
-def line_limit_for_chapter(source: Path, max_chapter: int) -> tuple[int, ChapterBoundary]:
+def line_limit_for_chapter(
+    source: Path, max_chapter: int
+) -> tuple[int, ChapterBoundary]:
     if max_chapter < 1:
         raise ValueError("--max-chapter must be positive")
 
@@ -62,7 +64,9 @@ def build_progress_filter(
             raise ValueError("--max-chapter requires collection metadata")
         source = source_from_manifest(manifest)
         if not source.is_file():
-            raise FileNotFoundError(f"source file for progress limit not found: {source}")
+            raise FileNotFoundError(
+                f"source file for progress limit not found: {source}"
+            )
         line_limit, chapter = line_limit_for_chapter(source, max_chapter)
         max_line_end = line_limit
         descriptions.append(f"through chapter {chapter.index}: {chapter.title}")

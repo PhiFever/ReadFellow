@@ -146,7 +146,9 @@ def chunk_document(
                 line_end=window[-1].line_end,
                 byte_start=window[0].byte_start,
                 byte_end=window[-1].byte_end,
-                chapter=next((unit.chapter for unit in reversed(window) if unit.chapter), ""),
+                chapter=next(
+                    (unit.chapter for unit in reversed(window) if unit.chapter), ""
+                ),
             )
         )
 

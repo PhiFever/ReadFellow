@@ -207,7 +207,9 @@ def index_document(
             include_vector=False,
         )
         existing_hashes = {
-            chunk.id: QueryChunkFields.model_validate(existing[chunk.id].fields).text_hash
+            chunk.id: QueryChunkFields.model_validate(
+                existing[chunk.id].fields
+            ).text_hash
             for chunk in batch
             if existing.get(chunk.id) is not None
         }
@@ -286,7 +288,9 @@ def semantic_search(
     top_k: int | None = None,
     progress: ProgressLimit | None = None,
 ) -> SearchResult:
-    manifest = read_manifest(metadata_dir=config.paths.metadata_dir, collection=collection)
+    manifest = read_manifest(
+        metadata_dir=config.paths.metadata_dir, collection=collection
+    )
     coll = open_existing_collection(config, collection)
     progress_filter = progress_filter_from_limit(progress, manifest=manifest)
     embedder = OllamaEmbedder(
@@ -315,7 +319,9 @@ def fts_search(
     top_k: int | None = None,
     progress: ProgressLimit | None = None,
 ) -> SearchResult:
-    manifest = read_manifest(metadata_dir=config.paths.metadata_dir, collection=collection)
+    manifest = read_manifest(
+        metadata_dir=config.paths.metadata_dir, collection=collection
+    )
     coll = open_existing_collection(config, collection)
     progress_filter = progress_filter_from_limit(progress, manifest=manifest)
     docs = query_fts(
@@ -337,7 +343,9 @@ def fetch_chunk(
     *,
     progress: ProgressLimit | None = None,
 ) -> FetchChunkResult:
-    manifest = read_manifest(metadata_dir=config.paths.metadata_dir, collection=collection)
+    manifest = read_manifest(
+        metadata_dir=config.paths.metadata_dir, collection=collection
+    )
     coll = open_existing_collection(config, collection)
     progress_filter = progress_filter_from_limit(progress, manifest=manifest)
     doc = fetch_stored_chunk(coll, chunk_id)
@@ -371,12 +379,16 @@ def build_graph(
     on_progress: Callable[[GraphBuildEvent], None] | None = None,
 ) -> GraphBuildResult:
     options = options or GraphBuildOptions()
-    manifest = read_manifest(metadata_dir=config.paths.metadata_dir, collection=collection)
+    manifest = read_manifest(
+        metadata_dir=config.paths.metadata_dir, collection=collection
+    )
     progress_filter = progress_filter_from_limit(progress, manifest=manifest)
 
     chunks = [
         chunk
-        for chunk in read_chunks(metadata_dir=config.paths.metadata_dir, collection=collection)
+        for chunk in read_chunks(
+            metadata_dir=config.paths.metadata_dir, collection=collection
+        )
         if progress_filter.allows(chunk)
     ]
     if options.limit:
@@ -387,7 +399,9 @@ def build_graph(
     if path.exists() and not options.rebuild:
         graph = read_graph(path)
     else:
-        graph = empty_graph(collection=collection, manifest=manifest, llm_model=llm_model)
+        graph = empty_graph(
+            collection=collection, manifest=manifest, llm_model=llm_model
+        )
 
     processed = set() if options.rebuild else processed_chunk_ids(graph)
     pending = [chunk for chunk in chunks if chunk.id not in processed]
@@ -514,7 +528,9 @@ def query_graph(
     *,
     progress: ProgressLimit | None = None,
 ) -> GraphSearchResult:
-    manifest = read_manifest(metadata_dir=config.paths.metadata_dir, collection=collection)
+    manifest = read_manifest(
+        metadata_dir=config.paths.metadata_dir, collection=collection
+    )
     progress_filter = progress_filter_from_limit(progress, manifest=manifest)
     path = graph_path(config.paths.metadata_dir, collection)
     if not path.is_file():
@@ -611,9 +627,7 @@ def _graph_evidence(
             )
             if value
         )
-        relations.add(
-            f"{relation.subject} --{relation.relation}--> {relation.object}"
-        )
+        relations.add(f"{relation.subject} --{relation.relation}--> {relation.object}")
 
     needle = query.strip().casefold()
     for entity in result.entities:
@@ -622,9 +636,7 @@ def _graph_evidence(
             matching_contexts = [*entity.mentions, *entity.evidence]
         else:
             matching_contexts = [
-                item
-                for item in entity.evidence
-                if needle in item.text.casefold()
+                item for item in entity.evidence if needle in item.text.casefold()
             ]
         for item in matching_contexts:
             if item.chunk_id:

@@ -42,7 +42,9 @@ def create_schema(collection: str, dimension: int) -> CollectionSchema:
             FieldSchema(
                 TEXT_FIELD,
                 DataType.STRING,
-                index_param=FtsIndexParam(tokenizer_name="jieba", filters=["lowercase"]),
+                index_param=FtsIndexParam(
+                    tokenizer_name="jieba", filters=["lowercase"]
+                ),
             ),
         ],
         vectors=VectorSchema(EMBEDDING_FIELD, DataType.VECTOR_FP32, dimension),
@@ -100,12 +102,15 @@ def write_manifest(
     meta = metadata_path(metadata_dir, collection)
     meta.mkdir(parents=True, exist_ok=True)
     (meta / "manifest.json").write_text(
-        json.dumps(manifest.model_dump(mode="json"), ensure_ascii=False, indent=2) + "\n",
+        json.dumps(manifest.model_dump(mode="json"), ensure_ascii=False, indent=2)
+        + "\n",
         encoding="utf-8",
     )
     with (meta / "chunks.jsonl").open("w", encoding="utf-8") as file:
         for chunk in chunks:
-            file.write(json.dumps(chunk.model_dump(mode="json"), ensure_ascii=False) + "\n")
+            file.write(
+                json.dumps(chunk.model_dump(mode="json"), ensure_ascii=False) + "\n"
+            )
 
 
 def read_manifest(*, metadata_dir: Path, collection: str) -> IndexManifest:
