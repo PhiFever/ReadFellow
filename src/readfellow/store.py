@@ -72,7 +72,13 @@ def open_or_create_collection(
 
     if path.exists():
         coll = zvec.open(str(path))
-        existing_dim = coll.schema.vector(EMBEDDING_FIELD).dimension
+        vector_schema = coll.schema.vector(EMBEDDING_FIELD)
+        if vector_schema is None:
+            raise ValueError(
+                f"collection is missing required vector field {EMBEDDING_FIELD!r}; "
+                "use --rebuild to recreate it"
+            )
+        existing_dim = vector_schema.dimension
         if existing_dim != dimension:
             raise ValueError(
                 f"collection dimension is {existing_dim}, but embedding dimension is {dimension}; "

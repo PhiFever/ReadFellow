@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 import json
 from pathlib import Path
 import re
@@ -770,7 +770,7 @@ def _case_key(value: Any) -> str:
 
 
 def _has_same_values(
-    items: list[BaseModel],
+    items: Sequence[BaseModel],
     candidate: BaseModel,
     *,
     keys: tuple[str, ...],
