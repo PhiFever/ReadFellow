@@ -12,10 +12,12 @@ from pydantic import BaseModel
 from .models import (
     Chunk,
     ChunkContext,
+    GraphChunkFingerprint,
     GraphEntity,
     GraphEvidence,
     GraphExtraction,
     GraphExtractionRecord,
+    GraphExtractionSettings,
     GraphQueryResult,
     GraphRelation,
     IndexManifest,
@@ -26,7 +28,8 @@ from .models import (
 from .store import metadata_path
 
 
-GRAPH_SCHEMA_VERSION = 1
+GRAPH_SCHEMA_VERSION = 2
+GRAPH_PROMPT_VERSION = "graph-extraction-v1"
 ENTITY_TYPES = ("人物", "地点", "组织", "物品", "事件", "概念")
 RELATION_TYPES = (
     "是",
@@ -141,13 +144,16 @@ def empty_graph(
     collection: str,
     manifest: IndexManifest | None = None,
     llm_model: str = "",
+    extraction_settings: GraphExtractionSettings | None = None,
 ) -> KnowledgeGraph:
     now = utc_now_iso()
     return KnowledgeGraph(
         schema_version=GRAPH_SCHEMA_VERSION,
+        prompt_version=GRAPH_PROMPT_VERSION,
         collection=collection,
         source_path=manifest.source_path if manifest else "",
         llm_model=llm_model,
+        extraction_settings=extraction_settings or GraphExtractionSettings(),
         created_at=now,
         updated_at=now,
     )
@@ -159,13 +165,16 @@ def update_graph_metadata(
     collection: str,
     manifest: IndexManifest,
     llm_model: str,
+    extraction_settings: GraphExtractionSettings,
     progress: ProgressFilter,
     selected_chunk_count: int,
 ) -> None:
     graph.schema_version = GRAPH_SCHEMA_VERSION
+    graph.prompt_version = GRAPH_PROMPT_VERSION
     graph.collection = collection
     graph.source_path = manifest.source_path
     graph.llm_model = llm_model
+    graph.extraction_settings = extraction_settings
     graph.updated_at = utc_now_iso()
     graph.progress_limit = progress.description
     graph.selected_chunk_count = selected_chunk_count
@@ -180,6 +189,62 @@ def processed_chunk_ids(graph: KnowledgeGraph) -> set[str]:
     }
 
 
+def graph_staleness_reason(
+    graph: KnowledgeGraph,
+    chunks: list[Chunk],
+    *,
+    collection: str,
+    source_path: str,
+    llm_model: str | None = None,
+    extraction_settings: GraphExtractionSettings | None = None,
+) -> str | None:
+    if graph.schema_version != GRAPH_SCHEMA_VERSION:
+        return "graph schema version changed"
+    if graph.prompt_version != GRAPH_PROMPT_VERSION:
+        return "graph extraction prompt changed"
+    if graph.collection != collection or graph.source_path != source_path:
+        return "graph source metadata changed"
+    if llm_model is not None and graph.llm_model != llm_model:
+        return "graph generator model changed"
+    if (
+        extraction_settings is not None
+        and graph.extraction_settings != extraction_settings
+    ):
+        return "graph extraction settings changed"
+
+    chunks_by_id = {chunk.id: chunk for chunk in chunks}
+    extraction_ids = [record.chunk_id for record in graph.extractions]
+    if len(extraction_ids) != len(set(extraction_ids)):
+        return "graph extraction metadata is inconsistent"
+    if set(graph.source_chunk_hashes) != set(extraction_ids):
+        return "graph source chunk hashes are incomplete"
+
+    for record in graph.extractions:
+        chunk = chunks_by_id.get(record.chunk_id)
+        if chunk is None:
+            return "graph source chunks changed"
+        fingerprint = graph.source_chunk_hashes.get(record.chunk_id)
+        expected_fingerprint = GraphChunkFingerprint(
+            source_hash=chunk.source_hash,
+            text_hash=chunk.text_hash,
+        )
+        if fingerprint != expected_fingerprint:
+            return "graph source chunk hashes changed"
+        if (
+            record.source_path != chunk.source_path
+            or record.chunk_index != chunk.chunk_index
+            or record.line_start != chunk.line_start
+            or record.line_end != chunk.line_end
+            or record.byte_start != chunk.byte_start
+            or record.byte_end != chunk.byte_end
+            or record.chapter != chunk.chapter
+            or record.source_hash != chunk.source_hash
+            or record.text_hash != chunk.text_hash
+        ):
+            return "graph source chunk metadata changed"
+    return None
+
+
 def build_extraction_prompt(chunk: Chunk | ChunkContext | Mapping[str, Any]) -> str:
     context = _chunk_context(chunk)
     text = _chunk_text(chunk)
@@ -187,6 +252,7 @@ def build_extraction_prompt(chunk: Chunk | ChunkContext | Mapping[str, Any]) -> 
     relation_types = "、".join(RELATION_TYPES)
     chapter = context.chapter or "(无章节)"
     return (
+        f"prompt_version: {GRAPH_PROMPT_VERSION}\n"
         "你是一个面向小说和长文档的本地知识图谱抽取器。只根据给定片段抽取事实，"
         "不要补充片段之外的信息。不要输出思考过程，不要使用 <think> 标签。\n\n"
         "返回严格 JSON，不要 Markdown，不要解释。JSON schema:\n"
@@ -220,18 +286,19 @@ def parse_graph_extraction(
 ) -> GraphExtraction:
     payload = _parse_json_object(raw)
     context = _chunk_context(chunk)
+    chunk_text = _chunk_text(chunk)
     entities: list[GraphEntity] = []
     relations: list[GraphRelation] = []
 
     for item in _as_list(_get_any(payload, ("entities", "实体"), [])):
-        entity = _parse_entity(item, context)
+        entity = _parse_entity(item, context, chunk_text)
         if entity is not None:
             entities.append(entity)
 
     for item in _as_list(
         _get_any(payload, ("relations", "关系", "triples", "edges"), [])
     ):
-        relation = _parse_relation(item, context)
+        relation = _parse_relation(item, context, chunk_text)
         if relation is not None:
             relations.append(relation)
 
@@ -330,6 +397,14 @@ def finalize_graph(graph: KnowledgeGraph) -> None:
             item.chunk_id,
         ),
     )
+    graph.source_chunk_hashes = {
+        record.chunk_id: GraphChunkFingerprint(
+            source_hash=record.source_hash,
+            text_hash=record.text_hash,
+        )
+        for record in graph.extractions
+        if record.chunk_id
+    }
     graph.processed_chunk_count = len(graph.extractions)
     graph.entity_count = len(graph.entities)
     graph.relation_count = len(graph.relations)
@@ -387,7 +462,11 @@ def _parse_json_object(raw: str | Mapping[str, Any]) -> Mapping[str, Any]:
     return parsed
 
 
-def _parse_entity(item: Any, context: ChunkContext) -> GraphEntity | None:
+def _parse_entity(
+    item: Any,
+    context: ChunkContext,
+    chunk_text: str,
+) -> GraphEntity | None:
     if isinstance(item, str):
         name = _normalize_text(item)
         types: list[str] = []
@@ -409,6 +488,10 @@ def _parse_entity(item: Any, context: ChunkContext) -> GraphEntity | None:
 
     if not name:
         return None
+    if evidence and evidence not in chunk_text:
+        raise ValueError(
+            f"entity evidence is not an exact substring of chunk {context.chunk_id}"
+        )
 
     entity = GraphEntity(
         name=name,
@@ -423,7 +506,11 @@ def _parse_entity(item: Any, context: ChunkContext) -> GraphEntity | None:
     return entity
 
 
-def _parse_relation(item: Any, context: ChunkContext) -> GraphRelation | None:
+def _parse_relation(
+    item: Any,
+    context: ChunkContext,
+    chunk_text: str,
+) -> GraphRelation | None:
     if not isinstance(item, Mapping):
         return None
 
@@ -433,6 +520,10 @@ def _parse_relation(item: Any, context: ChunkContext) -> GraphRelation | None:
     evidence = _normalize_text(_get_any(item, _EVIDENCE_KEYS, ""))
     if not subject or not relation or not object_:
         return None
+    if evidence and evidence not in chunk_text:
+        raise ValueError(
+            f"relation evidence is not an exact substring of chunk {context.chunk_id}"
+        )
 
     return GraphRelation(
         subject=subject,
@@ -498,6 +589,8 @@ def _mark_extracted(
     graph.extractions.append(
         GraphExtractionRecord(
             **record.model_dump(mode="json"),
+            source_hash=_chunk_value(chunk, "source_hash"),
+            text_hash=_chunk_value(chunk, "text_hash"),
             entity_count=len(extraction.entities),
             relation_count=len(extraction.relations),
         )
@@ -587,6 +680,8 @@ def _chunk_context(chunk: Chunk | ChunkContext | Mapping[str, Any]) -> ChunkCont
             chunk_index=chunk.chunk_index,
             line_start=chunk.line_start,
             line_end=chunk.line_end,
+            byte_start=chunk.byte_start,
+            byte_end=chunk.byte_end,
             chapter=chunk.chapter,
         )
     if isinstance(chunk, ChunkContext):
@@ -601,6 +696,8 @@ def _chunk_context(chunk: Chunk | ChunkContext | Mapping[str, Any]) -> ChunkCont
         chunk_index=_int_value(data.get("chunk_index")),
         line_start=_int_value(data.get("line_start")),
         line_end=_int_value(data.get("line_end")),
+        byte_start=_int_value(data.get("byte_start")),
+        byte_end=_int_value(data.get("byte_end")),
         chapter=str(data.get("chapter", "")),
     )
 
@@ -611,6 +708,15 @@ def _chunk_text(chunk: Chunk | ChunkContext | Mapping[str, Any]) -> str:
     if isinstance(chunk, BaseModel):
         return str(getattr(chunk, "text", ""))
     return str(chunk.get("text", ""))
+
+
+def _chunk_value(
+    chunk: Chunk | ChunkContext | Mapping[str, Any],
+    key: str,
+) -> str:
+    if isinstance(chunk, BaseModel):
+        return str(getattr(chunk, key, ""))
+    return str(chunk.get(key, ""))
 
 
 def _get_any(

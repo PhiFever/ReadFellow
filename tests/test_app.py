@@ -1,24 +1,30 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
+import pytest
 from zvec import Doc
 
 from readfellow import app
 from readfellow.app import (
+    GraphBuildOptions,
     ProgressLimit,
+    build_graph,
     fetch_chunk,
     fts_search,
     query_graph,
     semantic_search,
 )
+from readfellow.chunking import chunk_document, sha256_file, sha256_text
 from readfellow.config import OllamaConfig, PathConfig, ReadFellowConfig, SearchConfig
 from readfellow.graph import (
     empty_graph,
     graph_path,
     merge_extraction,
     parse_graph_extraction,
+    read_graph,
     write_graph,
 )
 from readfellow.models import Chunk, IndexManifest
@@ -36,6 +42,292 @@ def manifest_for(source: Path) -> IndexManifest:
         chunk_chars=100,
         overlap_chars=10,
     )
+
+
+class DeterministicGenerator:
+    def __init__(self, responses: list[dict[str, object]]) -> None:
+        self._responses = iter(responses)
+        self.prompts: list[str] = []
+
+    def generate_json(self, prompt: str) -> str:
+        self.prompts.append(prompt)
+        return json.dumps(next(self._responses), ensure_ascii=False)
+
+
+def test_graph_build_records_versioned_source_fingerprints(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "novel.txt"
+    source.write_text("第一章 开始\n\n向山帮助了尤基。\n", encoding="utf-8")
+    chunks = chunk_document(
+        source,
+        source_path=str(source),
+        target_chars=100,
+        overlap_chars=0,
+    )
+    config = ReadFellowConfig(
+        paths=PathConfig(
+            index_dir=tmp_path / "indexes",
+            metadata_dir=tmp_path / "metadata",
+        )
+    )
+    write_manifest(
+        metadata_dir=config.paths.metadata_dir,
+        collection="books",
+        manifest=manifest_for(source),
+        chunks=chunks,
+    )
+    generator = DeterministicGenerator(
+        [
+            {
+                "entities": [
+                    {
+                        "name": "向山",
+                        "type": "人物",
+                        "evidence": "向山帮助了尤基",
+                    },
+                    {"name": "尤基", "type": "人物"},
+                ],
+                "relations": [
+                    {
+                        "subject": "向山",
+                        "relation": "帮助",
+                        "object": "尤基",
+                        "evidence": "向山帮助了尤基",
+                    }
+                ],
+            }
+        ]
+    )
+
+    result = build_graph(
+        config,
+        "books",
+        options=GraphBuildOptions(retries=0),
+        generator=generator,
+    )
+
+    assert result.status == "built"
+    assert len(generator.prompts) == 1
+    assert "prompt_version: graph-extraction-v1" in generator.prompts[0]
+    graph = read_graph(result.graph_path)
+    assert graph.prompt_version == "graph-extraction-v1"
+    assert graph.model_dump(mode="json")["source_chunk_hashes"] == {
+        chunks[0].id: {
+            "source_hash": chunks[0].source_hash,
+            "text_hash": chunks[0].text_hash,
+        }
+    }
+    assert graph.extraction_settings.model_dump() == {
+        "temperature": 0.0,
+        "num_predict": config.graph.num_predict,
+        "retries": 0,
+    }
+    assert graph.extractions[0].model_dump() == {
+        "chunk_id": chunks[0].id,
+        "source_path": chunks[0].source_path,
+        "chunk_index": chunks[0].chunk_index,
+        "line_start": chunks[0].line_start,
+        "line_end": chunks[0].line_end,
+        "byte_start": chunks[0].byte_start,
+        "byte_end": chunks[0].byte_end,
+        "chapter": chunks[0].chapter,
+        "source_hash": chunks[0].source_hash,
+        "text_hash": chunks[0].text_hash,
+        "entity_count": 2,
+        "relation_count": 1,
+    }
+
+    fail_if_called = DeterministicGenerator([])
+    second = build_graph(
+        config,
+        "books",
+        options=GraphBuildOptions(retries=0),
+        generator=fail_if_called,
+    )
+
+    assert second.status == "up_to_date"
+    assert fail_if_called.prompts == []
+
+    graph.prompt_version = "legacy"
+    write_graph(result.graph_path, graph)
+    refreshed = DeterministicGenerator(
+        [
+            {
+                "entities": [
+                    {
+                        "name": "向山",
+                        "type": "人物",
+                        "evidence": "向山帮助了尤基",
+                    }
+                ],
+                "relations": [],
+            }
+        ]
+    )
+    rebuilt = build_graph(
+        config,
+        "books",
+        options=GraphBuildOptions(retries=0),
+        generator=refreshed,
+    )
+
+    assert rebuilt.status == "rebuilt"
+    assert len(refreshed.prompts) == 1
+
+
+def test_graph_build_retries_evidence_that_is_not_source_grounded(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "novel.txt"
+    source.write_text("第一章 开始\n\n向山帮助了尤基。\n", encoding="utf-8")
+    chunks = chunk_document(
+        source,
+        source_path=str(source),
+        target_chars=100,
+        overlap_chars=0,
+    )
+    config = ReadFellowConfig(
+        paths=PathConfig(
+            index_dir=tmp_path / "indexes",
+            metadata_dir=tmp_path / "metadata",
+        )
+    )
+    write_manifest(
+        metadata_dir=config.paths.metadata_dir,
+        collection="books",
+        manifest=manifest_for(source),
+        chunks=chunks,
+    )
+    generator = DeterministicGenerator(
+        [
+            {
+                "entities": [],
+                "relations": [
+                    {
+                        "subject": "向山",
+                        "relation": "帮助",
+                        "object": "尤基",
+                        "evidence": "向山打败了尤基",
+                    }
+                ],
+            },
+            {
+                "entities": [],
+                "relations": [
+                    {
+                        "subject": "向山",
+                        "relation": "帮助",
+                        "object": "尤基",
+                        "evidence": "向山帮助了尤基",
+                    }
+                ],
+            },
+        ]
+    )
+
+    result = build_graph(
+        config,
+        "books",
+        options=GraphBuildOptions(retries=1),
+        generator=generator,
+    )
+
+    graph = read_graph(result.graph_path)
+    assert len(generator.prompts) == 2
+    assert [relation.evidence for relation in graph.relations] == [
+        "向山帮助了尤基"
+    ]
+
+
+def test_changed_chunk_metadata_invalidates_queries_and_rebuilds_graph(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "novel.txt"
+    source.write_text("第一章 开始\n\n向山帮助了尤基。\n", encoding="utf-8")
+    first_chunks = chunk_document(
+        source,
+        source_path=str(source),
+        target_chars=100,
+        overlap_chars=0,
+    )
+    config = ReadFellowConfig(
+        paths=PathConfig(
+            index_dir=tmp_path / "indexes",
+            metadata_dir=tmp_path / "metadata",
+        )
+    )
+    write_manifest(
+        metadata_dir=config.paths.metadata_dir,
+        collection="books",
+        manifest=manifest_for(source),
+        chunks=first_chunks,
+    )
+    build_graph(
+        config,
+        "books",
+        options=GraphBuildOptions(retries=0),
+        generator=DeterministicGenerator(
+            [
+                {
+                    "entities": [
+                        {
+                            "name": "向山",
+                            "type": "人物",
+                            "evidence": "向山帮助了尤基",
+                        }
+                    ],
+                    "relations": [],
+                }
+            ]
+        ),
+    )
+
+    source.write_text("第一章 开始\n\n尤基离开了房间。\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="chunk metadata is stale"):
+        query_graph(config, "向山", "books")
+
+    changed = chunk_document(
+        source,
+        source_path=str(source),
+        target_chars=100,
+        overlap_chars=0,
+    )[0].model_copy(update={"id": first_chunks[0].id})
+    write_manifest(
+        metadata_dir=config.paths.metadata_dir,
+        collection="books",
+        manifest=manifest_for(source),
+        chunks=[changed],
+    )
+
+    with pytest.raises(RuntimeError, match="graph index is stale"):
+        query_graph(config, "向山", "books")
+
+    result = build_graph(
+        config,
+        "books",
+        options=GraphBuildOptions(retries=0),
+        generator=DeterministicGenerator(
+            [
+                {
+                    "entities": [
+                        {
+                            "name": "尤基",
+                            "type": "人物",
+                            "evidence": "尤基离开了房间",
+                        }
+                    ],
+                    "relations": [],
+                }
+            ]
+        ),
+    )
+
+    graph = read_graph(result.graph_path)
+    assert result.status == "rebuilt"
+    assert [entity.name for entity in graph.entities] == ["尤基"]
+    assert graph.extractions[0].source_hash == changed.source_hash
+    assert graph.extractions[0].text_hash == changed.text_hash
 
 
 def test_semantic_search_is_configured_application_workflow(
@@ -249,14 +541,15 @@ def test_graph_query_returns_original_chunk_as_evidence(tmp_path: Path) -> None:
         )
     )
     manifest = manifest_for(source).model_copy(update={"chunk_count": 2})
+    source_hash = sha256_file(source)
     original_start = len("第一章 开始\n".encode("utf-8"))
     original = Chunk(
         id="chunk_000004",
         source_path=str(source),
-        source_hash="source-hash",
+        source_hash=source_hash,
         chunk_index=4,
         text=original_text,
-        text_hash="graph-chunk-hash",
+        text_hash=sha256_text(original_text),
         line_start=2,
         line_end=2,
         byte_start=original_start,
@@ -268,7 +561,7 @@ def test_graph_query_returns_original_chunk_as_evidence(tmp_path: Path) -> None:
             "id": "chunk_000005",
             "chunk_index": 5,
             "text": unrelated_text,
-            "text_hash": "unrelated-hash",
+            "text_hash": sha256_text(unrelated_text),
             "line_start": 3,
             "line_end": 3,
             "byte_start": original.byte_end + 1,
@@ -339,13 +632,14 @@ def test_graph_query_does_not_match_alias_learned_after_progress(
         )
     )
     manifest = manifest_for(source).model_copy(update={"chunk_count": 2})
+    source_hash = sha256_file(source)
     early = Chunk(
         id="chunk_000006",
         source_path=str(source),
-        source_hash="source-hash",
+        source_hash=source_hash,
         chunk_index=6,
         text=early_text,
-        text_hash="early-alias-hash",
+        text_hash=sha256_text(early_text),
         line_start=1,
         line_end=2,
         byte_start=0,
@@ -356,10 +650,10 @@ def test_graph_query_does_not_match_alias_learned_after_progress(
     late = Chunk(
         id="chunk_000007",
         source_path=str(source),
-        source_hash="source-hash",
+        source_hash=source_hash,
         chunk_index=7,
         text=late_text,
-        text_hash="late-alias-hash",
+        text_hash=sha256_text(late_text),
         line_start=3,
         line_end=4,
         byte_start=late_start,

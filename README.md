@@ -75,7 +75,10 @@ uv run readfellow graph-query "武神" --collection sample --max-chapter 10
 
 `graph-index` also supports `--rebuild`, `--max-chapter`, `--max-line`, and
 `--max-chunk-index`, so graph extraction can follow the same spoiler limits as
-search, FTS, and fetch.
+search, FTS, and fetch. Extracted evidence must occur verbatim in its source
+chunk. The graph records its prompt version, extraction settings, and source
+chunk hashes. A source/chunk mismatch must be re-indexed; stale graph metadata is
+rejected by `graph-query` and rebuilt on the next `graph-index` run.
 
 The default embedding endpoint and models are configured in `config.yaml`.
 

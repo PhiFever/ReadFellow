@@ -176,6 +176,8 @@ class ChunkContext(ReadFellowModel):
     chunk_index: int = 0
     line_start: int = 0
     line_end: int = 0
+    byte_start: int = 0
+    byte_end: int = 0
     chapter: str = ""
 
 
@@ -203,6 +205,8 @@ class GraphRelation(ChunkContext):
 
 
 class GraphExtractionRecord(ChunkContext):
+    source_hash: str = ""
+    text_hash: str = ""
     entity_count: int = 0
     relation_count: int = 0
 
@@ -212,13 +216,33 @@ class GraphExtraction(ReadFellowModel):
     relations: list[GraphRelation] = Field(default_factory=list)
 
 
+class GraphExtractionSettings(ReadFellowModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    temperature: float = 0.0
+    num_predict: int = 0
+    retries: int = 0
+
+
+class GraphChunkFingerprint(ReadFellowModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    source_hash: str = ""
+    text_hash: str = ""
+
+
 class KnowledgeGraph(ReadFellowModel):
     model_config = ConfigDict(extra="allow")
 
     schema_version: int = 1
+    prompt_version: str = ""
     collection: str = ""
     source_path: str = ""
     llm_model: str = ""
+    extraction_settings: GraphExtractionSettings = GraphExtractionSettings()
+    source_chunk_hashes: dict[str, GraphChunkFingerprint] = Field(
+        default_factory=dict
+    )
     created_at: str = Field(default_factory=utc_now_iso)
     updated_at: str = Field(default_factory=utc_now_iso)
     progress_limit: str = ""

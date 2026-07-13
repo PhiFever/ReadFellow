@@ -4,13 +4,14 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 import time
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
-from .chunking import chunk_document
+from .chunking import chunk_document, sha256_file
 from .config import ReadFellowConfig
 from .graph import (
     build_extraction_prompt,
     empty_graph,
+    graph_staleness_reason,
     graph_path,
     merge_extraction,
     parse_graph_extraction,
@@ -25,13 +26,14 @@ from .models import (
     Chunk,
     Evidence,
     EvidenceGraphContext,
+    GraphExtractionSettings,
     GraphQueryResult,
     IndexManifest,
     ProgressFilter,
     QueryChunkFields,
 )
 from .ollama import OllamaEmbedder, OllamaGenerator
-from .progress import build_progress_filter
+from .progress import build_progress_filter, source_from_manifest
 from .store import (
     chunk_to_doc,
     collection_path,
@@ -126,6 +128,10 @@ class GraphBuildResult:
     selected_chunk_count: int
     entity_count: int
     relation_count: int
+
+
+class GraphGenerator(Protocol):
+    def generate_json(self, prompt: str) -> str: ...
 
 
 @dataclass(frozen=True)
@@ -377,18 +383,21 @@ def build_graph(
     progress: ProgressLimit | None = None,
     options: GraphBuildOptions | None = None,
     on_progress: Callable[[GraphBuildEvent], None] | None = None,
+    generator: GraphGenerator | None = None,
 ) -> GraphBuildResult:
     options = options or GraphBuildOptions()
     manifest = read_manifest(
         metadata_dir=config.paths.metadata_dir, collection=collection
     )
+    all_chunks = read_chunks(
+        metadata_dir=config.paths.metadata_dir,
+        collection=collection,
+    )
+    _validate_chunk_metadata_source(manifest, all_chunks)
     progress_filter = progress_filter_from_limit(progress, manifest=manifest)
-
     chunks = [
         chunk
-        for chunk in read_chunks(
-            metadata_dir=config.paths.metadata_dir, collection=collection
-        )
+        for chunk in all_chunks
         if progress_filter.allows(chunk)
     ]
     if options.limit:
@@ -396,20 +405,53 @@ def build_graph(
 
     path = graph_path(config.paths.metadata_dir, collection)
     llm_model = options.llm_model or config.ollama.generation_model
-    if path.exists() and not options.rebuild:
+    num_predict = (
+        config.graph.num_predict
+        if options.num_predict is None
+        else options.num_predict
+    )
+    retries = config.graph.retries if options.retries is None else options.retries
+    extraction_settings = GraphExtractionSettings(
+        temperature=0.0,
+        num_predict=num_predict,
+        retries=retries,
+    )
+    path_existed = path.exists()
+    rebuilt = path_existed and options.rebuild
+    if path_existed and not options.rebuild:
         graph = read_graph(path)
+        stale_reason = graph_staleness_reason(
+            graph,
+            all_chunks,
+            collection=collection,
+            source_path=manifest.source_path,
+            llm_model=llm_model,
+            extraction_settings=extraction_settings,
+        )
+        if stale_reason is not None:
+            graph = empty_graph(
+                collection=collection,
+                manifest=manifest,
+                llm_model=llm_model,
+                extraction_settings=extraction_settings,
+            )
+            rebuilt = True
     else:
         graph = empty_graph(
-            collection=collection, manifest=manifest, llm_model=llm_model
+            collection=collection,
+            manifest=manifest,
+            llm_model=llm_model,
+            extraction_settings=extraction_settings,
         )
 
-    processed = set() if options.rebuild else processed_chunk_ids(graph)
+    processed = processed_chunk_ids(graph)
     pending = [chunk for chunk in chunks if chunk.id not in processed]
     update_graph_metadata(
         graph,
         collection=collection,
         manifest=manifest,
         llm_model=llm_model,
+        extraction_settings=extraction_settings,
         progress=progress_filter,
         selected_chunk_count=len(chunks),
     )
@@ -440,13 +482,13 @@ def build_graph(
             relation_count=graph.relation_count,
         )
 
-    generator = OllamaGenerator(
-        base_url=config.ollama.base_url,
-        model=llm_model,
-        keep_alive=config.ollama.keep_alive,
-        num_predict=options.num_predict or config.graph.num_predict,
-    )
-    retries = config.graph.retries if options.retries is None else options.retries
+    if generator is None:
+        generator = OllamaGenerator(
+            base_url=config.ollama.base_url,
+            model=llm_model,
+            keep_alive=config.ollama.keep_alive,
+            num_predict=num_predict,
+        )
 
     for index, chunk in enumerate(pending, start=1):
         chunk_id = chunk.id
@@ -495,6 +537,7 @@ def build_graph(
             collection=collection,
             manifest=manifest,
             llm_model=llm_model,
+            extraction_settings=extraction_settings,
             progress=progress_filter,
             selected_chunk_count=len(chunks),
         )
@@ -514,7 +557,7 @@ def build_graph(
     return GraphBuildResult(
         collection=collection,
         graph_path=path,
-        status="built",
+        status="rebuilt" if rebuilt else "built",
         selected_chunk_count=len(chunks),
         entity_count=graph.entity_count,
         relation_count=graph.relation_count,
@@ -531,19 +574,32 @@ def query_graph(
     manifest = read_manifest(
         metadata_dir=config.paths.metadata_dir, collection=collection
     )
-    progress_filter = progress_filter_from_limit(progress, manifest=manifest)
     path = graph_path(config.paths.metadata_dir, collection)
     if not path.is_file():
         raise FileNotFoundError(f"graph index not found: {path}; run graph-index first")
 
+    all_chunks = read_chunks(
+        metadata_dir=config.paths.metadata_dir,
+        collection=collection,
+    )
+    _validate_chunk_metadata_source(manifest, all_chunks)
+    progress_filter = progress_filter_from_limit(progress, manifest=manifest)
     graph = read_graph(path)
+    stale_reason = graph_staleness_reason(
+        graph,
+        all_chunks,
+        collection=collection,
+        source_path=manifest.source_path,
+    )
+    if stale_reason is not None:
+        raise RuntimeError(
+            f"graph index is stale ({stale_reason}); run graph-index to rebuild it"
+        )
+
     graph_result = query_knowledge_graph(graph, query, progress=progress_filter)
     chunks = [
         chunk
-        for chunk in read_chunks(
-            metadata_dir=config.paths.metadata_dir,
-            collection=collection,
-        )
+        for chunk in all_chunks
         if progress_filter.allows(chunk)
     ]
     return GraphSearchResult(
@@ -575,6 +631,28 @@ def progress_filter_from_limit(
         max_line=progress.max_line,
         max_chunk_index=progress.max_chunk_index,
     )
+
+
+def _validate_chunk_metadata_source(
+    manifest: IndexManifest,
+    chunks: list[Chunk],
+) -> None:
+    if not chunks:
+        return
+    if any(chunk.source_path != manifest.source_path for chunk in chunks):
+        raise RuntimeError(
+            "chunk metadata is stale (source path changed); run index to rebuild it"
+        )
+
+    source = source_from_manifest(manifest)
+    if not source.is_file():
+        raise FileNotFoundError(f"source file for chunk metadata not found: {source}")
+    current_hash = sha256_file(source)
+    if any(chunk.source_hash != current_hash for chunk in chunks):
+        raise RuntimeError(
+            "chunk metadata is stale (source file hash changed); "
+            "run index to rebuild it"
+        )
 
 
 def _relative_source_path(source: Path) -> str:

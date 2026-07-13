@@ -341,3 +341,16 @@ CLI 应只负责解析参数、调用这些模块并格式化输出。
 - 增加真实临时 zvec smoke test，覆盖 optimize 后重开、中文 FTS、阅读进度过滤和 fetch 原文。
 
 本轮没有实现 hybrid ranking、重型 GraphRAG、MCP、reader adapters 或索引原子发布。下一步仍按优先级 3 单独加固 graph extraction。
+
+## 2026-07-13 Graph Extraction MVP 记录
+
+已完成优先级 3 的最小可用实现：
+
+- 实体和关系的非空 evidence 必须是对应原始 chunk 的精确子串；无效 evidence 会触发现有重试，不能落入 graph。
+- graph schema 提升到 v2，并记录独立的 extraction prompt version、生成模型和有效 extraction settings。
+- 每条 extraction 记录 source/text hash、行/字节范围；graph metadata 同时保存按 chunk id 索引的 source chunk fingerprints。
+- graph workflow 会先核对原始 source hash 与 chunk metadata，再校验已处理 chunk 的版本、位置和 hashes；任一派生层 stale 时都 fail closed。
+- `graph-index` 遇到旧 schema、prompt/model/settings 变化或已处理 chunk metadata 变化时自动整图重建；仅新增 chunk 仍断点续建。
+- `build_graph` 接受最小 `GraphGenerator` adapter，确定性测试覆盖无效 evidence 重试、落盘重开、up-to-date 跳过及 stale rebuild。
+
+本轮没有实现逐 alias/type provenance、局部 graph surgery、provider registry、hybrid retrieval 或重型 GraphRAG。下一步按优先级 4 实现简单本地 hybrid retrieval。

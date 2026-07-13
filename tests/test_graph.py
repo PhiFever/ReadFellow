@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from readfellow.graph import (
     empty_graph,
     merge_extraction,
@@ -18,8 +20,8 @@ def chunk(
     line_start: int = 1,
     line_end: int = 8,
     chapter: str = "第一章 开始",
+    text: str = "向山被人称作武神。他帮助了尤基。",
 ) -> Chunk:
-    text = "向山被人称作武神。他帮助了尤基。"
     return Chunk(
         id=f"chunk_{chunk_index:06d}",
         source_path="corpus/samples/novel.txt",
@@ -67,7 +69,12 @@ def test_parse_and_merge_graph_extractions() -> None:
     extraction = parse_graph_extraction(json.dumps(payload, ensure_ascii=False), first)
     merge_extraction(graph, extraction, first)
 
-    second = chunk(chunk_index=1, line_start=9, line_end=14)
+    second = chunk(
+        chunk_index=1,
+        line_start=9,
+        line_end=14,
+        text="老向认识尤基。",
+    )
     second_payload = {
         "entities": [
             {"name": "向山", "types": ["人物"], "aliases": ["老向"]},
@@ -108,7 +115,7 @@ def test_graph_query_matches_entity_alias_and_relation_keyword() -> None:
                 "subject": "向山",
                 "relation": "帮助",
                 "object": "尤基",
-                "evidence": "向山帮助了尤基",
+                "evidence": "他帮助了尤基",
             },
         ],
     }
@@ -139,10 +146,51 @@ def test_parse_skips_unknown_relation_types() -> None:
     ] == [("帮助", "尤基")]
 
 
+def test_parse_rejects_evidence_not_found_verbatim_in_chunk() -> None:
+    with pytest.raises(ValueError, match="entity evidence is not an exact substring"):
+        parse_graph_extraction(
+            {
+                "entities": [
+                    {
+                        "name": "向山",
+                        "type": "人物",
+                        "evidence": "向山打败了尤基",
+                    }
+                ],
+                "relations": [],
+            },
+            chunk(),
+        )
+
+
+def test_parse_rejects_relation_evidence_not_found_verbatim_in_chunk() -> None:
+    with pytest.raises(ValueError, match="relation evidence is not an exact substring"):
+        parse_graph_extraction(
+            {
+                "entities": [],
+                "relations": [
+                    {
+                        "subject": "向山",
+                        "relation": "帮助",
+                        "object": "尤基",
+                        "evidence": "向山打败了尤基",
+                    }
+                ],
+            },
+            chunk(),
+        )
+
+
 def test_graph_query_progress_filters_future_relations() -> None:
     graph = empty_graph(collection="sample")
     early = chunk(chunk_index=0, line_start=1, line_end=8)
-    late = chunk(chunk_index=4, line_start=30, line_end=40, chapter="第二章 之后")
+    late = chunk(
+        chunk_index=4,
+        line_start=30,
+        line_end=40,
+        chapter="第二章 之后",
+        text="组织A开始敌对向山。",
+    )
     merge_extraction(
         graph,
         parse_graph_extraction(
@@ -156,7 +204,7 @@ def test_graph_query_progress_filters_future_relations() -> None:
                         "subject": "向山",
                         "relation": "帮助",
                         "object": "尤基",
-                        "evidence": "向山帮助了尤基",
+                        "evidence": "他帮助了尤基",
                     }
                 ],
             },
