@@ -531,7 +531,9 @@ def _filter_entity(
     progress: ProgressFilter | None,
 ) -> GraphEntity | None:
     filtered = entity.model_copy(deep=True)
-    if progress is None:
+    if progress is None or (
+        progress.max_line_end is None and progress.max_chunk_index is None
+    ):
         return filtered
 
     filtered.mentions = [
@@ -540,6 +542,11 @@ def _filter_entity(
     filtered.evidence = [
         evidence for evidence in filtered.evidence if _allowed(progress, evidence)
     ]
+    # Aliases and types are currently aggregated without per-value provenance.
+    # Do not expose or match them under a progress limit until their source
+    # chunks can be proven to be inside that limit.
+    filtered.aliases = []
+    filtered.types = []
     if not filtered.mentions and not filtered.evidence:
         return None
     return filtered

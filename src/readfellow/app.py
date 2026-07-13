@@ -4,7 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 import time
-from typing import Any
+from typing import Any, Literal
 
 from .chunking import chunk_document
 from .config import ReadFellowConfig
@@ -22,6 +22,9 @@ from .graph import (
     write_graph,
 )
 from .models import (
+    Chunk,
+    Evidence,
+    EvidenceGraphContext,
     GraphQueryResult,
     IndexManifest,
     ProgressFilter,
@@ -82,14 +85,14 @@ class IndexDocumentResult:
 @dataclass(frozen=True)
 class SearchResult:
     progress: ProgressFilter
-    docs: list[Any]
+    evidence: list[Evidence]
 
 
 @dataclass(frozen=True)
 class FetchChunkResult:
     progress: ProgressFilter
-    doc: Any | None
-    allowed: bool
+    status: Literal["found", "not_found", "outside_progress"]
+    evidence: Evidence | None
 
 
 @dataclass(frozen=True)
@@ -128,7 +131,7 @@ class GraphBuildResult:
 @dataclass(frozen=True)
 class GraphSearchResult:
     progress: ProgressFilter
-    result: GraphQueryResult
+    evidence: list[Evidence]
 
 
 def index_document(
@@ -298,7 +301,10 @@ def semantic_search(
         top_k=top_k or config.search.top_k,
         filter=progress_filter.expression,
     )
-    return SearchResult(progress=progress_filter, docs=docs)
+    return SearchResult(
+        progress=progress_filter,
+        evidence=[_evidence_from_doc(doc, retrieval_mode="vector") for doc in docs],
+    )
 
 
 def fts_search(
@@ -318,7 +324,10 @@ def fts_search(
         top_k=top_k or config.search.top_k,
         filter=progress_filter.expression,
     )
-    return SearchResult(progress=progress_filter, docs=docs)
+    return SearchResult(
+        progress=progress_filter,
+        evidence=[_evidence_from_doc(doc, retrieval_mode="fts") for doc in docs],
+    )
 
 
 def fetch_chunk(
@@ -333,13 +342,23 @@ def fetch_chunk(
     progress_filter = progress_filter_from_limit(progress, manifest=manifest)
     doc = fetch_stored_chunk(coll, chunk_id)
     if doc is None:
-        return FetchChunkResult(progress=progress_filter, doc=None, allowed=False)
+        return FetchChunkResult(
+            progress=progress_filter,
+            status="not_found",
+            evidence=None,
+        )
 
     fields = QueryChunkFields.model_validate(doc.fields)
+    if not progress_filter.allows(fields):
+        return FetchChunkResult(
+            progress=progress_filter,
+            status="outside_progress",
+            evidence=None,
+        )
     return FetchChunkResult(
         progress=progress_filter,
-        doc=doc,
-        allowed=progress_filter.allows(fields),
+        status="found",
+        evidence=_evidence_from_doc(doc, retrieval_mode="fetch"),
     )
 
 
@@ -502,9 +521,18 @@ def query_graph(
         raise FileNotFoundError(f"graph index not found: {path}; run graph-index first")
 
     graph = read_graph(path)
+    graph_result = query_knowledge_graph(graph, query, progress=progress_filter)
+    chunks = [
+        chunk
+        for chunk in read_chunks(
+            metadata_dir=config.paths.metadata_dir,
+            collection=collection,
+        )
+        if progress_filter.allows(chunk)
+    ]
     return GraphSearchResult(
         progress=progress_filter,
-        result=query_knowledge_graph(graph, query, progress=progress_filter),
+        evidence=_graph_evidence(graph_result, chunks, query=query),
     )
 
 
@@ -538,6 +566,97 @@ def _relative_source_path(source: Path) -> str:
         return str(source.resolve().relative_to(Path.cwd().resolve()))
     except ValueError:
         return str(source.resolve())
+
+
+def _evidence_from_doc(
+    doc: Any,
+    *,
+    retrieval_mode: Literal["vector", "fts", "fetch", "graph"],
+) -> Evidence:
+    fields = QueryChunkFields.model_validate(doc.fields)
+    return Evidence(
+        chunk_id=doc.id,
+        source_path=fields.source_path,
+        chunk_index=fields.chunk_index,
+        line_start=fields.line_start,
+        line_end=fields.line_end,
+        byte_start=fields.byte_start,
+        byte_end=fields.byte_end,
+        chapter=fields.chapter,
+        text_hash=fields.text_hash,
+        text=fields.text,
+        retrieval_mode=retrieval_mode,
+        score=doc.score,
+    )
+
+
+def _graph_evidence(
+    result: GraphQueryResult,
+    chunks: list[Chunk],
+    *,
+    query: str,
+) -> list[Evidence]:
+    context_by_chunk: dict[str, tuple[set[str], set[str]]] = {}
+
+    def context_for(chunk_id: str) -> tuple[set[str], set[str]]:
+        return context_by_chunk.setdefault(chunk_id, (set(), set()))
+
+    for relation in result.relations:
+        entities, relations = context_for(relation.chunk_id)
+        entities.update(
+            value
+            for value in (
+                relation.subject_entity or relation.subject,
+                relation.object_entity or relation.object,
+            )
+            if value
+        )
+        relations.add(
+            f"{relation.subject} --{relation.relation}--> {relation.object}"
+        )
+
+    needle = query.strip().casefold()
+    for entity in result.entities:
+        identity_values = [entity.name, *entity.aliases, *entity.types]
+        if any(needle in value.casefold() for value in identity_values):
+            matching_contexts = [*entity.mentions, *entity.evidence]
+        else:
+            matching_contexts = [
+                item
+                for item in entity.evidence
+                if needle in item.text.casefold()
+            ]
+        for item in matching_contexts:
+            if item.chunk_id:
+                entities, _ = context_for(item.chunk_id)
+                entities.add(entity.name)
+
+    evidence: list[Evidence] = []
+    for chunk in chunks:
+        context = context_by_chunk.get(chunk.id)
+        if context is None:
+            continue
+        entities, relations = context
+        evidence.append(
+            Evidence(
+                chunk_id=chunk.id,
+                source_path=chunk.source_path,
+                chunk_index=chunk.chunk_index,
+                line_start=chunk.line_start,
+                line_end=chunk.line_end,
+                byte_start=chunk.byte_start,
+                byte_end=chunk.byte_end,
+                chapter=chunk.chapter,
+                text_hash=chunk.text_hash,
+                text=chunk.text,
+                retrieval_mode="graph",
+                graph_context=EvidenceGraphContext(
+                    entities=sorted(entities),
+                    relations=sorted(relations),
+                ),
+            )
+        )
+    return evidence
 
 
 def _emit(

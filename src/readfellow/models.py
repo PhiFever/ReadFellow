@@ -98,9 +98,36 @@ class QueryChunkFields(ReadFellowModel):
     chunk_index: int = 0
     line_start: int = 0
     line_end: int = 0
+    byte_start: int = 0
+    byte_end: int = 0
     chapter: str = ""
     text_hash: str = ""
     text: str = ""
+
+
+class EvidenceGraphContext(ReadFellowModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    entities: list[str] = Field(default_factory=list)
+    relations: list[str] = Field(default_factory=list)
+
+
+class Evidence(ReadFellowModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    chunk_id: str
+    source_path: str
+    chunk_index: int
+    line_start: int
+    line_end: int
+    byte_start: int
+    byte_end: int
+    chapter: str = ""
+    text_hash: str
+    text: str
+    retrieval_mode: Literal["vector", "fts", "fetch", "graph"]
+    score: float | None = None
+    graph_context: EvidenceGraphContext | None = None
 
 
 class ChapterBoundary(ReadFellowModel):

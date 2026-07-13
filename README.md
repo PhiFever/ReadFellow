@@ -80,3 +80,15 @@ search, FTS, and fetch.
 The default embedding endpoint and models are configured in `config.yaml`.
 
 Generated indexes and manifests are written to `indexes/` and `metadata/`.
+
+## Evidence Flow
+
+The reusable workflows in `readfellow.app` return a shared `Evidence` model for
+vector search, FTS, fetch, and graph queries. Each item contains the original
+chunk text together with its chunk id, source path, line range, chapter,
+chunk index, byte range, text hash, retrieval mode, and an optional score. Graph
+queries attach matched entities and relations as context while keeping the
+stored original chunk as the evidence.
+
+`fetch_chunk` returns an explicit `found`, `not_found`, or `outside_progress`
+status. An out-of-progress result never includes the chunk text.

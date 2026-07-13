@@ -327,3 +327,17 @@ CLI 应只负责解析参数、调用这些模块并格式化输出。
 - 可复用应用 workflow 已移入 `src/readfellow/app.py`，包括 `index_document`、`semantic_search`、`fts_search`、`fetch_chunk`、`build_graph` 和 `query_graph`。
 - 项目默认值已统一到根目录 `config.yaml`，并由 `ReadFellowConfig` 加载，供 CLI、测试和未来 library/MCP 入口共用。
 - CLI 参数仍可覆盖配置文件中的默认路径、Ollama 端点、模型、chunk 参数、搜索 top-k 和 graph extraction 设置。
+
+## 2026-07-13 Evidence MVP 记录
+
+已完成优先级 2 的最小可用实现：
+
+- 新增统一 `Evidence` 模型，包含 chunk id/index、来源路径、行/字节范围、章节、text hash、原始 chunk 文本、检索模式、可选分数和可选 graph context。
+- `semantic_search`、`fts_search`、`fetch_chunk` 和 `query_graph` 均返回 Evidence，不再向 CLI 泄漏 zvec `Doc`。
+- `fetch_chunk` 使用 `found`、`not_found`、`outside_progress` 明确区分结果；越过阅读进度时不返回原文。
+- graph query 根据命中的 chunk id 回取已存储的完整原始 chunk，实体与关系只作为导航上下文，不作为权威正文。
+- graph alias/type 尚无逐值 provenance；设置阅读进度时保守地禁用它们的匹配和输出，避免未读信息侧漏。
+- CLI 统一格式化 Evidence，同时保留来源文件、精确行范围和章节。
+- 增加真实临时 zvec smoke test，覆盖 optimize 后重开、中文 FTS、阅读进度过滤和 fetch 原文。
+
+本轮没有实现 hybrid ranking、重型 GraphRAG、MCP、reader adapters 或索引原子发布。下一步仍按优先级 3 单独加固 graph extraction。

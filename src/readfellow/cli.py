@@ -19,13 +19,7 @@ from .app import (
     semantic_search,
 )
 from .config import CONFIG_FILE, ReadFellowConfig, load_config
-from .models import (
-    ChunkContext,
-    GraphQueryResult,
-    GraphRelation,
-    ProgressFilter,
-    QueryChunkFields,
-)
+from .models import Evidence, ProgressFilter
 
 
 def valid_collection_name(value: str) -> str:
@@ -195,7 +189,7 @@ def command_search(args: argparse.Namespace, config: ReadFellowConfig) -> int:
         progress=progress_limit_from_args(args),
     )
     print_progress(result.progress)
-    print_docs(result.docs)
+    print_evidence(result.evidence)
     return 0
 
 
@@ -208,7 +202,7 @@ def command_fts(args: argparse.Namespace, config: ReadFellowConfig) -> int:
         progress=progress_limit_from_args(args),
     )
     print_progress(result.progress)
-    print_docs(result.docs)
+    print_evidence(result.evidence)
     return 0
 
 
@@ -219,10 +213,10 @@ def command_fetch(args: argparse.Namespace, config: ReadFellowConfig) -> int:
         args.collection,
         progress=progress_limit_from_args(args),
     )
-    if result.doc is None:
+    if result.status == "not_found":
         print(f"chunk not found: {args.chunk_id}", file=sys.stderr)
         return 1
-    if not result.allowed:
+    if result.status == "outside_progress":
         print_progress(result.progress)
         print(
             f"chunk {args.chunk_id} is outside the configured reading progress",
@@ -230,16 +224,10 @@ def command_fetch(args: argparse.Namespace, config: ReadFellowConfig) -> int:
         )
         return 1
 
-    fields = QueryChunkFields.model_validate(result.doc.fields)
+    if result.evidence is None:
+        raise RuntimeError(f"fetch returned no evidence for {args.chunk_id}")
     print_progress(result.progress)
-    print(
-        f"id={result.doc.id} {fields.source_path}:{fields.line_start}-"
-        f"{fields.line_end}"
-    )
-    if fields.chapter:
-        print(f"chapter: {fields.chapter}")
-    print()
-    print(fields.text.rstrip())
+    print_evidence([result.evidence], full_text=True)
     return 0
 
 
@@ -282,7 +270,7 @@ def command_graph_query(args: argparse.Namespace, config: ReadFellowConfig) -> i
         progress=progress_limit_from_args(args),
     )
     print_progress(result.progress)
-    print_graph_results(result.result)
+    print_evidence(result.evidence)
     return 0
 
 
@@ -331,70 +319,31 @@ def print_graph_progress(event: GraphBuildEvent) -> None:
         )
 
 
-def print_docs(docs) -> None:
-    if not docs:
+def print_evidence(items: list[Evidence], *, full_text: bool = False) -> None:
+    if not items:
         print("no results")
         return
-    for index, doc in enumerate(docs, start=1):
-        fields = QueryChunkFields.model_validate(doc.fields)
-        chapter = fields.chapter or "(no chapter)"
-        text = fields.text.strip()
-        preview = re.sub(r"\s+", " ", text)[:260]
+    for index, evidence in enumerate(items, start=1):
+        chapter = evidence.chapter or "(no chapter)"
+        score = (
+            f" score={evidence.score:.6f}"
+            if evidence.score is not None
+            else ""
+        )
         print(
-            f"\n[{index}] id={doc.id} score={doc.score:.6f} "
-            f"{fields.source_path}:{fields.line_start}-{fields.line_end}"
+            f"\n[{index}] id={evidence.chunk_id}{score} "
+            f"{evidence.source_path}:{evidence.line_start}-{evidence.line_end}"
         )
         print(f"chapter: {chapter}")
-        print(preview)
-
-
-def print_graph_results(result: GraphQueryResult) -> None:
-    entities = result.entities
-    relations = result.relations
-    if not entities and not relations:
-        print("no graph results")
-        return
-
-    if entities:
-        print("entities:")
-        for entity in entities:
-            suffixes = []
-            if entity.types:
-                suffixes.append("types=" + ", ".join(entity.types))
-            if entity.aliases:
-                suffixes.append("aliases=" + ", ".join(entity.aliases))
-            suffix = f" ({'; '.join(suffixes)})" if suffixes else ""
-            print(f"- {entity.name}{suffix}")
-            for mention in entity.mentions[:3]:
-                print(f"  mention: {format_graph_location(mention)}")
-            for evidence in entity.evidence[:2]:
-                preview = re.sub(r"\s+", " ", evidence.text)[:180]
-                print(f"  evidence: {preview} ({format_graph_location(evidence)})")
-
-    if relations:
-        if entities:
-            print()
-        print("relations:")
-        for index, relation in enumerate(relations, start=1):
-            print(
-                f"[{index}] {relation.subject} --{relation.relation}--> "
-                f"{relation.object}"
-            )
-            if relation.evidence:
-                preview = re.sub(r"\s+", " ", relation.evidence)[:220]
-                print(f"    evidence: {preview}")
-            print(
-                f"    chunk: {relation.chunk_id} "
-                f"{format_graph_location(relation)}"
-            )
-
-
-def format_graph_location(item: ChunkContext | GraphRelation) -> str:
-    chapter = item.chapter or "(no chapter)"
-    return (
-        f"{item.source_path}:{item.line_start}-"
-        f"{item.line_end} chapter={chapter}"
-    )
+        if evidence.graph_context is not None:
+            if evidence.graph_context.entities:
+                print("graph entities: " + ", ".join(evidence.graph_context.entities))
+            for relation in evidence.graph_context.relations:
+                print(f"graph relation: {relation}")
+        text = evidence.text.rstrip()
+        if not full_text:
+            text = re.sub(r"\s+", " ", text)[:260]
+        print(text)
 
 
 def progress_limit_from_args(args: argparse.Namespace) -> ProgressLimit:
