@@ -370,3 +370,13 @@ CLI 应只负责解析参数、调用这些模块并格式化输出。
 本轮没有实现二次 rerank、评估集、MCP 暴露或重型 GraphRAG。下一步按优先级 5 建立评估集，用数据判断是否需要调 RRF 参数或引入更重的 stack。
 
 已知遗留：`graph-index` 在 `corpus/samples/赛博英雄传.txt` 上用 qwen3:8b 会稳定触发「evidence 不是原文精确子串」，重试 5 次仍无法通过，因此该语料目前建不出非空图谱；hybrid 的 graph 通道端到端验证是在一份短小规整的中文样本上完成的。
+
+## 2026-07-26 模块深化评审
+
+优先级 1-4 落地后做了一轮完整架构评审（读完全部 src），识别出 6 个 deepening 候选。执行计划见 `docs/module-deepening-plan.md`，此处只记结论：
+
+- **阶段 A（先做）**：`graph.py` 824 行装了三件事——知识图谱领域、通用 LLM-JSON + 证据锚定工具、`chunks.jsonl` 读取。拆出 `extraction.py`；`read_chunks` 移回 `store.py` 与其写方 `write_manifest` 同处。seam 位置由现状证明：`analysis.py` 从 `graph.py` 导入的 7 个符号全部是通用工具，且无任何测试导入它们。
+- **阶段 B**：`build_graph` 与 `build_analysis` 12 个阶段有 10 个相同，另有 15 对镜像符号。抽出共享的重试、三态加载、落盘、status 判定与公共 staleness 检查；合并字段完全相同的 `GraphExtractionSettings`/`AnalysisSettings` 与 `GraphConfig`/`AnalysisConfig`。**刻意不做**完整 `DerivationSpec` Protocol——它需要约 14 个成员，用宽 interface 换掉实现重复并不提升 depth，留到第三个派生物出现时再评估。
+- **阶段 C**：`store.py` 是自由函数加裸 `coll` 句柄，不构成 module 的 interface。后果是 `app.py` 内联 `import zvec`、直接调 5 个 zvec collection 方法、直接读 `Doc.fields`，「`store.py` 是唯一接触 zvec 的地方」这条已声明的不变量实际已破；测试也只能 monkeypatch `app` 上的 5 个模块级符号。目标是 `ChunkStore` interface + zvec/InMemory 两个 adapter。
+- **阶段 D/E（待触发）**：防剧透规则在 4 处手写、chunk 字段集手抄 11 遍。D 等第三个派生物出现再做；E 只做无歧义的部分（两处逐字相同的 `output_fields` 字面量、`Evidence` 构造器）。
+- **不做**：`FusedEvidence` 拆分。hybrid MVP 刻意保持单一扁平模型以让其他命令输出逐字节不变，只有第二个消费者需要跨通道比较分数时才重开。

@@ -78,6 +78,7 @@ uvx ruff format . && uvx ruff check .          # 两者当前都保持 clean
 
 ## 相关文档
 
-- `docs/architecture-archive.md`（中文）— 架构不足清单 + 优先级路线图 + graph-index 成本估算 + zvec MCP 边界。优先级 1（app 层）、2（Evidence 模型）、3（graph 加固）已完成；**下一步是优先级 4：本地 hybrid retrieval**（graph + FTS + vector 按 chunk id 合并后排序）。
+- `docs/architecture-archive.md`（中文）— 架构不足清单 + 优先级路线图 + graph-index 成本估算 + zvec MCP 边界。优先级 1（app 层）、2（Evidence 模型）、3（graph 加固）、4（hybrid retrieval）均已完成。
+- `docs/module-deepening-plan.md`（中文）— 2026-07-26 架构评审的执行计划，**当前进行中的工作**。顺序：阶段 A 拆 `graph.py` → 阶段 B 合并 graph/analysis 孪生管线 → 阶段 C 补完 zvec seam；D/E 待触发条件。开工前先读它的「不重新讨论的事」与各阶段验证方式。
 - `.codex/skills/readfellow/SKILL.md` — 面向使用者的检索/引用/防剧透规则，回答用户关于语料内容的问题时按它执行。
 - `AGENTS.md` — 仓库约定（源文档不可变、产物目录、provenance 字段要求、uv 工作流）与 zvec 能力背景。
