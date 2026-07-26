@@ -35,7 +35,6 @@ from .graph import (
     merge_extraction,
     parse_graph_extraction,
     processed_chunk_ids,
-    read_chunks,
     read_graph,
     update_graph_metadata,
     write_graph,
@@ -64,6 +63,7 @@ from .store import (
     open_or_create_collection,
     query_fts,
     query_vector,
+    read_chunks,
     read_manifest,
     write_manifest,
 )

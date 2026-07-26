@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from types import MappingProxyType
@@ -9,6 +8,15 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from .extraction import (
+    as_list,
+    chunk_context,
+    get_any,
+    int_value,
+    normalize_text,
+    parse_json_object,
+    resolve_evidence,
+)
 from .models import (
     Chunk,
     ChunkContext,
@@ -101,28 +109,6 @@ _EVIDENCE_KEYS = ("evidence", "evidence_text", "证据", "证据文本", "quote"
 
 def graph_path(metadata_dir: Path, collection: str) -> Path:
     return metadata_path(metadata_dir, collection) / "graph.json"
-
-
-def read_chunks(*, metadata_dir: Path, collection: str) -> list[Chunk]:
-    path = metadata_path(metadata_dir, collection) / "chunks.jsonl"
-    if not path.is_file():
-        raise FileNotFoundError(
-            f"chunk metadata not found: {path}; run the index command first"
-        )
-
-    chunks: list[Chunk] = []
-    with path.open("r", encoding="utf-8") as file:
-        for line_number, line in enumerate(file, start=1):
-            stripped = line.strip()
-            if not stripped:
-                continue
-            try:
-                chunks.append(Chunk.model_validate_json(stripped))
-            except ValueError as exc:
-                raise ValueError(
-                    f"invalid chunk metadata in {path}:{line_number}: {exc}"
-                ) from exc
-    return chunks
 
 
 def read_graph(path: Path) -> KnowledgeGraph:
@@ -366,15 +352,15 @@ def finalize_graph(graph: KnowledgeGraph) -> None:
         entity.mentions = sorted(
             entity.mentions,
             key=lambda item: (
-                _int_value(item.chunk_index),
-                _int_value(item.line_start),
+                int_value(item.chunk_index),
+                int_value(item.line_start),
             ),
         )
         entity.evidence = sorted(
             entity.evidence,
             key=lambda item: (
-                _int_value(item.chunk_index),
-                _int_value(item.line_start),
+                int_value(item.chunk_index),
+                int_value(item.line_start),
             ),
         )
 
@@ -382,8 +368,8 @@ def finalize_graph(graph: KnowledgeGraph) -> None:
     graph.relations = sorted(
         graph.relations,
         key=lambda item: (
-            _int_value(item.chunk_index),
-            _int_value(item.line_start),
+            int_value(item.chunk_index),
+            int_value(item.line_start),
             item.subject,
             item.relation,
             item.object,
@@ -392,7 +378,7 @@ def finalize_graph(graph: KnowledgeGraph) -> None:
     graph.extractions = sorted(
         graph.extractions,
         key=lambda item: (
-            _int_value(item.chunk_index),
+            int_value(item.chunk_index),
             item.chunk_id,
         ),
     )
@@ -440,68 +426,6 @@ def query_graph(
             entities.append(filtered)
 
     return GraphQueryResult(entities=entities, relations=relations)
-
-
-# Characters an extracted quote may legitimately differ in: models drop the line
-# break and the paragraph indent a quote spans, and swap the full-width quote
-# marks around dialogue. Both sides are matched with these removed, and the span
-# is then read back out of the chunk so the stored evidence stays the source's
-# own wording.
-_LOOSE_IN_EVIDENCE = re.compile(r"[\s“”‘’「」『』\"']")
-
-
-def locate_evidence(evidence: str, chunk_text: str) -> str | None:
-    """The chunk's own wording for a quote, or None when it is not quoted from it."""
-    needle = _LOOSE_IN_EVIDENCE.sub("", evidence)
-    if not needle:
-        return None
-
-    offsets = [
-        index
-        for index, char in enumerate(chunk_text)
-        if not _LOOSE_IN_EVIDENCE.match(char)
-    ]
-    haystack = "".join(chunk_text[index] for index in offsets)
-    position = haystack.find(needle)
-    if position < 0:
-        return None
-    return chunk_text[offsets[position] : offsets[position + len(needle) - 1] + 1]
-
-
-def resolve_evidence(
-    evidence: str,
-    chunk_text: str,
-    *,
-    label: str,
-    chunk_id: str,
-) -> str:
-    if not evidence:
-        return ""
-    located = locate_evidence(evidence, chunk_text)
-    if located is None:
-        raise ValueError(
-            f"{label} evidence is not an exact substring of chunk {chunk_id}"
-        )
-    return located
-
-
-def parse_json_object(raw: str | Mapping[str, Any]) -> Mapping[str, Any]:
-    if isinstance(raw, Mapping):
-        return raw
-
-    text = raw.strip()
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError:
-        start = text.find("{")
-        end = text.rfind("}")
-        if start < 0 or end <= start:
-            raise
-        parsed = json.loads(text[start : end + 1])
-
-    if not isinstance(parsed, Mapping):
-        raise TypeError(f"expected a JSON object, got {type(parsed).__name__}")
-    return parsed
 
 
 def _parse_entity(
@@ -712,33 +636,6 @@ def _allowed(progress: ProgressFilter | None, fields: BaseModel) -> bool:
         return False
 
 
-def chunk_context(chunk: Chunk | ChunkContext | Mapping[str, Any]) -> ChunkContext:
-    if isinstance(chunk, Chunk):
-        return ChunkContext(
-            chunk_id=chunk.id,
-            source_path=chunk.source_path,
-            chunk_index=chunk.chunk_index,
-            line_start=chunk.line_start,
-            line_end=chunk.line_end,
-            byte_start=chunk.byte_start,
-            byte_end=chunk.byte_end,
-            chapter=chunk.chapter,
-        )
-    if isinstance(chunk, ChunkContext):
-        return ChunkContext.model_validate(chunk)
-    data = chunk.model_dump(mode="json") if isinstance(chunk, BaseModel) else chunk
-    return ChunkContext(
-        chunk_id=str(data.get("chunk_id") or data.get("id") or ""),
-        source_path=str(data.get("source_path", "")),
-        chunk_index=_int_value(data.get("chunk_index")),
-        line_start=_int_value(data.get("line_start")),
-        line_end=_int_value(data.get("line_end")),
-        byte_start=_int_value(data.get("byte_start")),
-        byte_end=_int_value(data.get("byte_end")),
-        chapter=str(data.get("chapter", "")),
-    )
-
-
 def _chunk_text(chunk: Chunk | ChunkContext | Mapping[str, Any]) -> str:
     if isinstance(chunk, Chunk):
         return chunk.text
@@ -756,19 +653,6 @@ def _chunk_value(
     return str(chunk.get(key, ""))
 
 
-def get_any(
-    mapping: Mapping[str, Any], keys: tuple[str, ...], default: Any = None
-) -> Any:
-    for key in keys:
-        if key in mapping:
-            return mapping[key]
-    return default
-
-
-def as_list(value: Any) -> list[Any]:
-    return value if isinstance(value, list) else []
-
-
 def _as_strings(value: Any) -> list[str]:
     if value is None:
         return []
@@ -779,11 +663,6 @@ def _as_strings(value: Any) -> list[str]:
     if isinstance(value, (list, tuple, set)):
         return [normalize_text(item) for item in value]
     return [normalize_text(value)]
-
-
-def normalize_text(value: Any) -> str:
-    text = re.sub(r"\s+", " ", str(value)).strip()
-    return text.strip("`\"'“”‘’")
 
 
 def _normalize_entity_type(value: Any) -> str:
@@ -816,9 +695,3 @@ def _has_same_values(
         all(getattr(item, key) == getattr(candidate, key) for key in keys)
         for item in items
     )
-
-
-def _int_value(value: Any) -> int:
-    if value in (None, ""):
-        return 0
-    return int(value)

@@ -380,3 +380,17 @@ CLI 应只负责解析参数、调用这些模块并格式化输出。
 - **阶段 C**：`store.py` 是自由函数加裸 `coll` 句柄，不构成 module 的 interface。后果是 `app.py` 内联 `import zvec`、直接调 5 个 zvec collection 方法、直接读 `Doc.fields`，「`store.py` 是唯一接触 zvec 的地方」这条已声明的不变量实际已破；测试也只能 monkeypatch `app` 上的 5 个模块级符号。目标是 `ChunkStore` interface + zvec/InMemory 两个 adapter。
 - **阶段 D/E（待触发）**：防剧透规则在 4 处手写、chunk 字段集手抄 11 遍。D 等第三个派生物出现再做；E 只做无歧义的部分（两处逐字相同的 `output_fields` 字面量、`Evidence` 构造器）。
 - **不做**：`FusedEvidence` 拆分。hybrid MVP 刻意保持单一扁平模型以让其他命令输出逐字节不变，只有第二个消费者需要跨通道比较分数时才重开。
+
+## 2026-07-26 阶段 A 落地记录：拆出 `extraction.py`
+
+按 `docs/module-deepening-plan.md` 阶段 A 执行完毕，纯搬迁，无行为变更：
+
+- 新增 `src/readfellow/extraction.py`（125 行），只依赖 `models`：LLM JSON 读取（`parse_json_object`、`get_any`、`as_list`、`normalize_text`）、证据锚定（`_LOOSE_IN_EVIDENCE`、`locate_evidence`、`resolve_evidence`）、chunk 归一（`chunk_context`、`int_value`）。`_int_value` 因为跨两个 module 被用（`chunk_context` 与 `finalize_graph` 的 7 处排序键）而公开为 `int_value`。
+- `read_chunks` 从 `graph.py` 移到 `store.py`，紧邻写方 `write_manifest`——`chunks.jsonl` 的读写方从此同处。`graph.py` 仍 import `store.metadata_path` 用于 `graph_path`，这是对的：派生物存在哪儿本就是领域模块该知道的事。
+- 依赖图从 `analysis → graph` 变为 `analysis → extraction ← graph`，两条派生管线不再互相伸手，`graph.py` 824 → 697 行。
+
+**刻意留在 `graph.py`**：`_as_strings`、`_case_key`、`_has_same_values`、`_chunk_text`、`_chunk_value`。它们都只有 graph 一个调用方，搬进 `extraction.py` 等于造没有第二个 adapter 的假 seam，还会撑宽 `extraction.py` 的 interface。（计划文档 A.1 原本把后两个列进了搬迁表，已按此更正。）
+
+验证：`uv run pytest` 39 passed，**一行测试代码都没改**——这正是阶段 A 事先定下的验收信号，说明搬走的确实是没有领域耦合的通用件；`uvx ruff format`/`check` clean。
+
+已知遗留：`_chunk_text(chunk)` 与 `_chunk_value(chunk, "text")` 语义完全等价（`Chunk` 是 `BaseModel`，`getattr` 分支能覆盖），属评审前就存在的冗余，本轮未动。下一步进入阶段 B（B1 + B2）。

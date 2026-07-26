@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .graph import (
+from .extraction import (
     as_list,
     chunk_context,
     get_any,

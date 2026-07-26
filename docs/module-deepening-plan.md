@@ -36,7 +36,7 @@
 
 ---
 
-# 阶段 A · 拆 `graph.py`（候选 3）
+# 阶段 A · 拆 `graph.py`（候选 3）— 已完成
 
 `graph.py` 824 行里装了三件事：知识图谱领域、通用 LLM-JSON + 证据锚定工具、`chunks.jsonl` 读取。
 
@@ -63,9 +63,9 @@
 | `locate_evidence` | 453 | |
 | `resolve_evidence` | 471 | |
 | `chunk_context` | 715 | |
-| `_chunk_text` | 742 | |
-| `_chunk_value` | 750 | |
 | `_int_value` | 821 | **改名为公开的 `int_value`**，见下 |
+
+`_chunk_text`（742）与 `_chunk_value`（750）**留在 `graph.py`**，理由与 A.2 一致：只有 graph 一个调用方，搬走等于造没有第二个 adapter 的假 seam，还会白白撑宽 `extraction.py` 的 interface。它们只是三行的 isinstance 取值，不承担 `chunk_context` 那种模型构造逻辑。
 
 `_int_value` 有两类调用方：`chunk_context`（随之搬走）和 `finalize_graph` 的 7 处排序键（留在 graph）。因此它必须公开：在 `extraction.py` 里定义为 `int_value`，`graph.py` 从 extraction 导入。
 
@@ -95,7 +95,7 @@
 ## A.4 改 import
 
 - `analysis.py:9-17`：7 个符号的来源从 `.graph` 改为 `.extraction`
-- `graph.py`：新增 `from .extraction import (as_list, chunk_context, get_any, int_value, locate_evidence, normalize_text, parse_json_object, resolve_evidence, _chunk_text, _chunk_value)`（`_chunk_text`/`_chunk_value` 若只在 graph 用可考虑一起公开命名）
+- `graph.py`：新增 `from .extraction import (as_list, chunk_context, get_any, int_value, normalize_text, parse_json_object, resolve_evidence)`（不含 `locate_evidence`——graph 只经由 `resolve_evidence` 间接用它）
 - `app.py`：`read_chunks` 改从 `.store` 导入，其余不变
 
 **做完后 `analysis.py` 不再 import `graph.py`。** 这是本阶段的核心验收信号。
