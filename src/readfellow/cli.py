@@ -6,20 +6,31 @@ import sys
 from pathlib import Path
 
 from .app import (
+    AnalysisBuildEvent,
+    AnalysisBuildOptions,
     GraphBuildEvent,
     GraphBuildOptions,
     IndexDocumentOptions,
     IndexProgressEvent,
     ProgressLimit,
-    build_graph as build_graph_workflow,
-    fetch_chunk as fetch_chunk_workflow,
     fts_search,
     index_document,
-    query_graph as query_graph_workflow,
     semantic_search,
 )
+from .app import (
+    build_analysis as build_analysis_workflow,
+)
+from .app import (
+    build_graph as build_graph_workflow,
+)
+from .app import (
+    fetch_chunk as fetch_chunk_workflow,
+)
+from .app import (
+    query_graph as query_graph_workflow,
+)
 from .config import CONFIG_FILE, ReadFellowConfig, load_config
-from .models import Evidence, ProgressFilter
+from .models import ChapterAnalysis, ChunkContext, Evidence, ProgressFilter
 
 
 def valid_collection_name(value: str) -> str:
@@ -138,6 +149,31 @@ def build_parser(config: ReadFellowConfig) -> argparse.ArgumentParser:
         default=config.indexing.default_collection,
     )
     add_progress_args(graph_query)
+
+    analyze = subparsers.add_parser(
+        "analyze",
+        help="analyze complete chapters and print the stored analysis",
+    )
+    analyze.add_argument(
+        "--collection",
+        type=valid_collection_name,
+        default=config.indexing.default_collection,
+    )
+    analyze.add_argument("--llm-model", default=config.ollama.generation_model)
+    analyze.add_argument(
+        "--num-predict",
+        type=int,
+        default=config.analysis.num_predict,
+        help="maximum generated tokens per chapter for Ollama chapter analysis",
+    )
+    analyze.add_argument(
+        "--retries",
+        type=int,
+        default=config.analysis.retries,
+        help="retry failed chapter analysis this many times per chapter",
+    )
+    analyze.add_argument("--rebuild", action="store_true")
+    add_progress_args(analyze)
 
     return parser
 
@@ -280,6 +316,27 @@ def command_graph_query(args: argparse.Namespace, config: ReadFellowConfig) -> i
     return 0
 
 
+def command_analyze(args: argparse.Namespace, config: ReadFellowConfig) -> int:
+    result = build_analysis_workflow(
+        config,
+        args.collection,
+        progress=progress_limit_from_args(args),
+        options=AnalysisBuildOptions(
+            llm_model=args.llm_model,
+            num_predict=args.num_predict,
+            retries=args.retries,
+            rebuild=args.rebuild,
+        ),
+        on_progress=print_analysis_progress,
+    )
+    print_chapter_analyses(result.chapters)
+    print(
+        f"\ndone: collection={result.collection}, analysis={result.analysis_path}, "
+        f"status={result.status}"
+    )
+    return 0
+
+
 def print_index_progress(event: IndexProgressEvent) -> None:
     if event.stage == "probe":
         print(f"probing embedding dimension with {event.model} ...", flush=True)
@@ -322,6 +379,63 @@ def print_graph_progress(event: GraphBuildEvent) -> None:
             f"        entities={event.entity_count}, relations={event.relation_count}",
             flush=True,
         )
+
+
+def print_analysis_progress(event: AnalysisBuildEvent) -> None:
+    if event.stage == "selected" and event.progress is not None:
+        print_progress(event.progress)
+        return
+    if event.stage == "skipped":
+        print(f"skipped {event.chapter_title}: {event.reason}", flush=True)
+        return
+    if event.stage == "analyzing":
+        print(
+            f"[{event.index:>5}/{event.total}] analyzing {event.chapter_title}",
+            flush=True,
+        )
+        return
+    if event.stage == "retry":
+        print(
+            f"        retry {event.attempt}/{event.retries}: {event.error}",
+            flush=True,
+        )
+        return
+    if event.stage == "analyzed":
+        print(
+            f"        characters={event.character_count}, events={event.event_count}",
+            flush=True,
+        )
+
+
+def print_chapter_analyses(chapters: list[ChapterAnalysis]) -> None:
+    if not chapters:
+        print("no chapter analysis available")
+        return
+    for chapter in chapters:
+        title = chapter.chapter_title or "(no chapter)"
+        print(
+            f"\n[{chapter.chapter_index}] {title} "
+            f"{chapter.source_path}:{chapter.line_start}-{chapter.line_end} "
+            f"chunks={len(chapter.chunk_ids)}"
+        )
+        summary = chapter.summary or "(withheld: chapter extends past the progress)"
+        print(f"summary: {summary}")
+        for mention in chapter.characters:
+            role = f" — {mention.role_in_chapter}" if mention.role_in_chapter else ""
+            print(f"  character: {mention.name}{role}")
+            print(f"    {chunk_provenance(mention)} {one_line(mention.evidence)}")
+        for event in chapter.events:
+            print(f"  event {event.order}: {event.description}")
+            print(f"    {chunk_provenance(event)} {one_line(event.evidence)}")
+
+
+def one_line(text: str) -> str:
+    """Evidence is stored as the source's own span, line breaks and indent included."""
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def chunk_provenance(context: ChunkContext) -> str:
+    return f"{context.source_path}:{context.line_start}-{context.line_end}"
 
 
 def print_evidence(items: list[Evidence], *, full_text: bool = False) -> None:
@@ -404,6 +518,8 @@ def main(argv: list[str] | None = None) -> int:
             return command_graph_index(args, config)
         if args.command == "graph-query":
             return command_graph_query(args, config)
+        if args.command == "analyze":
+            return command_analyze(args, config)
     except Exception as exc:  # noqa: BLE001
         print(f"error: {exc}", file=sys.stderr)
         return 1

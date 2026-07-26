@@ -57,6 +57,7 @@ class IndexManifest(ReadFellowModel):
     chunk_count: int
     chunk_chars: int
     overlap_chars: int
+    chunker_version: int = 0
 
 
 class ZvecChunkFields(ReadFellowModel):
@@ -219,6 +220,7 @@ class GraphExtractionSettings(ReadFellowModel):
 
     temperature: float = 0.0
     num_predict: int = 0
+    num_ctx: int = 0
     retries: int = 0
 
 
@@ -256,6 +258,57 @@ class GraphQueryResult(ReadFellowModel):
     relations: list[GraphRelation] = Field(default_factory=list)
 
 
+class CharacterMention(ChunkContext):
+    name: str
+    role_in_chapter: str = ""
+    evidence: str = ""
+
+
+class ChapterEvent(ChunkContext):
+    order: int = 0
+    description: str = ""
+    evidence: str = ""
+
+
+class ChapterAnalysis(ReadFellowModel):
+    chapter_index: int
+    chapter_title: str
+    source_path: str = ""
+    line_start: int = 0
+    line_end: int = 0
+    chunk_ids: list[str] = Field(default_factory=list)
+    summary: str = ""
+    characters: list[CharacterMention] = Field(default_factory=list)
+    events: list[ChapterEvent] = Field(default_factory=list)
+
+
+class AnalysisSettings(ReadFellowModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    temperature: float = 0.0
+    num_predict: int = 0
+    num_ctx: int = 0
+    retries: int = 0
+
+
+class AnalysisDocument(ReadFellowModel):
+    model_config = ConfigDict(extra="allow")
+
+    schema_version: int = 1
+    prompt_version: str = ""
+    collection: str = ""
+    source_path: str = ""
+    llm_model: str = ""
+    settings: AnalysisSettings = AnalysisSettings()
+    chunk_text_hashes: dict[str, str] = Field(default_factory=dict)
+    created_at: str = Field(default_factory=utc_now_iso)
+    updated_at: str = Field(default_factory=utc_now_iso)
+    progress_limit: str = ""
+    selected_chapter_count: int = 0
+    processed_chapter_count: int = 0
+    chapters: list[ChapterAnalysis] = Field(default_factory=list)
+
+
 class OllamaEmbedRequest(ReadFellowModel):
     model: str
     input: list[str]
@@ -263,12 +316,15 @@ class OllamaEmbedRequest(ReadFellowModel):
 
 
 class OllamaEmbedResponse(ReadFellowModel):
+    model_config = ConfigDict(extra="allow")
+
     embeddings: list[list[float]]
 
 
 class OllamaGenerateOptions(ReadFellowModel):
     temperature: float = 0.0
     num_predict: int = 2048
+    num_ctx: int = 16384
     repeat_penalty: float = 1.08
 
 

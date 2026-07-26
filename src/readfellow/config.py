@@ -24,6 +24,7 @@ class OllamaConfig(ReadFellowModel):
     embedding_model: str = "qwen3-embedding:8b"
     generation_model: str = "qwen3:8b"
     keep_alive: str = "30m"
+    num_ctx: int = 16384
 
 
 class IndexingConfig(ReadFellowModel):
@@ -48,6 +49,13 @@ class GraphConfig(ReadFellowModel):
     retries: int = 2
 
 
+class AnalysisConfig(ReadFellowModel):
+    model_config = ConfigDict(extra="forbid")
+
+    num_predict: int = 4096
+    retries: int = 2
+
+
 class ReadFellowConfig(ReadFellowModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -56,6 +64,7 @@ class ReadFellowConfig(ReadFellowModel):
     indexing: IndexingConfig = IndexingConfig()
     search: SearchConfig = SearchConfig()
     graph: GraphConfig = GraphConfig()
+    analysis: AnalysisConfig = AnalysisConfig()
 
     @classmethod
     def load(

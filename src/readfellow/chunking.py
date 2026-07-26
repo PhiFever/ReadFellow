@@ -12,6 +12,10 @@ CHAPTER_RE = re.compile(
     r"(序章|楔子|引子|尾声|后记|番外).*)\s*$"
 )
 
+# Bumped whenever chunk_document changes how it splits, so downstream artifacts
+# can refuse metadata produced by an older chunker.
+CHUNKER_VERSION = 2
+
 
 def sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -127,7 +131,7 @@ def chunk_document(
     window: list[TextUnit] = []
     window_chars = 0
 
-    def emit() -> None:
+    def emit(*, carry_overlap: bool = True) -> None:
         nonlocal window, window_chars
         if not window:
             return
@@ -145,11 +149,14 @@ def chunk_document(
                 line_end=window[-1].line_end,
                 byte_start=window[0].byte_start,
                 byte_end=window[-1].byte_end,
-                chapter=next(
-                    (unit.chapter for unit in reversed(window) if unit.chapter), ""
-                ),
+                chapter=window[0].chapter,
             )
         )
+
+        if not carry_overlap:
+            window = []
+            window_chars = 0
+            return
 
         overlap: list[TextUnit] = []
         overlap_total = 0
@@ -163,7 +170,9 @@ def chunk_document(
 
     for unit in units:
         unit_len = len(unit.text)
-        if window and window_chars + unit_len > target_chars:
+        if window and unit.chapter != window[0].chapter:
+            emit(carry_overlap=False)
+        elif window and window_chars + unit_len > target_chars:
             emit()
         window.append(unit)
         window_chars += unit_len

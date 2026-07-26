@@ -245,7 +245,7 @@ def graph_staleness_reason(
 
 
 def build_extraction_prompt(chunk: Chunk | ChunkContext | Mapping[str, Any]) -> str:
-    context = _chunk_context(chunk)
+    context = chunk_context(chunk)
     text = _chunk_text(chunk)
     entity_types = "、".join(ENTITY_TYPES)
     relation_types = "、".join(RELATION_TYPES)
@@ -283,19 +283,19 @@ def parse_graph_extraction(
     raw: str | Mapping[str, Any],
     chunk: Chunk | ChunkContext | Mapping[str, Any],
 ) -> GraphExtraction:
-    payload = _parse_json_object(raw)
-    context = _chunk_context(chunk)
+    payload = parse_json_object(raw)
+    context = chunk_context(chunk)
     chunk_text = _chunk_text(chunk)
     entities: list[GraphEntity] = []
     relations: list[GraphRelation] = []
 
-    for item in _as_list(_get_any(payload, ("entities", "实体"), [])):
+    for item in as_list(get_any(payload, ("entities", "实体"), [])):
         entity = _parse_entity(item, context, chunk_text)
         if entity is not None:
             entities.append(entity)
 
-    for item in _as_list(
-        _get_any(payload, ("relations", "关系", "triples", "edges"), [])
+    for item in as_list(
+        get_any(payload, ("relations", "关系", "triples", "edges"), [])
     ):
         relation = _parse_relation(item, context, chunk_text)
         if relation is not None:
@@ -319,7 +319,7 @@ def merge_extraction(
             graph,
             GraphEntity(
                 name=relation.subject,
-                mentions=[_chunk_context(relation)],
+                mentions=[chunk_context(relation)],
             ),
             alias_index,
         )
@@ -327,7 +327,7 @@ def merge_extraction(
             graph,
             GraphEntity(
                 name=relation.object,
-                mentions=[_chunk_context(relation)],
+                mentions=[chunk_context(relation)],
             ),
             alias_index,
         )
@@ -442,7 +442,50 @@ def query_graph(
     return GraphQueryResult(entities=entities, relations=relations)
 
 
-def _parse_json_object(raw: str | Mapping[str, Any]) -> Mapping[str, Any]:
+# Characters an extracted quote may legitimately differ in: models drop the line
+# break and the paragraph indent a quote spans, and swap the full-width quote
+# marks around dialogue. Both sides are matched with these removed, and the span
+# is then read back out of the chunk so the stored evidence stays the source's
+# own wording.
+_LOOSE_IN_EVIDENCE = re.compile(r"[\s“”‘’「」『』\"']")
+
+
+def locate_evidence(evidence: str, chunk_text: str) -> str | None:
+    """The chunk's own wording for a quote, or None when it is not quoted from it."""
+    needle = _LOOSE_IN_EVIDENCE.sub("", evidence)
+    if not needle:
+        return None
+
+    offsets = [
+        index
+        for index, char in enumerate(chunk_text)
+        if not _LOOSE_IN_EVIDENCE.match(char)
+    ]
+    haystack = "".join(chunk_text[index] for index in offsets)
+    position = haystack.find(needle)
+    if position < 0:
+        return None
+    return chunk_text[offsets[position] : offsets[position + len(needle) - 1] + 1]
+
+
+def resolve_evidence(
+    evidence: str,
+    chunk_text: str,
+    *,
+    label: str,
+    chunk_id: str,
+) -> str:
+    if not evidence:
+        return ""
+    located = locate_evidence(evidence, chunk_text)
+    if located is None:
+        raise ValueError(
+            f"{label} evidence is not an exact substring of chunk {chunk_id}"
+        )
+    return located
+
+
+def parse_json_object(raw: str | Mapping[str, Any]) -> Mapping[str, Any]:
     if isinstance(raw, Mapping):
         return raw
 
@@ -467,30 +510,29 @@ def _parse_entity(
     chunk_text: str,
 ) -> GraphEntity | None:
     if isinstance(item, str):
-        name = _normalize_text(item)
+        name = normalize_text(item)
         types: list[str] = []
         aliases: list[str] = []
         evidence = ""
     elif isinstance(item, Mapping):
-        name = _normalize_text(_get_any(item, _NAME_KEYS, ""))
+        name = normalize_text(get_any(item, _NAME_KEYS, ""))
         types = [
             _normalize_entity_type(value)
-            for value in _as_strings(_get_any(item, _TYPE_KEYS, []))
+            for value in _as_strings(get_any(item, _TYPE_KEYS, []))
         ]
         aliases = [
-            _normalize_text(value)
-            for value in _as_strings(_get_any(item, _ALIAS_KEYS, []))
+            normalize_text(value)
+            for value in _as_strings(get_any(item, _ALIAS_KEYS, []))
         ]
-        evidence = _normalize_text(_get_any(item, _EVIDENCE_KEYS, ""))
+        evidence = normalize_text(get_any(item, _EVIDENCE_KEYS, ""))
     else:
         return None
 
     if not name:
         return None
-    if evidence and evidence not in chunk_text:
-        raise ValueError(
-            f"entity evidence is not an exact substring of chunk {context.chunk_id}"
-        )
+    evidence = resolve_evidence(
+        evidence, chunk_text, label="entity", chunk_id=context.chunk_id
+    )
 
     entity = GraphEntity(
         name=name,
@@ -513,16 +555,15 @@ def _parse_relation(
     if not isinstance(item, Mapping):
         return None
 
-    subject = _normalize_text(_get_any(item, _SUBJECT_KEYS, ""))
-    relation = _normalize_relation(_get_any(item, _RELATION_KEYS, ""))
-    object_ = _normalize_text(_get_any(item, _OBJECT_KEYS, ""))
-    evidence = _normalize_text(_get_any(item, _EVIDENCE_KEYS, ""))
+    subject = normalize_text(get_any(item, _SUBJECT_KEYS, ""))
+    relation = _normalize_relation(get_any(item, _RELATION_KEYS, ""))
+    object_ = normalize_text(get_any(item, _OBJECT_KEYS, ""))
+    evidence = normalize_text(get_any(item, _EVIDENCE_KEYS, ""))
     if not subject or not relation or not object_:
         return None
-    if evidence and evidence not in chunk_text:
-        raise ValueError(
-            f"relation evidence is not an exact substring of chunk {context.chunk_id}"
-        )
+    evidence = resolve_evidence(
+        evidence, chunk_text, label="relation", chunk_id=context.chunk_id
+    )
 
     return GraphRelation(
         subject=subject,
@@ -538,8 +579,8 @@ def _merge_entity(
     incoming: GraphEntity,
     alias_index: dict[str, int],
 ) -> GraphEntity:
-    name = _normalize_text(incoming.name)
-    aliases = [_normalize_text(alias) for alias in _as_strings(incoming.aliases)]
+    name = normalize_text(incoming.name)
+    aliases = [normalize_text(alias) for alias in _as_strings(incoming.aliases)]
     aliases = [alias for alias in aliases if alias and alias != name]
     index = _find_entity_index(alias_index, [name, *aliases])
 
@@ -582,7 +623,7 @@ def _mark_extracted(
     chunk: Chunk | ChunkContext | Mapping[str, Any],
     extraction: GraphExtraction,
 ) -> None:
-    record = _chunk_context(chunk)
+    record = chunk_context(chunk)
     if _has_same_values(graph.extractions, record, keys=("chunk_id",)):
         return
     graph.extractions.append(
@@ -671,7 +712,7 @@ def _allowed(progress: ProgressFilter | None, fields: BaseModel) -> bool:
         return False
 
 
-def _chunk_context(chunk: Chunk | ChunkContext | Mapping[str, Any]) -> ChunkContext:
+def chunk_context(chunk: Chunk | ChunkContext | Mapping[str, Any]) -> ChunkContext:
     if isinstance(chunk, Chunk):
         return ChunkContext(
             chunk_id=chunk.id,
@@ -715,7 +756,7 @@ def _chunk_value(
     return str(chunk.get(key, ""))
 
 
-def _get_any(
+def get_any(
     mapping: Mapping[str, Any], keys: tuple[str, ...], default: Any = None
 ) -> Any:
     for key in keys:
@@ -724,7 +765,7 @@ def _get_any(
     return default
 
 
-def _as_list(value: Any) -> list[Any]:
+def as_list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
 
 
@@ -733,25 +774,25 @@ def _as_strings(value: Any) -> list[str]:
         return []
     if isinstance(value, str):
         if "、" in value:
-            return [_normalize_text(part) for part in value.split("、")]
-        return [_normalize_text(value)]
+            return [normalize_text(part) for part in value.split("、")]
+        return [normalize_text(value)]
     if isinstance(value, (list, tuple, set)):
-        return [_normalize_text(item) for item in value]
-    return [_normalize_text(value)]
+        return [normalize_text(item) for item in value]
+    return [normalize_text(value)]
 
 
-def _normalize_text(value: Any) -> str:
+def normalize_text(value: Any) -> str:
     text = re.sub(r"\s+", " ", str(value)).strip()
     return text.strip("`\"'“”‘’")
 
 
 def _normalize_entity_type(value: Any) -> str:
-    text = _normalize_text(value)
+    text = normalize_text(value)
     return _TYPE_ALIASES.get(text.casefold(), _TYPE_ALIASES.get(text, text))
 
 
 def _normalize_relation(value: Any) -> str:
-    text = _normalize_text(value)
+    text = normalize_text(value)
     normalized = _RELATION_ALIASES.get(
         text.casefold(),
         _RELATION_ALIASES.get(text, text),
@@ -762,7 +803,7 @@ def _normalize_relation(value: Any) -> str:
 
 
 def _case_key(value: Any) -> str:
-    return _normalize_text(value).casefold()
+    return normalize_text(value).casefold()
 
 
 def _has_same_values(

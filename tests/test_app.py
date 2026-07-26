@@ -17,7 +17,12 @@ from readfellow.app import (
     query_graph,
     semantic_search,
 )
-from readfellow.chunking import chunk_document, sha256_file, sha256_text
+from readfellow.chunking import (
+    CHUNKER_VERSION,
+    chunk_document,
+    sha256_file,
+    sha256_text,
+)
 from readfellow.config import OllamaConfig, PathConfig, ReadFellowConfig, SearchConfig
 from readfellow.graph import (
     empty_graph,
@@ -41,6 +46,7 @@ def manifest_for(source: Path) -> IndexManifest:
         chunk_count=1,
         chunk_chars=100,
         overlap_chars=10,
+        chunker_version=CHUNKER_VERSION,
     )
 
 
@@ -121,6 +127,7 @@ def test_graph_build_records_versioned_source_fingerprints(
     assert graph.extraction_settings.model_dump() == {
         "temperature": 0.0,
         "num_predict": config.graph.num_predict,
+        "num_ctx": config.ollama.num_ctx,
         "retries": 0,
     }
     assert graph.extractions[0].model_dump() == {

@@ -43,3 +43,31 @@ def test_chunk_document_uses_stable_ids_and_overlap(tmp_path: Path) -> None:
     assert chunks[0].source_path == "corpus/samples/novel.txt"
     assert chunks[0].chapter == "第一章 开始"
     assert chunks[0].text_hash != chunks[1].text_hash
+
+
+def test_chunk_document_never_straddles_a_chapter_boundary(tmp_path: Path) -> None:
+    source = tmp_path / "novel.txt"
+    source.write_text(
+        "第一章 开始\n\n"
+        + "一" * 20
+        + "\n\n"
+        + "壹" * 20
+        + "\n\n第二章 之后\n\n"
+        + "二" * 20
+        + "\n\n"
+        + "贰" * 20
+        + "\n",
+        encoding="utf-8",
+    )
+
+    chunks = chunk_document(
+        source,
+        source_path="corpus/samples/novel.txt",
+        target_chars=200,
+        overlap_chars=20,
+    )
+
+    assert [chunk.chapter for chunk in chunks] == ["第一章 开始", "第二章 之后"]
+    for chunk in chunks:
+        assert ("第一章" in chunk.text) != ("第二章" in chunk.text)
+    assert "壹" not in chunks[1].text

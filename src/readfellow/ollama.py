@@ -97,6 +97,7 @@ class OllamaGenerator:
         timeout: int = 600,
         temperature: float = 0.0,
         num_predict: int = 2048,
+        num_ctx: int = 16384,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
@@ -104,6 +105,7 @@ class OllamaGenerator:
         self.timeout = timeout
         self.temperature = temperature
         self.num_predict = num_predict
+        self.num_ctx = num_ctx
 
     def generate_json(self, prompt: str) -> str:
         generate_request = OllamaGenerateRequest(
@@ -113,6 +115,7 @@ class OllamaGenerator:
             options=OllamaGenerateOptions(
                 temperature=self.temperature,
                 num_predict=self.num_predict,
+                num_ctx=self.num_ctx,
             ),
         )
         body = generate_request.model_dump_json().encode("utf-8")

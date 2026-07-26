@@ -6,7 +6,25 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
-from .chunking import chunk_document, sha256_file
+from .analysis import (
+    ChapterGroup,
+    analysis_path,
+    analysis_staleness_reason,
+    build_chapter_prompt,
+    chapter_body,
+    chapter_char_budget,
+    complete_chapters,
+    empty_analysis,
+    filter_chapter,
+    group_chapters,
+    merge_chapter,
+    parse_chapter_analysis,
+    processed_chapter_keys,
+    read_analysis,
+    update_analysis_metadata,
+    write_analysis,
+)
+from .chunking import CHUNKER_VERSION, chunk_document, sha256_file
 from .config import ReadFellowConfig
 from .graph import (
     build_extraction_prompt,
@@ -16,13 +34,17 @@ from .graph import (
     merge_extraction,
     parse_graph_extraction,
     processed_chunk_ids,
-    query_graph as query_knowledge_graph,
     read_chunks,
     read_graph,
     update_graph_metadata,
     write_graph,
 )
+from .graph import (
+    query_graph as query_knowledge_graph,
+)
 from .models import (
+    AnalysisSettings,
+    ChapterAnalysis,
     Chunk,
     Evidence,
     EvidenceGraphContext,
@@ -37,12 +59,14 @@ from .progress import build_progress_filter, source_from_manifest
 from .store import (
     chunk_to_doc,
     collection_path,
-    fetch_chunk as fetch_stored_chunk,
     open_or_create_collection,
     query_fts,
     query_vector,
     read_manifest,
     write_manifest,
+)
+from .store import (
+    fetch_chunk as fetch_stored_chunk,
 )
 
 
@@ -140,6 +164,39 @@ class GraphSearchResult:
     evidence: list[Evidence]
 
 
+@dataclass(frozen=True)
+class AnalysisBuildOptions:
+    llm_model: str | None = None
+    num_predict: int | None = None
+    retries: int | None = None
+    rebuild: bool = False
+
+
+@dataclass(frozen=True)
+class AnalysisBuildEvent:
+    stage: str
+    progress: ProgressFilter | None = None
+    index: int = 0
+    total: int = 0
+    chapter_title: str = ""
+    attempt: int = 0
+    retries: int = 0
+    error: str = ""
+    reason: str = ""
+    character_count: int = 0
+    event_count: int = 0
+
+
+@dataclass(frozen=True)
+class AnalysisBuildResult:
+    collection: str
+    analysis_path: Path
+    status: str
+    progress: ProgressFilter
+    chapters: list[ChapterAnalysis]
+    skipped: list[tuple[str, str]]
+
+
 def index_document(
     config: ReadFellowConfig,
     source: Path,
@@ -194,6 +251,7 @@ def index_document(
         chunk_count=len(chunks),
         chunk_chars=chunk_chars,
         overlap_chars=overlap_chars,
+        chunker_version=CHUNKER_VERSION,
     )
     write_manifest(
         metadata_dir=config.paths.metadata_dir,
@@ -408,6 +466,7 @@ def build_graph(
     extraction_settings = GraphExtractionSettings(
         temperature=0.0,
         num_predict=num_predict,
+        num_ctx=config.ollama.num_ctx,
         retries=retries,
     )
     path_existed = path.exists()
@@ -482,6 +541,7 @@ def build_graph(
             model=llm_model,
             keep_alive=config.ollama.keep_alive,
             num_predict=num_predict,
+            num_ctx=config.ollama.num_ctx,
         )
 
     for index, chunk in enumerate(pending, start=1):
@@ -558,6 +618,218 @@ def build_graph(
     )
 
 
+def build_analysis(
+    config: ReadFellowConfig,
+    collection: str,
+    *,
+    progress: ProgressLimit | None = None,
+    options: AnalysisBuildOptions | None = None,
+    on_progress: Callable[[AnalysisBuildEvent], None] | None = None,
+    generator: GraphGenerator | None = None,
+) -> AnalysisBuildResult:
+    options = options or AnalysisBuildOptions()
+    manifest = read_manifest(
+        metadata_dir=config.paths.metadata_dir, collection=collection
+    )
+    all_chunks = read_chunks(
+        metadata_dir=config.paths.metadata_dir,
+        collection=collection,
+    )
+    _validate_chunk_metadata_source(manifest, all_chunks)
+    progress_filter = progress_filter_from_limit(progress, manifest=manifest)
+
+    groups = group_chapters(all_chunks)
+    selected = [
+        group
+        for group in complete_chapters(groups)
+        if all(progress_filter.allows(chunk) for chunk in group.chunks)
+    ]
+
+    path = analysis_path(config.paths.metadata_dir, collection)
+    llm_model = options.llm_model or config.ollama.generation_model
+    num_predict = (
+        config.analysis.num_predict
+        if options.num_predict is None
+        else options.num_predict
+    )
+    retries = config.analysis.retries if options.retries is None else options.retries
+    settings = AnalysisSettings(
+        temperature=0.0,
+        num_predict=num_predict,
+        num_ctx=config.ollama.num_ctx,
+        retries=retries,
+    )
+
+    path_existed = path.exists()
+    rebuilt = path_existed and options.rebuild
+    document = empty_analysis(
+        collection=collection,
+        manifest=manifest,
+        llm_model=llm_model,
+        settings=settings,
+    )
+    if path_existed and not options.rebuild:
+        stored = read_analysis(path)
+        stale_reason = analysis_staleness_reason(
+            stored,
+            groups,
+            collection=collection,
+            source_path=manifest.source_path,
+            llm_model=llm_model,
+            settings=settings,
+        )
+        if stale_reason is None:
+            document = stored
+        else:
+            rebuilt = True
+
+    processed = processed_chapter_keys(document)
+    budget = chapter_char_budget(num_ctx=config.ollama.num_ctx, num_predict=num_predict)
+    pending: list[ChapterGroup] = []
+    skipped: list[tuple[str, str]] = []
+    for group in selected:
+        if (group.index, group.title) in processed:
+            continue
+        size = len(chapter_body(group))
+        if budget and size > budget:
+            skipped.append(
+                (group.title, f"chapter is too long for num_ctx ({size} > {budget})")
+            )
+            continue
+        pending.append(group)
+
+    _emit(
+        on_progress,
+        AnalysisBuildEvent(
+            stage="selected", progress=progress_filter, total=len(selected)
+        ),
+    )
+    for title, reason in skipped:
+        _emit(
+            on_progress,
+            AnalysisBuildEvent(stage="skipped", chapter_title=title, reason=reason),
+        )
+
+    if generator is None:
+        generator = OllamaGenerator(
+            base_url=config.ollama.base_url,
+            model=llm_model,
+            keep_alive=config.ollama.keep_alive,
+            num_predict=num_predict,
+            num_ctx=config.ollama.num_ctx,
+        )
+
+    for index, group in enumerate(pending, start=1):
+        _emit(
+            on_progress,
+            AnalysisBuildEvent(
+                stage="analyzing",
+                index=index,
+                total=len(pending),
+                chapter_title=group.title,
+            ),
+        )
+        analysis = _analyze_chapter(
+            generator,
+            group,
+            retries=retries,
+            index=index,
+            total=len(pending),
+            on_progress=on_progress,
+        )
+        merge_chapter(document, analysis, group)
+        update_analysis_metadata(
+            document,
+            collection=collection,
+            manifest=manifest,
+            llm_model=llm_model,
+            settings=settings,
+            progress=progress_filter,
+            selected_chapter_count=len(selected),
+        )
+        write_analysis(path, document)
+        _emit(
+            on_progress,
+            AnalysisBuildEvent(
+                stage="analyzed",
+                index=index,
+                total=len(pending),
+                chapter_title=group.title,
+                character_count=len(analysis.characters),
+                event_count=len(analysis.events),
+            ),
+        )
+
+    update_analysis_metadata(
+        document,
+        collection=collection,
+        manifest=manifest,
+        llm_model=llm_model,
+        settings=settings,
+        progress=progress_filter,
+        selected_chapter_count=len(selected),
+    )
+    write_analysis(path, document)
+
+    if not selected:
+        status = "empty"
+    elif not pending:
+        status = "up_to_date"
+    else:
+        status = "rebuilt" if rebuilt else "built"
+
+    chunks_by_id = {chunk.id: chunk for chunk in all_chunks}
+    chapters = [
+        filtered
+        for filtered in (
+            filter_chapter(chapter, chunks_by_id, progress_filter)
+            for chapter in document.chapters
+        )
+        if filtered is not None
+    ]
+    return AnalysisBuildResult(
+        collection=collection,
+        analysis_path=path,
+        status=status,
+        progress=progress_filter,
+        chapters=chapters,
+        skipped=skipped,
+    )
+
+
+def _analyze_chapter(
+    generator: GraphGenerator,
+    group: ChapterGroup,
+    *,
+    retries: int,
+    index: int,
+    total: int,
+    on_progress: Callable[[AnalysisBuildEvent], None] | None,
+) -> ChapterAnalysis:
+    prompt = build_chapter_prompt(group)
+    for attempt in range(retries + 1):
+        try:
+            return parse_chapter_analysis(generator.generate_json(prompt), group)
+        except Exception as exc:
+            if attempt >= retries:
+                raise RuntimeError(
+                    f"failed to analyze chapter {group.title}: {exc}"
+                ) from exc
+            _emit(
+                on_progress,
+                AnalysisBuildEvent(
+                    stage="retry",
+                    index=index,
+                    total=total,
+                    chapter_title=group.title,
+                    attempt=attempt + 1,
+                    retries=retries,
+                    error=str(exc),
+                ),
+            )
+    raise RuntimeError(f"failed to analyze chapter {group.title}: no attempt was made")
+
+
 def query_graph(
     config: ReadFellowConfig,
     query: str,
@@ -629,6 +901,12 @@ def _validate_chunk_metadata_source(
 ) -> None:
     if not chunks:
         return
+    if manifest.chunker_version != CHUNKER_VERSION:
+        raise RuntimeError(
+            f"chunk metadata was produced by chunker version "
+            f"{manifest.chunker_version} (current {CHUNKER_VERSION}); "
+            "run index --rebuild"
+        )
     if any(chunk.source_path != manifest.source_path for chunk in chunks):
         raise RuntimeError(
             "chunk metadata is stale (source path changed); run index to rebuild it"

@@ -163,6 +163,27 @@ def test_parse_rejects_evidence_not_found_verbatim_in_chunk() -> None:
         )
 
 
+def test_parse_stores_the_source_wording_of_a_loosely_quoted_evidence() -> None:
+    extraction = parse_graph_extraction(
+        {
+            "entities": [
+                {
+                    "name": "向山",
+                    "type": "人物",
+                    "evidence": "向山被人称作武神。‘他帮助了尤基。’",
+                }
+            ],
+            "relations": [],
+        },
+        chunk(text="向山被人称作武神。\r\n    “他帮助了尤基。”\r\n"),
+    )
+
+    assert (
+        extraction.entities[0].evidence[0].text
+        == "向山被人称作武神。\r\n    “他帮助了尤基。"
+    )
+
+
 def test_parse_rejects_relation_evidence_not_found_verbatim_in_chunk() -> None:
     with pytest.raises(ValueError, match="relation evidence is not an exact substring"):
         parse_graph_extraction(

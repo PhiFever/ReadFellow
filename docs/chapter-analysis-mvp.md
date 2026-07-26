@@ -1,7 +1,7 @@
 # 章节级分析 MVP 设计归档
 
 日期：2026-07-26
-状态：**设计已确认，尚未实施**（本文档写于动手之前）
+状态：**已实施，手工验收通过**（决策部分写于动手之前，实测结论见文末「实施结果」）
 
 本文档归档一次 grilling 会话的结论：为 ReadFellow 增加「章节级分析」能力的最小可用实现。范围限定为 `corpus/samples/赛博英雄传.txt` 的前几章，不跑全本，验收标准是切分后的单节/多节测试。
 
@@ -69,7 +69,7 @@
 ```python
 for unit in units:
     if window and unit.chapter != window_chapter:
-        emit(carry_overlap=False)   # 新增：章节边界硬断
+        emit(carry_overlap=False)  # 新增：章节边界硬断
     elif window and window_chars + len(unit.text) > target_chars:
         emit(carry_overlap=True)
     window.append(unit)
@@ -245,6 +245,8 @@ uv run readfellow analyze --collection ch5 --max-chapter 3
 
 **整章一次调用 + 三段嵌套 schema + evidence 必须精确子串，对 `qwen3:8b` 是不小的压力。** graph 路径只要求扁平的实体/关系列表就已经需要重试兜底，analysis 的 schema 更复杂，首次成功率大概率更低。手工验收就是用来暴露这一点的；如果失败率过高，退路是决策 4 改为按 chunk 抽取 + 章级摘要两轮 pass。
 
+> 实测结论：这个风险以另一种形式落地了——失败**不是**模型能力问题，而是校验逻辑本身的缺陷。修掉后 4 章只重试 1 次，**退路未动用**。详见「实施结果 / 决策 13」。
+
 ## 执行顺序
 
 1. chunker 硬断 + 用例 1 → 验证：合成两章，无 chunk 同时含两章内容
@@ -253,3 +255,58 @@ uv run readfellow analyze --collection ch5 --max-chapter 3
 4. CLI `analyze` + 进度过滤 → 验证：用例 5
 5. `uvx ruff format . && uvx ruff check .` → 验证：clean
 6. 真实 Ollama 跑前 3 章 → 人工检查输出质量与 evidence 命中率
+
+## 实施结果
+
+6 步全部完成。`uv run pytest` 35 passed，ruff clean，pyright 除一处改动前既有项外无新增。
+
+### 决策 13：evidence 匹配用宽松形，存储用原文区间（实施中新增）
+
+手工验收第一次跑，三章连续挂在 `evidence is not an exact substring`。抓模型原始输出比对，发现它其实是逐字复制的，差的只有两类字符：
+
+- **跨行**：原文 `我……\r\n    男人做了个梦…`，模型输出 `我……男人做了个梦…`。中文换行处本就没有空格，模型不补是对的。
+- **引号**：原文 `“…”`，模型输出 `‘…’`。JSON 字符串里回避 `"` 的常见产物。
+
+根因不在模型，而在校验逻辑自相矛盾：`_parse_entity` / `_parse_character` 先对 evidence 做 `normalize_text`（`\s+` → 单空格），再拿这个**已归一化**的串去和**未归一化**的 `chunk.text` 做 `in` 判断。只要引文跨一次换行就必挂。graph.py 是同一套写法，同一个潜在缺陷——所以决策 5 里「evidence 子串校验只改公开名」实际上不成立，那处逻辑本身要修。
+
+修法**不是**放宽不变量，而是把它加强：
+
+```python
+locate_evidence(evidence, chunk_text) -> str | None
+# 忽略空白与各式引号做匹配，命中后返回 chunk 里对应的**原文区间**
+```
+
+`require_exact_evidence` 相应换成返回原文区间的 `resolve_evidence`，graph 与 analysis 共用；两侧都改为存储回取的区间。
+
+于是 evidence 现在是源文件的精确子串——**修改之前反而不是**（存的是模型吐出、被 `normalize_text` 压过空白的串）。不变量「evidence 必须是所属 chunk 原文的精确子串」到这次才真正成立。
+
+副作用：evidence 含真实换行与段首缩进，CLI 打印会撑破缩进，已在展示层加 `one_line()` 折叠（只影响显示，不影响存储）。
+
+### 附带修复：`OllamaEmbedResponse` 拒绝真实响应
+
+先前就存在，与本设计无关，但**挡死了全部真实索引**。当前 Ollama 的 `/api/embed` 会带 `model` / `total_duration` / `load_duration` / `prompt_eval_count`，而该模型继承了 `extra="forbid"`。改成 `extra="allow"`，与同文件里 `OllamaGenerateResponse` 已有的写法一致。
+
+### 手工验收实测
+
+```
+[1] (no chapter)          :2-7      chunks=1   1 人物 /  1 事件
+[2] 第一章 生锈的智人      :9-226    chunks=2  10 人物 / 10 事件
+[3] 第二章 铜糖与戴森原则  :228-361  chunks=2   5 人物 /  7 事件
+[4] 第三章 人类文明之敌    :363-490  chunks=2   4 人物 /  5 事件
+```
+
+4 次章级调用共重试 1 次。进度过滤：`--max-chapter 1` 只出 2 章；`--max-line 125`（切在第一章两个 chunk 之间）→ summary 抑制、`line_end` 收窄到 125、只剩已读 chunk 的人物与事件。`up_to_date` / `rebuilt` 与断点续建均符合决策 6。
+
+抽取质量的固有噪声（MVP 可接受）：模型无视「最多 8 人物」吐了 10 个；有重复实体（`尤利娅` / `尤基的母亲`、`约格` / `反抗者`）；个别 evidence 只支撑「该人物出现过」而非 `role_in_chapter` 的描述。
+
+### 与计划的偏差
+
+- 切分用例放在 `tests/test_chunking.py` 而非 `tests/test_analysis.py`（那里是章分析的用例 2-5）。
+- graph.py 公开的 helper 是 5 个而非计划的 2 个：`parse_json_object`、`normalize_text`、`get_any`、`as_list`、`chunk_context`，外加新增的 `locate_evidence` / `resolve_evidence`。理由同决策 5——复制解析逻辑会让两处容错行为飘移。
+- 决策 6 的存储结构简化为 `chunk_text_hashes: dict[str, str]`，未复用 `GraphChunkFingerprint` 的 `(source_hash, text_hash)` 二元组。因为 `_validate_chunk_metadata_source` 已保证全部 chunk 共享当前源文件 hash，逐 chunk 再存一份是冗余。
+
+### 遗留
+
+- **既有 `graph.json` 不会自动重建**，其中的 evidence 仍是旧的模型措辞（标点/空白可能与原文不符）。prompt 没改，故未 bump `GRAPH_PROMPT_VERSION`；是否强制重建整图待定。
+- **空章节名被当成一章**：书名/题记那 37 字（上表 `[1]`）消耗了一次 LLM 调用。严格说它不是章，可在 `complete_chapters` 里滤掉，属设计取舍，未动。
+- `graph.py` 里 `chunk_context` 的 `Mapping.model_dump` 有一处 pyright error，`git stash` 验证为本次改动前既有，按「不改相邻代码」未动。

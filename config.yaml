@@ -6,6 +6,7 @@ ollama:
   embedding_model: qwen3-embedding:8b
   generation_model: qwen3:8b
   keep_alive: 30m
+  num_ctx: 16384
 indexing:
   default_collection: sample
   chunk_chars: 2400
@@ -14,5 +15,8 @@ indexing:
 search:
   top_k: 5
 graph:
+  num_predict: 4096
+  retries: 2
+analysis:
   num_predict: 4096
   retries: 2
