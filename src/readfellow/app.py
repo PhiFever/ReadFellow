@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -48,6 +49,7 @@ from .models import (
     Chunk,
     Evidence,
     EvidenceGraphContext,
+    EvidenceMatch,
     GraphExtractionSettings,
     GraphQueryResult,
     IndexManifest,
@@ -68,6 +70,12 @@ from .store import (
 from .store import (
     fetch_chunk as fetch_stored_chunk,
 )
+
+
+RRF_K = 60
+FAN_OUT_MULTIPLIER = 10
+
+ChannelMode = Literal["vector", "fts", "graph"]
 
 
 @dataclass(frozen=True)
@@ -161,6 +169,20 @@ class GraphGenerator(Protocol):
 @dataclass(frozen=True)
 class GraphSearchResult:
     progress: ProgressFilter
+    evidence: list[Evidence]
+
+
+@dataclass(frozen=True)
+class ChannelStatus:
+    mode: ChannelMode
+    candidates: int
+    skipped_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class HybridSearchResult:
+    progress: ProgressFilter
+    channels: list[ChannelStatus]
     evidence: list[Evidence]
 
 
@@ -870,6 +892,50 @@ def query_graph(
     )
 
 
+def hybrid_search(
+    config: ReadFellowConfig,
+    query: str,
+    collection: str,
+    *,
+    top_k: int | None = None,
+    progress: ProgressLimit | None = None,
+) -> HybridSearchResult:
+    limit = top_k or config.search.top_k
+    fan_out = limit * FAN_OUT_MULTIPLIER
+
+    vector_result = semantic_search(
+        config, query, collection, top_k=fan_out, progress=progress
+    )
+    fts_result = fts_search(config, query, collection, top_k=fan_out, progress=progress)
+
+    graph_evidence: list[Evidence] = []
+    skipped_reason: str | None = None
+    try:
+        graph_result = query_graph(config, query, collection, progress=progress)
+    except (FileNotFoundError, RuntimeError) as exc:
+        skipped_reason = str(exc)
+    else:
+        graph_evidence = _rank_graph_evidence(graph_result.evidence)[:fan_out]
+
+    channels: list[tuple[ChannelMode, list[Evidence]]] = [
+        ("vector", vector_result.evidence),
+        ("fts", fts_result.evidence),
+        ("graph", graph_evidence),
+    ]
+    return HybridSearchResult(
+        progress=vector_result.progress,
+        channels=[
+            ChannelStatus(
+                mode=mode,
+                candidates=len(items),
+                skipped_reason=skipped_reason if mode == "graph" else None,
+            )
+            for mode, items in channels
+        ],
+        evidence=_fuse_channels(channels)[:limit],
+    )
+
+
 def open_existing_collection(config: ReadFellowConfig, collection: str):
     path = collection_path(config.paths.index_dir, collection)
     if not path.exists():
@@ -1015,6 +1081,51 @@ def _graph_evidence(
             )
         )
     return evidence
+
+
+def _rank_graph_evidence(evidence: list[Evidence]) -> list[Evidence]:
+    def rank_key(item: Evidence) -> tuple[int, int, int]:
+        context = item.graph_context
+        relations = len(context.relations) if context is not None else 0
+        entities = len(context.entities) if context is not None else 0
+        return (-relations, -entities, item.chunk_index)
+
+    return sorted(evidence, key=rank_key)
+
+
+def _fuse_channels(
+    channels: list[tuple[ChannelMode, list[Evidence]]],
+) -> list[Evidence]:
+    scores: defaultdict[str, float] = defaultdict(float)
+    matches: defaultdict[str, list[EvidenceMatch]] = defaultdict(list)
+    stored_docs: dict[str, Evidence] = {}
+    graph_docs: dict[str, Evidence] = {}
+
+    for mode, items in channels:
+        for rank, item in enumerate(items, start=1):
+            scores[item.chunk_id] += 1.0 / (RRF_K + rank)
+            matches[item.chunk_id].append(EvidenceMatch(mode=mode, rank=rank))
+            target = graph_docs if mode == "graph" else stored_docs
+            target.setdefault(item.chunk_id, item)
+
+    fused: list[Evidence] = []
+    for chunk_id, score in scores.items():
+        graph_hit = graph_docs.get(chunk_id)
+        base = stored_docs.get(chunk_id) or graph_docs[chunk_id]
+        fused.append(
+            base.model_copy(
+                update={
+                    "retrieval_mode": "hybrid",
+                    "score": score,
+                    "matches": matches[chunk_id],
+                    "graph_context": graph_hit.graph_context
+                    if graph_hit is not None
+                    else None,
+                }
+            )
+        )
+    fused.sort(key=lambda item: (-(item.score or 0.0), item.chunk_index))
+    return fused
 
 
 def _emit(

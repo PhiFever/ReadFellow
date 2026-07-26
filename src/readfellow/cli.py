@@ -8,12 +8,14 @@ from pathlib import Path
 from .app import (
     AnalysisBuildEvent,
     AnalysisBuildOptions,
+    ChannelStatus,
     GraphBuildEvent,
     GraphBuildOptions,
     IndexDocumentOptions,
     IndexProgressEvent,
     ProgressLimit,
     fts_search,
+    hybrid_search,
     index_document,
     semantic_search,
 )
@@ -97,6 +99,19 @@ def build_parser(config: ReadFellowConfig) -> argparse.ArgumentParser:
     )
     fts.add_argument("--top-k", type=int, default=config.search.top_k)
     add_progress_args(fts)
+
+    hybrid = subparsers.add_parser(
+        "hybrid",
+        help="fuse vector, FTS, and graph retrieval into one ranked evidence list",
+    )
+    hybrid.add_argument("query")
+    hybrid.add_argument(
+        "--collection",
+        type=valid_collection_name,
+        default=config.indexing.default_collection,
+    )
+    hybrid.add_argument("--top-k", type=int, default=config.search.top_k)
+    add_progress_args(hybrid)
 
     fetch = subparsers.add_parser("fetch", help="fetch one stored chunk by id")
     fetch.add_argument("chunk_id")
@@ -244,6 +259,20 @@ def command_fts(args: argparse.Namespace, config: ReadFellowConfig) -> int:
         progress=progress_limit_from_args(args),
     )
     print_progress(result.progress)
+    print_evidence(result.evidence)
+    return 0
+
+
+def command_hybrid(args: argparse.Namespace, config: ReadFellowConfig) -> int:
+    result = hybrid_search(
+        config,
+        args.query,
+        args.collection,
+        top_k=args.top_k,
+        progress=progress_limit_from_args(args),
+    )
+    print_progress(result.progress)
+    print_channels(result.channels)
     print_evidence(result.evidence)
     return 0
 
@@ -449,6 +478,11 @@ def print_evidence(items: list[Evidence], *, full_text: bool = False) -> None:
             f"\n[{index}] id={evidence.chunk_id}{score} "
             f"{evidence.source_path}:{evidence.line_start}-{evidence.line_end}"
         )
+        if evidence.matches:
+            print(
+                "matched: "
+                + ", ".join(f"{match.mode}#{match.rank}" for match in evidence.matches)
+            )
         print(f"chapter: {chapter}")
         if evidence.graph_context is not None:
             if evidence.graph_context.entities:
@@ -472,6 +506,16 @@ def progress_limit_from_args(args: argparse.Namespace) -> ProgressLimit:
 def print_progress(progress: ProgressFilter) -> None:
     if progress.description:
         print(f"progress limit: {progress.description}", file=sys.stderr)
+
+
+def print_channels(channels: list[ChannelStatus]) -> None:
+    parts = [
+        f"{channel.mode}=skipped ({channel.skipped_reason})"
+        if channel.skipped_reason is not None
+        else f"{channel.mode}={channel.candidates}"
+        for channel in channels
+    ]
+    print("channels: " + ", ".join(parts), file=sys.stderr)
 
 
 def config_path_from_argv(argv: list[str] | None) -> Path:
@@ -512,6 +556,8 @@ def main(argv: list[str] | None = None) -> int:
             return command_search(args, config)
         if args.command == "fts":
             return command_fts(args, config)
+        if args.command == "hybrid":
+            return command_hybrid(args, config)
         if args.command == "fetch":
             return command_fetch(args, config)
         if args.command == "graph-index":

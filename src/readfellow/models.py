@@ -113,6 +113,13 @@ class EvidenceGraphContext(ReadFellowModel):
     relations: list[str] = Field(default_factory=list)
 
 
+class EvidenceMatch(ReadFellowModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    mode: Literal["vector", "fts", "graph"]
+    rank: int
+
+
 class Evidence(ReadFellowModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -126,8 +133,9 @@ class Evidence(ReadFellowModel):
     chapter: str = ""
     text_hash: str
     text: str
-    retrieval_mode: Literal["vector", "fts", "fetch", "graph"]
+    retrieval_mode: Literal["vector", "fts", "fetch", "graph", "hybrid"]
     score: float | None = None
+    matches: list[EvidenceMatch] = Field(default_factory=list)
     graph_context: EvidenceGraphContext | None = None
 
 

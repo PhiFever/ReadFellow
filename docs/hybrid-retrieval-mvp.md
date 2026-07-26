@@ -1,7 +1,7 @@
 # Hybrid Retrieval MVP 设计归档
 
 日期：2026-07-26
-状态：**待实施**（决策部分写于动手之前）
+状态：**已实施**（「决策」以上部分写于动手之前，末尾「实施结果」为事后追加）
 
 本文档归档一次 grilling 会话的结论：实现 `docs/architecture-archive.md` 路线图的**优先级 4 —— hybrid retrieval**。目标是把现有的 vector / FTS / graph 三路检索按 chunk id 合并后统一排序，返回单一的 evidence 列表。
 
@@ -267,3 +267,47 @@ channels: vector=50, fts=4, graph=skipped (graph index not found)
 5. `uvx ruff format . && uvx ruff check .` → 验证：clean
 6. 手工验收（真实 Ollama + `ch5`），按上节四步 → 验证：四步全部符合预期
 7. 更新 `docs/architecture-archive.md` 的优先级状态，并在本文档追加「实施结果」
+
+## 实施结果
+
+12 条决策全部按原样落地，无偏离。改动范围与计划一致：`models.py`、`app.py`、`cli.py`、`tests/test_app.py`、`docs/architecture-archive.md`，其余模块未动。
+
+### 与计划的两处出入
+
+1. **「既有用例不受影响」不成立。** `test_semantic_search_is_configured_application_workflow` 用整字典 `model_dump(mode="json")` 精确比对 Evidence，新增字段必然出现在结果里，需补 `"matches": []`。给 Pydantic 模型加带默认值的字段，对精确 dump 断言仍是破坏性的。
+2. **手工验收无法在 `ch5` 上完成。** `graph-index --collection ch5` 在 chunk `bdd935754e17_000001` 上稳定抛「entity evidence is not an exact substring」，`--retries 5` 仍全败；换用第二、三章单独建的 collection 也在首个 chunk 失败。当前可用生成模型只有 qwen3:8b。这是 graph extraction 在该语料上的既有问题，与本次改动无关，未在本轮修复。
+
+因此四步验收改在一份短小规整的中文样本（3 chunk，9 实体 6 关系）上完成，另对 `ch5` 补跑一次真实查询确认 vector+FTS 融合正常（`channels: vector=12, fts=11, graph=0`——图谱有效但为空，故通道参与而无候选）。
+
+### 验收记录
+
+**融合与名次**（查询「以诺」，`top_k 3`）：
+
+```
+channels: vector=3, fts=2, graph=2
+
+[1] score=0.048916  matched: vector#1, fts#1, graph#2
+[2] score=0.048652  matched: vector#2, fts#2, graph#1
+[3] score=0.015873  matched: vector#3
+```
+
+手算核对：`1/61+1/61+1/62 = 0.048915`、`1/62+1/62+1/61 = 0.048651`、`1/63 = 0.015873`，与输出一致。三通道的候选数与单独跑 `search` / `fts` / `graph-query` 的结果条数逐一对得上。
+
+决策 3 可见地生效：关系数为 2 的 chunk 在 `graph-query` 里按 chunk_index 排第 2，在 hybrid 的 graph 通道里被提到 #1。
+
+**降级**：移走 `graph.json` 后
+
+```
+channels: vector=3, fts=2, graph=skipped (graph index not found: metadata/toy/graph.json; run graph-index first)
+```
+
+evidence 仍由另两路正常返回，`matched:` 行随之只剩两个通道。
+
+**进度过滤**：`--max-chapter 2` 后第三章的 chunk 在**三个通道里同时消失**（`vector=2, fts=1, graph=1`），融合层没有绕过任何一条过滤路径。
+
+**输出契约**：`search` / `fts` 的 stdout 与改动前对比，`fts` 逐字节相同；`search` 仅浮点分数末位有别，chunk id 与顺序完全一致——同一份代码连跑两次即可复现该抖动（Ollama embedding 非确定性），与本次改动无关。
+
+### 遗留
+
+- `graph-index` 在 `赛博英雄传.txt` 上建不出非空图谱（见上），使 hybrid 的 graph 通道在主语料上暂无实际贡献。
+- `semantic_search` / `fts_search` 不校验源文件 hash（只有 graph 路经 `_validate_chunk_metadata_source` 校验），源文件被改过时会静默返回 stale 结果。本次未改动此行为。

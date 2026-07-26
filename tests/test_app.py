@@ -14,6 +14,7 @@ from readfellow.app import (
     build_graph,
     fetch_chunk,
     fts_search,
+    hybrid_search,
     query_graph,
     semantic_search,
 )
@@ -438,6 +439,7 @@ def test_semantic_search_is_configured_application_workflow(
             "text": source_text,
             "retrieval_mode": "vector",
             "score": 0.8125,
+            "matches": [],
             "graph_context": None,
         }
     ]
@@ -701,3 +703,207 @@ def test_graph_query_does_not_match_alias_learned_after_progress(
     )
 
     assert result.evidence == []
+
+
+def hybrid_workspace(tmp_path: Path) -> tuple[ReadFellowConfig, Path, list[Chunk]]:
+    source = tmp_path / "novel.txt"
+    source.write_text("第一章 开始\n\n向山帮助了尤基。\n", encoding="utf-8")
+    config = ReadFellowConfig(
+        paths=PathConfig(
+            index_dir=tmp_path / "indexes",
+            metadata_dir=tmp_path / "metadata",
+        ),
+        search=SearchConfig(top_k=5),
+    )
+    chunks = chunk_document(
+        source,
+        source_path=str(source),
+        target_chars=100,
+        overlap_chars=0,
+    )
+    write_manifest(
+        metadata_dir=config.paths.metadata_dir,
+        collection="books",
+        manifest=manifest_for(source),
+        chunks=chunks,
+    )
+    return config, source, chunks
+
+
+def hybrid_doc(chunk_id: str, chunk_index: int) -> Doc:
+    return Doc(
+        id=chunk_id,
+        score=0.5,
+        fields={
+            "source_path": "corpus/novel.txt",
+            "chunk_index": chunk_index,
+            "line_start": chunk_index,
+            "line_end": chunk_index + 1,
+            "byte_start": 0,
+            "byte_end": 10,
+            "chapter": "第一章 开始",
+            "text_hash": f"hash-{chunk_id}",
+            "text": f"{chunk_id} 的正文",
+        },
+    )
+
+
+def stub_zvec_channels(
+    monkeypatch,
+    *,
+    vector_docs: list[Doc],
+    fts_docs: list[Doc],
+    captured: dict[str, Any],
+) -> None:
+    class FakeEmbedder:
+        def __init__(self, **_: Any) -> None:
+            pass
+
+        def embed_one(self, text: str) -> list[float]:
+            return [0.25, 0.75]
+
+    def fake_query_vector(coll, vector, *, top_k: int, filter=None) -> list[Doc]:
+        captured["vector_top_k"] = top_k
+        return vector_docs
+
+    def fake_query_fts(coll, query: str, *, top_k: int, filter=None) -> list[Doc]:
+        captured["fts_top_k"] = top_k
+        return fts_docs
+
+    monkeypatch.setattr(app, "open_existing_collection", lambda *_: object())
+    monkeypatch.setattr(app, "OllamaEmbedder", FakeEmbedder)
+    monkeypatch.setattr(app, "query_vector", fake_query_vector)
+    monkeypatch.setattr(app, "query_fts", fake_query_fts)
+
+
+def test_hybrid_ranks_multi_channel_agreement_above_a_single_channel_top_hit(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    config, _, _ = hybrid_workspace(tmp_path)
+    captured: dict[str, Any] = {}
+    stub_zvec_channels(
+        monkeypatch,
+        vector_docs=[
+            hybrid_doc("chunk_a", 1),
+            hybrid_doc("chunk_x", 3),
+            hybrid_doc("chunk_b", 2),
+        ],
+        fts_docs=[
+            hybrid_doc("chunk_y", 4),
+            hybrid_doc("chunk_z", 5),
+            hybrid_doc("chunk_b", 2),
+        ],
+        captured=captured,
+    )
+
+    result = hybrid_search(config, "尤基", "books")
+
+    assert captured["vector_top_k"] == 50
+    assert captured["fts_top_k"] == 50
+    assert [item.chunk_id for item in result.evidence] == [
+        "chunk_b",
+        "chunk_a",
+        "chunk_y",
+        "chunk_x",
+        "chunk_z",
+    ]
+    fused = result.evidence[0]
+    assert fused.retrieval_mode == "hybrid"
+    assert fused.score == pytest.approx(2 / 63)
+    assert [(match.mode, match.rank) for match in fused.matches] == [
+        ("vector", 3),
+        ("fts", 3),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("graph_state", "expected_reason"),
+    [("missing", "graph index not found"), ("stale", "graph index is stale")],
+)
+def test_hybrid_skips_the_graph_channel_and_reports_why(
+    monkeypatch,
+    tmp_path: Path,
+    graph_state: str,
+    expected_reason: str,
+) -> None:
+    config, source, chunks = hybrid_workspace(tmp_path)
+    if graph_state == "stale":
+        build_graph(
+            config,
+            "books",
+            options=GraphBuildOptions(retries=0),
+            generator=DeterministicGenerator(
+                [
+                    {
+                        "entities": [
+                            {
+                                "name": "向山",
+                                "type": "人物",
+                                "evidence": "向山帮助了尤基",
+                            }
+                        ],
+                        "relations": [],
+                    }
+                ]
+            ),
+        )
+        source.write_text("第一章 开始\n\n尤基离开了房间。\n", encoding="utf-8")
+        changed = chunk_document(
+            source,
+            source_path=str(source),
+            target_chars=100,
+            overlap_chars=0,
+        )[0].model_copy(update={"id": chunks[0].id})
+        write_manifest(
+            metadata_dir=config.paths.metadata_dir,
+            collection="books",
+            manifest=manifest_for(source),
+            chunks=[changed],
+        )
+
+    stub_zvec_channels(
+        monkeypatch,
+        vector_docs=[hybrid_doc("chunk_a", 1)],
+        fts_docs=[hybrid_doc("chunk_a", 1)],
+        captured={},
+    )
+
+    result = hybrid_search(config, "向山", "books")
+
+    assert [item.chunk_id for item in result.evidence] == ["chunk_a"]
+    assert [
+        (channel.mode, channel.candidates, channel.skipped_reason is None)
+        for channel in result.channels
+        if channel.mode != "graph"
+    ] == [("vector", 1, True), ("fts", 1, True)]
+    graph_channel = next(
+        channel for channel in result.channels if channel.mode == "graph"
+    )
+    assert graph_channel.candidates == 0
+    assert expected_reason in (graph_channel.skipped_reason or "")
+
+
+def test_hybrid_fails_when_the_embedding_service_is_down(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    config, _, _ = hybrid_workspace(tmp_path)
+    stub_zvec_channels(
+        monkeypatch,
+        vector_docs=[],
+        fts_docs=[hybrid_doc("chunk_a", 1)],
+        captured={},
+    )
+
+    class BrokenEmbedder:
+        def __init__(self, **_: Any) -> None:
+            pass
+
+        def embed_one(self, text: str) -> list[float]:
+            raise RuntimeError("ollama is unreachable")
+
+    monkeypatch.setattr(app, "OllamaEmbedder", BrokenEmbedder)
+
+    with pytest.raises(RuntimeError, match="ollama is unreachable"):
+        hybrid_search(config, "向山", "books")

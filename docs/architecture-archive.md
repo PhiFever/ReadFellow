@@ -283,7 +283,7 @@ CLI 应只负责解析参数、调用这些模块并格式化输出。
 - 当 chunk metadata 改变时的 rebuild/invalidate 行为。
 - 使用确定性 generator adapter 的测试。
 
-### 优先级 4：增加 hybrid retrieval
+### 优先级 4：增加 hybrid retrieval（已完成，见 `docs/hybrid-retrieval-mvp.md`）
 
 先实现简单本地策略，再考虑引入更重框架：
 
@@ -293,6 +293,8 @@ CLI 应只负责解析参数、调用这些模块并格式化输出。
 4. 按 chunk id 合并。
 5. Fetch 原始 chunks。
 6. 返回排序后的 evidence。
+
+已由 `hybrid` 子命令 / `app.hybrid_search` 实现，用 RRF（k=60、等权、每路召回 `top_k * 10`）融合三路名次。
 
 ### 优先级 5：引入重型 GraphRAG 前先评估
 
@@ -354,3 +356,17 @@ CLI 应只负责解析参数、调用这些模块并格式化输出。
 - `build_graph` 接受最小 `GraphGenerator` adapter，确定性测试覆盖无效 evidence 重试、落盘重开、up-to-date 跳过及 stale rebuild。
 
 本轮没有实现逐 alias/type provenance、局部 graph surgery、provider registry、hybrid retrieval 或重型 GraphRAG。下一步按优先级 4 实现简单本地 hybrid retrieval。
+
+## 2026-07-26 Hybrid Retrieval MVP 记录
+
+已完成优先级 4 的最小可用实现（设计论证见 `docs/hybrid-retrieval-mvp.md`）：
+
+- 新增 `hybrid` 子命令与 `app.hybrid_search`，组合既有的 `semantic_search` / `fts_search` / `query_graph`，不重复三者的 manifest / collection / progress filter 前置逻辑。
+- 用 RRF（`Σ 1/(60 + rank)`）按名次融合，不做分数归一化——实测 vector 余弦区间 0.458–0.544 与 FTS 的 0.972–1.945 量纲不可比，且 graph 路本就没有分数。k、权重、召回倍数均不进 config。
+- graph 路在融合层按 `(关系数, 实体数)` 降序定名次，`graph-query` 自身的输出顺序不变。
+- `graph.json` 缺失或 stale 时**跳过该通道并结构化上报**（`HybridSearchResult.channels`），不整体失败：跳过整路即最严格的 fail closed，stale 的实体/关系/别名一个字进不了输出；而 vector 路故障（Ollama 不可达）则整体失败，避免静默退化成纯关键词匹配。
+- `Evidence` 增加 `matches: list[EvidenceMatch]`（通道 + 该通道内名次），使融合排序可解释；`matches` 对其他命令恒为空，它们的输出逐字节不变。
+
+本轮没有实现二次 rerank、评估集、MCP 暴露或重型 GraphRAG。下一步按优先级 5 建立评估集，用数据判断是否需要调 RRF 参数或引入更重的 stack。
+
+已知遗留：`graph-index` 在 `corpus/samples/赛博英雄传.txt` 上用 qwen3:8b 会稳定触发「evidence 不是原文精确子串」，重试 5 次仍无法通过，因此该语料目前建不出非空图谱；hybrid 的 graph 通道端到端验证是在一份短小规整的中文样本上完成的。
