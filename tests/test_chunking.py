@@ -7,9 +7,10 @@ from readfellow.chunking import chunk_document, read_text_units
 
 def test_read_text_units_preserves_offsets_and_chapter(tmp_path: Path) -> None:
     source = tmp_path / "novel.txt"
-    source.write_text(
-        "第一章 开始\r\n\r\n这是第一段。\r\n第二行。\r\n\r\n尾声\r\n结束。\r\n",
-        encoding="utf-8",
+    # write_bytes, not write_text: text mode would rewrite every "\n" as
+    # os.linesep, turning the CRLF this case is about into CRCRLF on Windows.
+    source.write_bytes(
+        "第一章 开始\r\n\r\n这是第一段。\r\n第二行。\r\n\r\n尾声\r\n结束。\r\n".encode()
     )
 
     units = read_text_units(source)
