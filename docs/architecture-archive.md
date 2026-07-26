@@ -427,3 +427,41 @@ CLI 应只负责解析参数、调用这些模块并格式化输出。
 - `store.write_manifest` 里还有第三份 `json.dumps(..., ensure_ascii=False, indent=2)`，与 `write_json_document` 重复。属评审前就存在的冗余，且跨到 store 层，本轮未动；等阶段 C 动 `store.py` 时一并处理。
 
 下一步：阶段 C（补完 zvec seam）。
+
+---
+
+## 2026-07-27 阶段 C 落地记录：ChunkStore seam
+
+**做了什么**：把 zvec 收进 `store.py`，让「`store.py` 是唯一接触 zvec 的地方」从一句愿望变成可 grep 验证的事实（`grep zvec src/readfellow/app.py` 现在为空）。
+
+`store.py` 对外的 interface 收成一个 `ChunkStore` Protocol，5 个方法：`upsert` / `commit` / `search_vector` / `search_fts` / `fetch`。两个 adapter：`ZvecChunkStore`（生产）、`InMemoryChunkStore`（`tests/test_app.py`）。
+
+三个设计决定与计划原文不同，理由记在 `docs/module-deepening-plan.md` 的阶段 C 小节：`open` 不进 Protocol（改为两个 classmethod）；`upsert` 收 `embed` callback 而不是算好的 `vectors`（否则"跳过未变 chunk"省不掉唯一昂贵的那步）；`filter: str` 改成 `progress: ProgressFilter`（filter 表达式是 zvec 方言）。
+
+**检索结果以 `Evidence` 跨 seam**：`_evidence_from_doc` 从 `app.py` 移进 `store.py` 变私有，`Doc` / `Status` / `CollectionOption` / `QueryChunkFields` 都不再出现在 `app.py`。这直接服务不变量 2——store 递出来的东西已经带着 `source_path:line_start-line_end`。
+
+顺带修复：两份逐字相同的 9 元素 `output_fields` 合并为 `STORED_OUTPUT_FIELDS`，两次 `coll.query` 收进 `_search`。
+
+**测试形态的变化**（这才是 seam 的实际收益）：`app` 的 5 个入口都加了可选的 `store: ChunkStore | None`，与已有的 `generator: JsonGenerator | None` 同构。测试从 monkeypatch 4 个存储符号（`open_existing_collection`、`query_vector`、`query_fts`、`fetch_stored_chunk`）改成注入一个 adapter，**测试文件里不再 import 任何 zvec 符号**（`from zvec import Doc` 已删）。剩下的 `monkeypatch.setattr(app, ...)` 只剩 `read_manifest`（文件）与 `OllamaEmbedder`（网络）。
+
+`tests/test_cli_evidence.py` 保持真实 zvec，但改走 `ZvecChunkStore.open_for_write` + `upsert` + `commit`——顺带让它第一次覆盖了真实的写入协议（此前它自己拼 `Doc` 调 `collection.insert`，绕过了 `index_document` 的整条批处理路径）。
+
+**刻意没做**：
+
+- **没有换用 zvec 的 `Collection.upsert`**。它存在，用它能让 `missing`/`changed` 拆分整个消失，但那是一次没有测试托底的写语义变更，且拆分已经藏在 adapter 内部、不再有 interface 成本。
+- **`InMemoryChunkStore` 放在 `tests/` 而不是 `src/`**。src 里没有生产调用点的 fake 是投机代码。
+- **`read_manifest` / `read_chunks` / `write_manifest` 没有进 `ChunkStore`**。它们读写 `metadata/` 下的 JSON，与 zvec 无关，塞进来只会让 interface 变宽。
+
+**行为等价性验证**：
+
+- `uv run pytest` 40 passed（新增 1 个：re-index 未改动文档时 `embed` 一次都不该被调用——这正是刚搬进 `upsert` 的那段逻辑，此前无任何测试覆盖）；`uvx ruff format`/`check` clean。
+- 真实 zvec + 真实 Ollama，改动前后跑同一串命令：新建索引 `indexed 8, skipped 0`、重跑 `skipped existing chunks` / `inserted=0, skipped=8`、`--chunk-chars 500` 触发 update 路径 `indexed 7, skipped 1`、`fts` 与 `fetch` 输出逐字节一致。四条写路径（insert / skip / update / commit）全部覆盖。唯一差异是一条向量检索得分的第 4 位小数（0.446121 → 0.446391），来自 rebuild 后重新生成 embedding 的浮点漂移，id、排序、行范围均相同。
+- `graph-query` 在 `toy` 上输出正常，`sample` 仍按 chunker 版本 fail closed。
+
+**已知遗留**：
+
+- `hybrid_search` 现在只开一个只读句柄并传给 `semantic_search` / `fts_search`（此前各开一个）。行为无变化，但 collection 不存在时的报错点从 `semantic_search` 内部前移到了 `hybrid_search` 开头——错误消息相同。
+- `store.write_manifest` 里那份 `json.dumps(..., ensure_ascii=False, indent=2)` 仍与 `derivation.write_json_document` 重复。阶段 B 留的这条本想在 C 处理，但 `write_manifest` 同时还写 `chunks.jsonl`（逐行、无 indent），只有前半段能复用，且 `store` → `derivation` 是一条新的模块依赖。收益（3 行）不抵这条依赖，继续留着。
+- 索引仍不是原子发布：embedding 中途失败会留下 metadata 完整而 collection 不完整的状态。seam 让这件事**变得可修**（`upsert` + `commit` 已经是两阶段的形状），但本轮没有动。
+
+下一步：阶段 D（ReadingWindow）与阶段 E 均为触发条件驱动，暂不启动。

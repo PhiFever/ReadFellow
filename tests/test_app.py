@@ -5,16 +5,17 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from zvec import Doc
 
 from readfellow import app
 from readfellow.app import (
     GraphBuildOptions,
+    IndexDocumentOptions,
     ProgressLimit,
     build_graph,
     fetch_chunk,
     fts_search,
     hybrid_search,
+    index_document,
     query_graph,
     semantic_search,
 )
@@ -33,8 +34,8 @@ from readfellow.graph import (
     read_graph,
     write_graph,
 )
-from readfellow.models import Chunk, IndexManifest
-from readfellow.store import write_manifest
+from readfellow.models import Chunk, Evidence, IndexManifest, ProgressFilter
+from readfellow.store import UpsertOutcome, write_manifest
 
 
 def manifest_for(source: Path) -> IndexManifest:
@@ -59,6 +60,80 @@ class DeterministicGenerator:
     def generate_json(self, prompt: str) -> str:
         self.prompts.append(prompt)
         return json.dumps(next(self._responses), ensure_ascii=False)
+
+
+class InMemoryChunkStore:
+    """The second `ChunkStore` adapter: canned hits, no zvec and no filesystem."""
+
+    def __init__(
+        self,
+        *,
+        vector_hits: list[Evidence] | None = None,
+        fts_hits: list[Evidence] | None = None,
+        fetched: Evidence | None = None,
+    ) -> None:
+        self.vector_hits = vector_hits or []
+        self.fts_hits = fts_hits or []
+        self.fetched = fetched
+        self.calls: dict[str, dict[str, Any]] = {}
+        self.embedded: list[str] = []
+        self.text_hashes: dict[str, str] = {}
+        self.optimized: bool | None = None
+
+    def upsert(
+        self,
+        chunks: list[Chunk],
+        *,
+        model: str,
+        embed: Any,
+    ) -> UpsertOutcome:
+        pending = [
+            chunk
+            for chunk in chunks
+            if self.text_hashes.get(chunk.id) != chunk.text_hash
+        ]
+        if not pending:
+            return UpsertOutcome(written=0, skipped=len(chunks))
+        vectors = embed([chunk.text for chunk in pending])
+        assert len(vectors) == len(pending)
+        self.embedded.extend(chunk.id for chunk in pending)
+        self.text_hashes.update({chunk.id: chunk.text_hash for chunk in pending})
+        return UpsertOutcome(written=len(pending), skipped=len(chunks) - len(pending))
+
+    def commit(self, *, optimize: bool) -> None:
+        self.optimized = optimize
+
+    def search_vector(
+        self,
+        vector: list[float],
+        *,
+        top_k: int,
+        progress: ProgressFilter,
+    ) -> list[Evidence]:
+        self.calls["search_vector"] = {
+            "vector": vector,
+            "top_k": top_k,
+            "filter": progress.expression,
+        }
+        return self.vector_hits
+
+    def search_fts(
+        self,
+        query: str,
+        *,
+        top_k: int,
+        progress: ProgressFilter,
+    ) -> list[Evidence]:
+        self.calls["search_fts"] = {
+            "query": query,
+            "top_k": top_k,
+            "filter": progress.expression,
+        }
+        return self.fts_hits
+
+    def fetch(self, chunk_id: str) -> Evidence | None:
+        self.calls["fetch"] = {"chunk_id": chunk_id}
+        return self.fetched
 
 
 def test_graph_build_records_versioned_source_fingerprints(
@@ -368,49 +443,34 @@ def test_semantic_search_is_configured_application_workflow(
             captured["query"] = text
             return [0.25, 0.75]
 
-    fake_collection = object()
-
-    def fake_query_vector(
-        coll,
-        vector: list[float],
-        *,
-        top_k: int,
-        filter: str | None = None,
-    ) -> list[Doc]:
-        captured["query_vector"] = {
-            "coll": coll,
-            "vector": vector,
-            "top_k": top_k,
-            "filter": filter,
-        }
-        return [
-            Doc(
-                id="chunk_000001",
+    store = InMemoryChunkStore(
+        vector_hits=[
+            Evidence(
+                chunk_id="chunk_000001",
+                source_path=str(source),
+                chunk_index=1,
+                line_start=1,
+                line_end=2,
+                byte_start=0,
+                byte_end=len(source_text.encode("utf-8")),
+                chapter="第一章 开始",
+                text_hash="chunk-hash",
+                text=source_text,
+                retrieval_mode="vector",
                 score=0.8125,
-                fields={
-                    "source_path": str(source),
-                    "chunk_index": 1,
-                    "line_start": 1,
-                    "line_end": 2,
-                    "byte_start": 0,
-                    "byte_end": len(source_text.encode("utf-8")),
-                    "chapter": "第一章 开始",
-                    "text_hash": "chunk-hash",
-                    "text": source_text,
-                },
             )
         ]
+    )
 
     monkeypatch.setattr(app, "read_manifest", lambda **_: manifest_for(source))
-    monkeypatch.setattr(app, "open_existing_collection", lambda *_: fake_collection)
     monkeypatch.setattr(app, "OllamaEmbedder", FakeEmbedder)
-    monkeypatch.setattr(app, "query_vector", fake_query_vector)
 
     result = semantic_search(
         config,
         "要查的问题",
         "books",
         progress=ProgressLimit(max_chunk_index=3),
+        store=store,
     )
 
     assert captured["embedder"] == {
@@ -419,8 +479,7 @@ def test_semantic_search_is_configured_application_workflow(
         "keep_alive": "10m",
     }
     assert captured["query"] == "要查的问题"
-    assert captured["query_vector"] == {
-        "coll": fake_collection,
+    assert store.calls["search_vector"] == {
         "vector": [0.25, 0.75],
         "top_k": 11,
         "filter": "chunk_index <= 3",
@@ -446,6 +505,46 @@ def test_semantic_search_is_configured_application_workflow(
     assert result.progress.description == "through chunk index 3"
 
 
+def test_reindexing_an_unchanged_document_embeds_nothing(
+    monkeypatch, tmp_path: Path
+) -> None:
+    source = tmp_path / "novel.txt"
+    source.write_text(
+        "第一章 开始\n\n向山帮助了尤基。\n\n尤基离开了房间。\n", encoding="utf-8"
+    )
+    config = ReadFellowConfig(
+        paths=PathConfig(
+            index_dir=tmp_path / "indexes", metadata_dir=tmp_path / "metadata"
+        )
+    )
+
+    class FakeEmbedder:
+        def __init__(self, **_: Any) -> None:
+            pass
+
+        def embed_one(self, text: str) -> list[float]:
+            return [1.0, 0.0]
+
+        def embed(self, texts: list[str]) -> list[list[float]]:
+            return [[1.0, 0.0] for _ in texts]
+
+    monkeypatch.setattr(app, "OllamaEmbedder", FakeEmbedder)
+    store = InMemoryChunkStore()
+    options = IndexDocumentOptions(chunk_chars=20, overlap_chars=5, batch_size=1)
+
+    first = index_document(config, source, "books", options=options, store=store)
+
+    assert first.chunk_count > 1
+    assert (first.inserted, first.skipped) == (first.chunk_count, 0)
+    assert len(store.embedded) == first.chunk_count
+    assert store.optimized is True
+
+    second = index_document(config, source, "books", options=options, store=store)
+
+    assert (second.inserted, second.skipped) == (0, second.chunk_count)
+    assert len(store.embedded) == first.chunk_count
+
+
 def test_fts_search_returns_source_grounded_evidence(
     monkeypatch, tmp_path: Path
 ) -> None:
@@ -457,33 +556,28 @@ def test_fts_search_returns_source_grounded_evidence(
             index_dir=tmp_path / "indexes", metadata_dir=tmp_path / "metadata"
         )
     )
-    fake_collection = object()
-
-    monkeypatch.setattr(app, "read_manifest", lambda **_: manifest_for(source))
-    monkeypatch.setattr(app, "open_existing_collection", lambda *_: fake_collection)
-    monkeypatch.setattr(
-        app,
-        "query_fts",
-        lambda *_args, **_kwargs: [
-            Doc(
-                id="chunk_000002",
+    store = InMemoryChunkStore(
+        fts_hits=[
+            Evidence(
+                chunk_id="chunk_000002",
+                source_path=str(source),
+                chunk_index=2,
+                line_start=1,
+                line_end=2,
+                byte_start=0,
+                byte_end=len(source_text.encode("utf-8")),
+                chapter="第一章 开始",
+                text_hash="fts-hash",
+                text=source_text,
+                retrieval_mode="fts",
                 score=1.25,
-                fields={
-                    "source_path": str(source),
-                    "chunk_index": 2,
-                    "line_start": 1,
-                    "line_end": 2,
-                    "byte_start": 0,
-                    "byte_end": len(source_text.encode("utf-8")),
-                    "chapter": "第一章 开始",
-                    "text_hash": "fts-hash",
-                    "text": source_text,
-                },
             )
-        ],
+        ]
     )
 
-    result = fts_search(config, "关键词", "books", top_k=4)
+    monkeypatch.setattr(app, "read_manifest", lambda **_: manifest_for(source))
+
+    result = fts_search(config, "关键词", "books", top_k=4, store=store)
 
     assert len(result.evidence) == 1
     assert result.evidence[0].retrieval_mode == "fts"
@@ -504,30 +598,28 @@ def test_fetch_chunk_does_not_expose_text_outside_progress(
             index_dir=tmp_path / "indexes", metadata_dir=tmp_path / "metadata"
         )
     )
-    stored = Doc(
-        id="chunk_000003",
-        fields={
-            "source_path": str(source),
-            "chunk_index": 3,
-            "line_start": 1,
-            "line_end": 2,
-            "byte_start": 0,
-            "byte_end": len(source_text.encode("utf-8")),
-            "chapter": "第一章 开始",
-            "text_hash": "future-hash",
-            "text": source_text,
-        },
+    stored = Evidence(
+        chunk_id="chunk_000003",
+        source_path=str(source),
+        chunk_index=3,
+        line_start=1,
+        line_end=2,
+        byte_start=0,
+        byte_end=len(source_text.encode("utf-8")),
+        chapter="第一章 开始",
+        text_hash="future-hash",
+        text=source_text,
+        retrieval_mode="fetch",
     )
 
     monkeypatch.setattr(app, "read_manifest", lambda **_: manifest_for(source))
-    monkeypatch.setattr(app, "open_existing_collection", lambda *_: object())
-    monkeypatch.setattr(app, "fetch_stored_chunk", lambda *_: stored)
 
     result = fetch_chunk(
         config,
-        stored.id,
+        stored.chunk_id,
         "books",
         progress=ProgressLimit(max_line=1),
+        store=InMemoryChunkStore(fetched=stored),
     )
 
     assert result.status == "outside_progress"
@@ -730,31 +822,34 @@ def hybrid_workspace(tmp_path: Path) -> tuple[ReadFellowConfig, Path, list[Chunk
     return config, source, chunks
 
 
-def hybrid_doc(chunk_id: str, chunk_index: int) -> Doc:
-    return Doc(
-        id=chunk_id,
+def hybrid_hit(
+    chunk_id: str,
+    chunk_index: int,
+    *,
+    retrieval_mode: str,
+) -> Evidence:
+    return Evidence(
+        chunk_id=chunk_id,
+        source_path="corpus/novel.txt",
+        chunk_index=chunk_index,
+        line_start=chunk_index,
+        line_end=chunk_index + 1,
+        byte_start=0,
+        byte_end=10,
+        chapter="第一章 开始",
+        text_hash=f"hash-{chunk_id}",
+        text=f"{chunk_id} 的正文",
+        retrieval_mode=retrieval_mode,
         score=0.5,
-        fields={
-            "source_path": "corpus/novel.txt",
-            "chunk_index": chunk_index,
-            "line_start": chunk_index,
-            "line_end": chunk_index + 1,
-            "byte_start": 0,
-            "byte_end": 10,
-            "chapter": "第一章 开始",
-            "text_hash": f"hash-{chunk_id}",
-            "text": f"{chunk_id} 的正文",
-        },
     )
 
 
-def stub_zvec_channels(
+def stub_channels(
     monkeypatch,
     *,
-    vector_docs: list[Doc],
-    fts_docs: list[Doc],
-    captured: dict[str, Any],
-) -> None:
+    vector_hits: list[Evidence],
+    fts_hits: list[Evidence],
+) -> InMemoryChunkStore:
     class FakeEmbedder:
         def __init__(self, **_: Any) -> None:
             pass
@@ -762,18 +857,8 @@ def stub_zvec_channels(
         def embed_one(self, text: str) -> list[float]:
             return [0.25, 0.75]
 
-    def fake_query_vector(coll, vector, *, top_k: int, filter=None) -> list[Doc]:
-        captured["vector_top_k"] = top_k
-        return vector_docs
-
-    def fake_query_fts(coll, query: str, *, top_k: int, filter=None) -> list[Doc]:
-        captured["fts_top_k"] = top_k
-        return fts_docs
-
-    monkeypatch.setattr(app, "open_existing_collection", lambda *_: object())
     monkeypatch.setattr(app, "OllamaEmbedder", FakeEmbedder)
-    monkeypatch.setattr(app, "query_vector", fake_query_vector)
-    monkeypatch.setattr(app, "query_fts", fake_query_fts)
+    return InMemoryChunkStore(vector_hits=vector_hits, fts_hits=fts_hits)
 
 
 def test_hybrid_ranks_multi_channel_agreement_above_a_single_channel_top_hit(
@@ -781,26 +866,24 @@ def test_hybrid_ranks_multi_channel_agreement_above_a_single_channel_top_hit(
     tmp_path: Path,
 ) -> None:
     config, _, _ = hybrid_workspace(tmp_path)
-    captured: dict[str, Any] = {}
-    stub_zvec_channels(
+    store = stub_channels(
         monkeypatch,
-        vector_docs=[
-            hybrid_doc("chunk_a", 1),
-            hybrid_doc("chunk_x", 3),
-            hybrid_doc("chunk_b", 2),
+        vector_hits=[
+            hybrid_hit("chunk_a", 1, retrieval_mode="vector"),
+            hybrid_hit("chunk_x", 3, retrieval_mode="vector"),
+            hybrid_hit("chunk_b", 2, retrieval_mode="vector"),
         ],
-        fts_docs=[
-            hybrid_doc("chunk_y", 4),
-            hybrid_doc("chunk_z", 5),
-            hybrid_doc("chunk_b", 2),
+        fts_hits=[
+            hybrid_hit("chunk_y", 4, retrieval_mode="fts"),
+            hybrid_hit("chunk_z", 5, retrieval_mode="fts"),
+            hybrid_hit("chunk_b", 2, retrieval_mode="fts"),
         ],
-        captured=captured,
     )
 
-    result = hybrid_search(config, "尤基", "books")
+    result = hybrid_search(config, "尤基", "books", store=store)
 
-    assert captured["vector_top_k"] == 50
-    assert captured["fts_top_k"] == 50
+    assert store.calls["search_vector"]["top_k"] == 50
+    assert store.calls["search_fts"]["top_k"] == 50
     assert [item.chunk_id for item in result.evidence] == [
         "chunk_b",
         "chunk_a",
@@ -862,14 +945,13 @@ def test_hybrid_skips_the_graph_channel_and_reports_why(
             chunks=[changed],
         )
 
-    stub_zvec_channels(
+    store = stub_channels(
         monkeypatch,
-        vector_docs=[hybrid_doc("chunk_a", 1)],
-        fts_docs=[hybrid_doc("chunk_a", 1)],
-        captured={},
+        vector_hits=[hybrid_hit("chunk_a", 1, retrieval_mode="vector")],
+        fts_hits=[hybrid_hit("chunk_a", 1, retrieval_mode="fts")],
     )
 
-    result = hybrid_search(config, "向山", "books")
+    result = hybrid_search(config, "向山", "books", store=store)
 
     assert [item.chunk_id for item in result.evidence] == ["chunk_a"]
     assert [
@@ -889,11 +971,10 @@ def test_hybrid_fails_when_the_embedding_service_is_down(
     tmp_path: Path,
 ) -> None:
     config, _, _ = hybrid_workspace(tmp_path)
-    stub_zvec_channels(
+    store = stub_channels(
         monkeypatch,
-        vector_docs=[],
-        fts_docs=[hybrid_doc("chunk_a", 1)],
-        captured={},
+        vector_hits=[],
+        fts_hits=[hybrid_hit("chunk_a", 1, retrieval_mode="fts")],
     )
 
     class BrokenEmbedder:
@@ -906,4 +987,4 @@ def test_hybrid_fails_when_the_embedding_service_is_down(
     monkeypatch.setattr(app, "OllamaEmbedder", BrokenEmbedder)
 
     with pytest.raises(RuntimeError, match="ollama is unreachable"):
-        hybrid_search(config, "向山", "books")
+        hybrid_search(config, "向山", "books", store=store)

@@ -58,22 +58,16 @@ from .models import (
     GraphQueryResult,
     IndexManifest,
     ProgressFilter,
-    QueryChunkFields,
 )
 from .ollama import OllamaEmbedder, OllamaGenerator
 from .progress import build_progress_filter, source_from_manifest
 from .store import (
-    chunk_to_doc,
+    ChunkStore,
+    ZvecChunkStore,
     collection_path,
-    open_or_create_collection,
-    query_fts,
-    query_vector,
     read_chunks,
     read_manifest,
     write_manifest,
-)
-from .store import (
-    fetch_chunk as fetch_stored_chunk,
 )
 
 
@@ -227,6 +221,7 @@ def index_document(
     *,
     options: IndexDocumentOptions | None = None,
     on_progress: Callable[[IndexProgressEvent], None] | None = None,
+    store: ChunkStore | None = None,
 ) -> IndexDocumentResult:
     options = options or IndexDocumentOptions()
     chunk_chars = options.chunk_chars or config.indexing.chunk_chars
@@ -257,7 +252,7 @@ def index_document(
     probe_vector = embedder.embed_one(chunks[0].text)
     dimension = len(probe_vector)
 
-    coll = open_or_create_collection(
+    store = store or ZvecChunkStore.open_for_write(
         index_dir=config.paths.index_dir,
         metadata_dir=config.paths.metadata_dir,
         collection=collection,
@@ -288,76 +283,30 @@ def index_document(
     skipped = 0
     for offset in range(0, len(chunks), batch_size):
         batch = chunks[offset : offset + batch_size]
-        existing = coll.fetch(
-            [chunk.id for chunk in batch],
-            output_fields=["text_hash"],
-            include_vector=False,
+        outcome = store.upsert(
+            batch,
+            model=config.ollama.embedding_model,
+            embed=embedder.embed,
         )
-        existing_hashes = {
-            chunk.id: QueryChunkFields.model_validate(
-                existing[chunk.id].fields
-            ).text_hash
-            for chunk in batch
-            if existing.get(chunk.id) is not None
-        }
-        missing = [chunk for chunk in batch if chunk.id not in existing_hashes]
-        changed = [
-            chunk
-            for chunk in batch
-            if chunk.id in existing_hashes
-            and existing_hashes[chunk.id] != chunk.text_hash
-        ]
-        pending = missing + changed
-        skipped += len(batch) - len(pending)
-        processed = offset + len(batch)
-        if not pending:
-            _emit(
-                on_progress,
-                IndexProgressEvent(
-                    stage="batch",
-                    processed=processed,
-                    total=len(chunks),
-                    inserted=inserted,
-                    skipped=skipped,
-                    skipped_existing=True,
-                ),
-            )
-            continue
-
-        texts = [chunk.text for chunk in pending]
-        vectors = embedder.embed(texts)
-        docs = [
-            chunk_to_doc(chunk, vector, model=config.ollama.embedding_model)
-            for chunk, vector in zip(pending, vectors, strict=True)
-        ]
-        missing_count = len(missing)
-        statuses = []
-        if missing_count:
-            statuses.extend(coll.insert(docs[:missing_count]))
-        if len(docs) > missing_count:
-            statuses.extend(coll.update(docs[missing_count:]))
-        if not all(status.ok() for status in statuses):
-            failed = [str(status) for status in statuses if not status.ok()]
-            raise RuntimeError(f"zvec write failed: {failed[:3]}")
-        inserted += len(docs)
+        inserted += outcome.written
+        skipped += outcome.skipped
         elapsed = time.monotonic() - start
-        rate = inserted / elapsed if elapsed else 0
         _emit(
             on_progress,
             IndexProgressEvent(
                 stage="batch",
-                processed=processed,
+                processed=offset + len(batch),
                 total=len(chunks),
                 inserted=inserted,
                 skipped=skipped,
-                rate=rate,
+                rate=inserted / elapsed if elapsed else 0,
+                skipped_existing=outcome.written == 0,
             ),
         )
 
     if options.optimize:
         _emit(on_progress, IndexProgressEvent(stage="optimize"))
-        coll.optimize()
-    coll.flush()
+    store.commit(optimize=options.optimize)
     return IndexDocumentResult(
         collection=collection,
         chunk_count=len(chunks),
@@ -374,11 +323,12 @@ def semantic_search(
     *,
     top_k: int | None = None,
     progress: ProgressLimit | None = None,
+    store: ChunkStore | None = None,
 ) -> SearchResult:
     manifest = read_manifest(
         metadata_dir=config.paths.metadata_dir, collection=collection
     )
-    coll = open_existing_collection(config, collection)
+    store = store or _open_store(config, collection)
     progress_filter = progress_filter_from_limit(progress, manifest=manifest)
     embedder = OllamaEmbedder(
         base_url=config.ollama.base_url,
@@ -386,15 +336,13 @@ def semantic_search(
         keep_alive=config.ollama.keep_alive,
     )
     vector = embedder.embed_one(query)
-    docs = query_vector(
-        coll,
-        vector,
-        top_k=top_k or config.search.top_k,
-        filter=progress_filter.expression,
-    )
     return SearchResult(
         progress=progress_filter,
-        evidence=[_evidence_from_doc(doc, retrieval_mode="vector") for doc in docs],
+        evidence=store.search_vector(
+            vector,
+            top_k=top_k or config.search.top_k,
+            progress=progress_filter,
+        ),
     )
 
 
@@ -405,21 +353,20 @@ def fts_search(
     *,
     top_k: int | None = None,
     progress: ProgressLimit | None = None,
+    store: ChunkStore | None = None,
 ) -> SearchResult:
     manifest = read_manifest(
         metadata_dir=config.paths.metadata_dir, collection=collection
     )
-    coll = open_existing_collection(config, collection)
+    store = store or _open_store(config, collection)
     progress_filter = progress_filter_from_limit(progress, manifest=manifest)
-    docs = query_fts(
-        coll,
-        query,
-        top_k=top_k or config.search.top_k,
-        filter=progress_filter.expression,
-    )
     return SearchResult(
         progress=progress_filter,
-        evidence=[_evidence_from_doc(doc, retrieval_mode="fts") for doc in docs],
+        evidence=store.search_fts(
+            query,
+            top_k=top_k or config.search.top_k,
+            progress=progress_filter,
+        ),
     )
 
 
@@ -429,22 +376,21 @@ def fetch_chunk(
     collection: str,
     *,
     progress: ProgressLimit | None = None,
+    store: ChunkStore | None = None,
 ) -> FetchChunkResult:
     manifest = read_manifest(
         metadata_dir=config.paths.metadata_dir, collection=collection
     )
-    coll = open_existing_collection(config, collection)
+    store = store or _open_store(config, collection)
     progress_filter = progress_filter_from_limit(progress, manifest=manifest)
-    doc = fetch_stored_chunk(coll, chunk_id)
-    if doc is None:
+    evidence = store.fetch(chunk_id)
+    if evidence is None:
         return FetchChunkResult(
             progress=progress_filter,
             status="not_found",
             evidence=None,
         )
-
-    fields = QueryChunkFields.model_validate(doc.fields)
-    if not progress_filter.allows(fields):
+    if not progress_filter.allows(evidence):
         return FetchChunkResult(
             progress=progress_filter,
             status="outside_progress",
@@ -453,7 +399,7 @@ def fetch_chunk(
     return FetchChunkResult(
         progress=progress_filter,
         status="found",
-        evidence=_evidence_from_doc(doc, retrieval_mode="fetch"),
+        evidence=evidence,
     )
 
 
@@ -817,14 +763,18 @@ def hybrid_search(
     *,
     top_k: int | None = None,
     progress: ProgressLimit | None = None,
+    store: ChunkStore | None = None,
 ) -> HybridSearchResult:
     limit = top_k or config.search.top_k
     fan_out = limit * FAN_OUT_MULTIPLIER
+    store = store or _open_store(config, collection)
 
     vector_result = semantic_search(
-        config, query, collection, top_k=fan_out, progress=progress
+        config, query, collection, top_k=fan_out, progress=progress, store=store
     )
-    fts_result = fts_search(config, query, collection, top_k=fan_out, progress=progress)
+    fts_result = fts_search(
+        config, query, collection, top_k=fan_out, progress=progress, store=store
+    )
 
     graph_evidence: list[Evidence] = []
     skipped_reason: str | None = None
@@ -854,15 +804,10 @@ def hybrid_search(
     )
 
 
-def open_existing_collection(config: ReadFellowConfig, collection: str):
-    path = collection_path(config.paths.index_dir, collection)
-    if not path.exists():
-        raise FileNotFoundError(
-            f"collection does not exist: {path}; run the index command first"
-        )
-    import zvec
-
-    return zvec.open(str(path), zvec.CollectionOption(read_only=True, enable_mmap=True))
+def _open_store(config: ReadFellowConfig, collection: str) -> ChunkStore:
+    return ZvecChunkStore.open_for_read(
+        index_dir=config.paths.index_dir, collection=collection
+    )
 
 
 def progress_filter_from_limit(
@@ -949,28 +894,6 @@ def _relative_source_path(source: Path) -> str:
         return str(source.resolve().relative_to(Path.cwd().resolve()))
     except ValueError:
         return str(source.resolve())
-
-
-def _evidence_from_doc(
-    doc: Any,
-    *,
-    retrieval_mode: Literal["vector", "fts", "fetch", "graph"],
-) -> Evidence:
-    fields = QueryChunkFields.model_validate(doc.fields)
-    return Evidence(
-        chunk_id=doc.id,
-        source_path=fields.source_path,
-        chunk_index=fields.chunk_index,
-        line_start=fields.line_start,
-        line_end=fields.line_end,
-        byte_start=fields.byte_start,
-        byte_end=fields.byte_end,
-        chapter=fields.chapter,
-        text_hash=fields.text_hash,
-        text=fields.text,
-        retrieval_mode=retrieval_mode,
-        score=doc.score,
-    )
 
 
 def _graph_evidence(

@@ -41,9 +41,9 @@ uvx ruff format . && uvx ruff check .          # 两者当前都保持 clean
 分层严格单向：`cli.py → app.py → {chunking, store, ollama, graph, analysis, progress} → {extraction.py, derivation.py} → models.py / config.py`
 
 - **`cli.py`** — 薄 adapter。只做 argparse、进度打印、Evidence 格式化。所有默认值都从 `ReadFellowConfig` 取（`build_parser(config)`），全局 flag 通过 `apply_global_overrides` 覆盖成一份 effective config。新增命令时不要在这里写编排逻辑。
-- **`app.py`** — 可复用的应用 workflow，是 CLI 之外（未来 MCP / library）唯一该调用的入口：`index_document`、`semantic_search`、`fts_search`、`fetch_chunk`、`build_graph`、`query_graph`。签名统一为 `(config, ..., collection, *, progress: ProgressLimit, options: ...Options, on_progress: Callable[[Event], None])`；进度用 frozen dataclass 事件回调外传，**不在这一层 print**。
+- **`app.py`** — 可复用的应用 workflow，是 CLI 之外（未来 MCP / library）唯一该调用的入口：`index_document`、`semantic_search`、`fts_search`、`fetch_chunk`、`build_graph`、`query_graph`。签名统一为 `(config, ..., collection, *, progress: ProgressLimit, options: ...Options, on_progress: Callable[[Event], None])`；进度用 frozen dataclass 事件回调外传，**不在这一层 print**。所有外部依赖都是可注入的可选参数：检索/索引收 `store: ChunkStore`，派生管线收 `generator: JsonGenerator`，不传就现场构造真实实现。
 - **`chunking.py`** — 先按空行切成 `TextUnit`（保留行号、字节偏移、当前章节标题），再按 `target_chars` 装窗 + 尾部 overlap 拼成 `Chunk`。章节靠 `CHAPTER_RE`（`第X章/节/卷/回` + 序章/楔子/番外等）识别。
-- **`store.py`** — 唯一接触 zvec 的地方：schema 定义（`text` 字段挂 jieba `FtsIndexParam`）、collection 打开/重建、`Doc` 转换、vector/FTS query、manifest 与 `chunks.jsonl` 读写。
+- **`store.py`** — 唯一接触 zvec 的地方（这是事实，不是愿望：`app.py` 里没有 `import zvec`，也没有任何 `coll.*` 调用）。对外只有 `ChunkStore` Protocol 5 个方法：`upsert` / `commit` / `search_vector` / `search_fts` / `fetch`。`ZvecChunkStore` 是生产 adapter（schema 定义、collection 打开/重建、`Doc` 转换、批内 text_hash 比对与 insert/update 拆分都在它里面），测试里的 `InMemoryChunkStore` 是第二个 adapter。`Doc` / `Status` / `CollectionOption` 一律不跨 seam：检索结果直接以 `Evidence` 返回。manifest 与 `chunks.jsonl` 读写也在这里，但和 zvec 无关。
 - **`ollama.py`** — 纯 `urllib` 调 `/api/embed` 与 `/api/generate`（`format=json`，temperature 0），无第三方 SDK。embedding 默认 L2 归一化。`parse_generate_response` 同时兼容单体 JSON 和逐行流式响应。
 - **`graph.py`** — 只剩图谱领域：prompt、实体/关系的归一化（`ENTITY_TYPES`/`RELATION_TYPES` 白名单）、合并、失效判定、查询。**不接触网络**，generator 由 `app.build_graph` 注入（`derivation.JsonGenerator` Protocol：`generate_json(prompt) -> str`）。
 - **`analysis.py`** — 章节级分析，与 `graph.py` 结构对称（prompt / 解析 / 合并 / 失效判定 / 进度过滤），generator 同样由 `app.build_analysis` 注入。
@@ -56,16 +56,16 @@ uvx ruff format . && uvx ruff check .          # 两者当前都保持 clean
 
 ### 数据流
 
-索引：`chunk_document` → 用首个 chunk 探测 embedding 维度 → 建/开 collection → **先写 manifest + chunks.jsonl** → 按 `batch_size` 分批：`coll.fetch` 比对 `text_hash` 决定 insert / update / skip → `optimize()` + `flush()`。
+索引：`chunk_document` → 用首个 chunk 探测 embedding 维度 → `ZvecChunkStore.open_for_write` → **先写 manifest + chunks.jsonl** → 按 `batch_size` 分批调 `store.upsert(batch, model=, embed=embedder.embed)`（比对 `text_hash` 决定 insert / update / skip，**只对真要写的 chunk 调 `embed`**）→ `store.commit(optimize=)`。
 
-检索：读 manifest → 只读方式打开 collection（`read_only=True, enable_mmap=True`）→ 构造 `ProgressFilter` → query → 统一转成 `Evidence`（`_evidence_from_doc`）。graph query 走另一路：图谱命中只给出 chunk id 与上下文，原文仍从 `chunks.jsonl` 的 chunk 取（`_graph_evidence`）。
+检索：读 manifest → `ZvecChunkStore.open_for_read`（`read_only=True, enable_mmap=True`）→ 构造 `ProgressFilter` → `store.search_vector/search_fts/fetch`，返回的已经是 `Evidence`。graph query 走另一路：图谱命中只给出 chunk id 与上下文，原文仍从 `chunks.jsonl` 的 chunk 取（`_graph_evidence`）。
 
 ## 关键约束与易踩坑
 
 - **chunk id = `source_hash[:12]_%06d`**。改 `chunk_chars`/`overlap_chars` 会让 id 与行范围全部漂移，必须 `--rebuild`，否则旧 doc 会残留在 collection 里。
-- **换 embedding 模型必须 `--rebuild`**：`open_or_create_collection` 只在维度不匹配时报错，同维度的不同模型不会被拦住。
+- **换 embedding 模型必须 `--rebuild`**：`ZvecChunkStore.open_for_write` 只在维度不匹配时报错，同维度的不同模型不会被拦住。
 - **`optimize()` 不能随便跳**。`--no-optimize` 只用于测写入速度；不 optimize 时持久化的中文 FTS 重开后可能查不到。
-- **进度过滤有两条路径**，新入口必须两边都走：给 zvec 的 `ProgressFilter.expression` 和进程内的 `ProgressFilter.allows(fields)`（graph、fetch 走后者）。`fetch_chunk` 返回 `found` / `not_found` / `outside_progress` 三态，越界时**不带 text**。
+- **进度过滤有两条路径**，新入口必须两边都走：`ProgressFilter` 整体传给 `ChunkStore`（zvec adapter 用它的 `expression`）、进程内则用 `ProgressFilter.allows(fields)`（graph、fetch 走后者）。`ChunkStore.fetch` **不施加进度限制**——因为只有它要区分「没这个 chunk」和「还没读到」；`fetch_chunk` 拿到 Evidence 后自己判，返回 `found` / `not_found` / `outside_progress` 三态，越界时**不带 text**。
 - **graph 在进度限制下会清空 `aliases` 与 `types`**（`graph._filter_entity`）——因为它们是跨 chunk 聚合、没有逐值 provenance。不要为了"信息更全"把这个行为改掉。
 - **抽取出的 evidence 必须是所属 chunk 原文的精确子串**，否则 `parse_graph_extraction` 抛错并触发重试。关系名走 `RELATION_TYPES` 白名单 + `_RELATION_ALIASES` 归一，白名单外的关系被静默丢弃（防止"相关""有关"这类泛化边）。
 - **改 prompt 必须 bump `GRAPH_PROMPT_VERSION`**（改图谱结构则 bump `GRAPH_SCHEMA_VERSION`）。`graph_staleness_reason` 会比对 schema/prompt 版本、生成模型、extraction settings、每个已处理 chunk 的 source/text hash 与位置；stale 时 `graph-index` 整图重建、`graph-query` 直接报错。仅新增 chunk 时是断点续建（`processed_chunk_ids`）。
@@ -75,14 +75,14 @@ uvx ruff format . && uvx ruff check .          # 两者当前都保持 clean
 
 ## 测试约定
 
-- 全部离线。`FakeEmbedder`、`DeterministicGenerator`（吐预置 JSON）、以及 `monkeypatch.setattr(app, "read_manifest"/"open_existing_collection"/"query_vector", ...)` 打 `app` 模块级符号。
-- `tests/test_cli_evidence.py` 用 **真实 zvec** 在 `tmp_path` 里建 collection，覆盖 optimize→重开→中文 FTS→进度过滤→fetch 原文这条链路（需要 `gc.collect()` 释放 collection 句柄）。
+- 全部离线。存储走注入：`app` 的 `index_document` / `semantic_search` / `fts_search` / `fetch_chunk` / `hybrid_search` 都收 `store: ChunkStore | None`，测试传 `InMemoryChunkStore`（`tests/test_app.py`），**不要再 monkeypatch 存储相关的 `app` 模块级符号**。剩下的 `monkeypatch.setattr(app, ...)` 只用于 `read_manifest`（文件）与 `OllamaEmbedder`（网络），generator 同样走注入（`FakeEmbedder`、`DeterministicGenerator`）。
+- `tests/test_cli_evidence.py` 用 **真实 zvec**（`ZvecChunkStore.open_for_write` + `upsert` + `commit`）在 `tmp_path` 里建 collection，覆盖 optimize→重开→中文 FTS→进度过滤→fetch 原文这条链路（需要 `gc.collect()` 释放 collection 句柄）。**它必须保持用真实 zvec，不要换成 `InMemoryChunkStore`。**
 - 按 `pyproject.toml` 的 `pythonpath = ["src"]` 直接 `from readfellow... import`，无需装包。
 - 不要为健壮性过度加测试；优先补"证据/进度/失效"这三类语义的用例。
 
 ## 相关文档
 
 - `docs/architecture-archive.md`（中文）— 架构不足清单 + 优先级路线图 + graph-index 成本估算 + zvec MCP 边界。优先级 1（app 层）、2（Evidence 模型）、3（graph 加固）、4（hybrid retrieval）均已完成。
-- `docs/module-deepening-plan.md`（中文）— 2026-07-26 架构评审的执行计划，**当前进行中的工作**。顺序：阶段 A 拆 `graph.py` → 阶段 B 合并 graph/analysis 孪生管线 → 阶段 C 补完 zvec seam；D/E 待触发条件。开工前先读它的「不重新讨论的事」与各阶段验证方式。
+- `docs/module-deepening-plan.md`（中文）— 2026-07-26 架构评审的执行计划。阶段 A（拆 `graph.py`）、B（合并 graph/analysis 孪生管线）、C（补完 zvec seam）均已落地；D/E 与 B3 待触发条件。开工前先读它的「不重新讨论的事」。
 - `.codex/skills/readfellow/SKILL.md` — 面向使用者的检索/引用/防剧透规则，回答用户关于语料内容的问题时按它执行。
 - `AGENTS.md` — 仓库约定（源文档不可变、产物目录、provenance 字段要求、uv 工作流）与 zvec 能力背景。

@@ -203,7 +203,7 @@ uv run pytest tests/test_analysis.py tests/test_app.py -q   # 重点：断点续
 
 ---
 
-# 阶段 C · 补完 zvec seam（候选 2）
+# 阶段 C · 补完 zvec seam（候选 2）— 已完成
 
 可与 A/B 并行，互不冲突。这是唯一一个**修复代码库自己已声明却已违反的不变量**的阶段。
 
@@ -237,9 +237,21 @@ commit(*, optimize)                 # optimize() + flush()
 
 `Doc`、`Status`、`CollectionOption` 不再越过 seam；`app.py` 里 `import zvec` 与所有 `coll.*` 调用清零。
 
+## 落地时相对上文的三处调整
+
+1. **`open` 不进 Protocol，5 个方法而不是 6 个。** 打开方式是 adapter 私有的：`ZvecChunkStore.open_for_read` / `.open_for_write` 两个 classmethod（读只要 `index_dir`，写还要 `dimension` + `rebuild` + 清 metadata 目录），`InMemoryChunkStore` 直接构造。一个 `mode` 参数只会把两组不同的必填参数糊在一起。
+
+2. **`upsert(chunks, vectors, ...)` 改成 `upsert(chunks, *, model, embed)`。** 原签名要求调用方先把整个 batch 都 embed 出来，而"跳过未变 chunk"的全部价值就在于**不去 embed 它们**——那是这条路径上唯一昂贵的操作。把 embedding callback 传进去，store 才能在比对完 `text_hash` 之后只对真要写的 chunk 调一次 `embed`。返回 `UpsertOutcome(written, skipped)`。
+
+3. **`filter: str` 改成 `progress: ProgressFilter`。** filter 表达式是 zvec 的方言，不该跨 seam；传整个 `ProgressFilter`，zvec adapter 用 `.expression`，进程内 adapter 可以用 `.allows()`。
+
+另外，检索结果**直接以 `Evidence` 跨 seam**（`_evidence_from_doc` 从 `app.py` 搬进 `store.py` 变成私有），而不是把 `Doc` 或 `QueryChunkFields` 递出来——否则 seam 只是把 zvec 类型换了个位置。`retrieval_mode` 由方法自己填（`search_vector` 就是 vector）。唯一的例外是 `fetch`：它**不施加进度限制**，因为只有它需要区分「没这个 chunk」和「还没读到」，这条约束写在 Protocol 的 docstring 里。
+
 ## C 的顺带修复
 
 `store.query_vector`（138-148）与 `store.query_fts`（157-167）的 `output_fields` 是两份逐字相同的 9 元素字面量列表，且必须与 `models.QueryChunkFields`（95-106）保持同步——因为 `QueryChunkFields` 每个字段都有 `""`/`0` 默认值，漏掉字段不会报错，只会让 Evidence 静默丢失 provenance。抽成一个 `STORED_OUTPUT_FIELDS` 常量。（这也是阶段 E 里唯一无歧义的那一半，在这里顺手做掉。）
+
+落地时连同两次 `coll.query` 调用一起收进私有的 `ZvecChunkStore._search(query, *, top_k, progress, retrieval_mode)`，`search_vector` / `search_fts` 各剩一次 `Query(...)` 构造。
 
 ## C 的验证
 
@@ -285,8 +297,8 @@ uv run readfellow fetch <chunk-id> --collection sample
 
 chunk 的 provenance 字段集在 4 个模块里手抄了 11 遍（`ZvecChunkFields.from_chunk`、`QueryChunkFields`、`ChunkContext`、`create_schema`、两处 `output_fields`、`_evidence_from_doc`、`_graph_evidence`、`chunk_context` 的两个分支、`Evidence`）。
 
-- **做**：两处 `output_fields` 字面量合并为常量（已并入阶段 C）。
-- **做**：`Evidence.from_doc` / `Evidence.from_chunk` 构造器，替掉 `app._evidence_from_doc`（999-1018）与 `app._graph_evidence`（1064-1082）里两段各 11 行的手写构造。
+- ~~**做**：两处 `output_fields` 字面量合并为常量~~ —— 阶段 C 已做（`store.STORED_OUTPUT_FIELDS`）。
+- **做**：`Evidence.from_chunk` 构造器，替掉 `app._graph_evidence` 里那段 11 行的手写构造。~~`Evidence.from_doc`~~ 不做了：阶段 C 之后 `Doc` 不再跨 seam，那段构造已经是 `store._evidence_from_doc`，放在 zvec adapter 内部才是对的——把它挪进 `models.Evidence` 会重新把 zvec 类型拖进 models 层。剩下这一处手写构造只有一个调用点，动机只剩「和 `from_chunk` 对称」，收益已经不足以单独立项。
 - **不做**：把 `ZvecChunkFields` / `QueryChunkFields` / `ChunkContext` / `Evidence` 从 `Chunk` 自动派生。它们的默认值、`extra` 策略、frozen 与否都真实不同，过度派生是用显式换取小聪明。
 
 ---
