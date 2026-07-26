@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 
 def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    return datetime.now(UTC).replace(microsecond=0).isoformat()
 
 
 class ReadFellowModel(BaseModel):
@@ -160,12 +160,10 @@ class ProgressFilter(ReadFellowModel):
             and progress_fields.line_end > self.max_line_end
         ):
             return False
-        if (
+        return not (
             self.max_chunk_index is not None
             and progress_fields.chunk_index > self.max_chunk_index
-        ):
-            return False
-        return True
+        )
 
 
 class ChunkContext(ReadFellowModel):
@@ -240,9 +238,7 @@ class KnowledgeGraph(ReadFellowModel):
     source_path: str = ""
     llm_model: str = ""
     extraction_settings: GraphExtractionSettings = GraphExtractionSettings()
-    source_chunk_hashes: dict[str, GraphChunkFingerprint] = Field(
-        default_factory=dict
-    )
+    source_chunk_hashes: dict[str, GraphChunkFingerprint] = Field(default_factory=dict)
     created_at: str = Field(default_factory=utc_now_iso)
     updated_at: str = Field(default_factory=utc_now_iso)
     progress_limit: str = ""

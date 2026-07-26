@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 import re
 import sys
+from pathlib import Path
 
 from .app import (
     GraphBuildEvent,
@@ -384,7 +384,7 @@ def main(argv: list[str] | None = None) -> int:
     config_path = config_path_from_argv(argv)
     try:
         config = load_config(config_path, missing_ok=config_path == CONFIG_FILE)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         print(f"error loading config: {exc}", file=sys.stderr)
         return 1
 
@@ -404,7 +404,7 @@ def main(argv: list[str] | None = None) -> int:
             return command_graph_index(args, config)
         if args.command == "graph-query":
             return command_graph_query(args, config)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         print(f"error: {exc}", file=sys.stderr)
         return 1
     parser.error(f"unknown command: {args.command}")

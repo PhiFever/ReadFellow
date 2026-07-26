@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import hashlib
-from pathlib import Path
 import re
-from typing import Iterable
+from collections.abc import Iterable
+from pathlib import Path
 
 from .models import Chunk, TextUnit
-
 
 CHAPTER_RE = re.compile(
     r"^\s*(第[0-9零〇一二两三四五六七八九十百千万]+[章节卷回部篇].*|"

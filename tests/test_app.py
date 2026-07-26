@@ -235,9 +235,7 @@ def test_graph_build_retries_evidence_that_is_not_source_grounded(
 
     graph = read_graph(result.graph_path)
     assert len(generator.prompts) == 2
-    assert [relation.evidence for relation in graph.relations] == [
-        "向山帮助了尤基"
-    ]
+    assert [relation.evidence for relation in graph.relations] == ["向山帮助了尤基"]
 
 
 def test_changed_chunk_metadata_invalidates_queries_and_rebuilds_graph(
@@ -542,7 +540,7 @@ def test_graph_query_returns_original_chunk_as_evidence(tmp_path: Path) -> None:
     )
     manifest = manifest_for(source).model_copy(update={"chunk_count": 2})
     source_hash = sha256_file(source)
-    original_start = len("第一章 开始\n".encode("utf-8"))
+    original_start = len("第一章 开始\n".encode())
     original = Chunk(
         id="chunk_000004",
         source_path=str(source),
@@ -646,7 +644,7 @@ def test_graph_query_does_not_match_alias_learned_after_progress(
         byte_end=len(early_text.encode("utf-8")),
         chapter="第一章 开始",
     )
-    late_start = len(f"{early_text}\n".encode("utf-8"))
+    late_start = len(f"{early_text}\n".encode())
     late = Chunk(
         id="chunk_000007",
         source_path=str(source),

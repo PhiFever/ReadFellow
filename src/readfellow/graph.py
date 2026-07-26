@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
 import json
-from pathlib import Path
 import re
+from collections.abc import Mapping, Sequence
+from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
@@ -26,7 +26,6 @@ from .models import (
     utc_now_iso,
 )
 from .store import metadata_path
-
 
 GRAPH_SCHEMA_VERSION = 2
 GRAPH_PROMPT_VERSION = "graph-extraction-v1"
@@ -458,7 +457,7 @@ def _parse_json_object(raw: str | Mapping[str, Any]) -> Mapping[str, Any]:
         parsed = json.loads(text[start : end + 1])
 
     if not isinstance(parsed, Mapping):
-        raise ValueError(f"expected a JSON object, got {type(parsed).__name__}")
+        raise TypeError(f"expected a JSON object, got {type(parsed).__name__}")
     return parsed
 
 
@@ -686,10 +685,7 @@ def _chunk_context(chunk: Chunk | ChunkContext | Mapping[str, Any]) -> ChunkCont
         )
     if isinstance(chunk, ChunkContext):
         return ChunkContext.model_validate(chunk)
-    if isinstance(chunk, BaseModel):
-        data = chunk.model_dump(mode="json")
-    else:
-        data = chunk
+    data = chunk.model_dump(mode="json") if isinstance(chunk, BaseModel) else chunk
     return ChunkContext(
         chunk_id=str(data.get("chunk_id") or data.get("id") or ""),
         source_path=str(data.get("source_path", "")),

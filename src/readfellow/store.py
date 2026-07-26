@@ -1,16 +1,22 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 import shutil
+from pathlib import Path
 
 import zvec
-from zvec import CollectionSchema, DataType, Doc, FieldSchema, FtsIndexParam, Query
-from zvec import VectorSchema
+from zvec import (
+    CollectionSchema,
+    DataType,
+    Doc,
+    FieldSchema,
+    FtsIndexParam,
+    Query,
+    VectorSchema,
+)
 from zvec.model.param.query import Fts
 
 from .models import Chunk, IndexManifest, ZvecChunkFields
-
 
 EMBEDDING_FIELD = "embedding"
 TEXT_FIELD = "text"

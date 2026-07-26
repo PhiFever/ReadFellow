@@ -23,11 +23,8 @@ def test_parse_generate_response_accepts_metadata_fields() -> None:
 
 
 def test_parse_generate_response_concatenates_streaming_lines() -> None:
-    raw = "\n".join(
-        [
-            '{"response":"{\\"entities\\":", "done":false}',
-            '{"response":"[]}", "done":true}',
-        ]
+    raw = (
+        '{"response":"{\\"entities\\":", "done":false}\n{"response":"[]}", "done":true}'
     )
 
     assert parse_generate_response(raw) == '{"entities":[]}'

@@ -2,11 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import ConfigDict
 import yaml
+from pydantic import ConfigDict
 
 from .models import ReadFellowModel
-
 
 CONFIG_FILE = Path("config.yaml")
 
@@ -75,7 +74,7 @@ class ReadFellowConfig(ReadFellowModel):
         if payload is None:
             payload = {}
         if not isinstance(payload, dict):
-            raise ValueError(f"config file must contain a YAML mapping: {config_path}")
+            raise TypeError(f"config file must contain a YAML mapping: {config_path}")
         return cls.model_validate(payload)
 
 

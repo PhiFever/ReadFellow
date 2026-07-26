@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import math
-from typing import Iterable
+from collections.abc import Iterable
 from urllib import error, request
 
 from pydantic import ValidationError

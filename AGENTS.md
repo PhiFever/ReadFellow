@@ -89,7 +89,3 @@ If this repository grows MCP tooling around zvec, keep the tools narrow and sour
 - `fetch_range`: return original text by file and byte or line range.
 
 Tool responses should include enough provenance for an agent to inspect the original content before answering.
-
-## Current State
-
-There is no application scaffold, package manifest, or test suite yet. If implementation is added, follow the suggested layout and keep the first scripts small and reproducible.

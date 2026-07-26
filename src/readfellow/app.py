@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-import time
 from typing import Any, Literal, Protocol
 
 from .chunking import chunk_document, sha256_file
@@ -11,8 +11,8 @@ from .config import ReadFellowConfig
 from .graph import (
     build_extraction_prompt,
     empty_graph,
-    graph_staleness_reason,
     graph_path,
+    graph_staleness_reason,
     merge_extraction,
     parse_graph_extraction,
     processed_chunk_ids,
@@ -395,20 +395,14 @@ def build_graph(
     )
     _validate_chunk_metadata_source(manifest, all_chunks)
     progress_filter = progress_filter_from_limit(progress, manifest=manifest)
-    chunks = [
-        chunk
-        for chunk in all_chunks
-        if progress_filter.allows(chunk)
-    ]
+    chunks = [chunk for chunk in all_chunks if progress_filter.allows(chunk)]
     if options.limit:
         chunks = chunks[: options.limit]
 
     path = graph_path(config.paths.metadata_dir, collection)
     llm_model = options.llm_model or config.ollama.generation_model
     num_predict = (
-        config.graph.num_predict
-        if options.num_predict is None
-        else options.num_predict
+        config.graph.num_predict if options.num_predict is None else options.num_predict
     )
     retries = config.graph.retries if options.retries is None else options.retries
     extraction_settings = GraphExtractionSettings(
@@ -597,11 +591,7 @@ def query_graph(
         )
 
     graph_result = query_knowledge_graph(graph, query, progress=progress_filter)
-    chunks = [
-        chunk
-        for chunk in all_chunks
-        if progress_filter.allows(chunk)
-    ]
+    chunks = [chunk for chunk in all_chunks if progress_filter.allows(chunk)]
     return GraphSearchResult(
         progress=progress_filter,
         evidence=_graph_evidence(graph_result, chunks, query=query),
