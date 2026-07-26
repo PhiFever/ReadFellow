@@ -188,6 +188,15 @@ class ChunkContext(ReadFellowModel):
     chapter: str = ""
 
 
+class DerivationSettings(ReadFellowModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    temperature: float = 0.0
+    num_predict: int = 0
+    num_ctx: int = 0
+    retries: int = 0
+
+
 class GraphEvidence(ChunkContext):
     text: str = ""
 
@@ -223,15 +232,6 @@ class GraphExtraction(ReadFellowModel):
     relations: list[GraphRelation] = Field(default_factory=list)
 
 
-class GraphExtractionSettings(ReadFellowModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    temperature: float = 0.0
-    num_predict: int = 0
-    num_ctx: int = 0
-    retries: int = 0
-
-
 class GraphChunkFingerprint(ReadFellowModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -247,7 +247,7 @@ class KnowledgeGraph(ReadFellowModel):
     collection: str = ""
     source_path: str = ""
     llm_model: str = ""
-    extraction_settings: GraphExtractionSettings = GraphExtractionSettings()
+    extraction_settings: DerivationSettings = DerivationSettings()
     source_chunk_hashes: dict[str, GraphChunkFingerprint] = Field(default_factory=dict)
     created_at: str = Field(default_factory=utc_now_iso)
     updated_at: str = Field(default_factory=utc_now_iso)
@@ -290,15 +290,6 @@ class ChapterAnalysis(ReadFellowModel):
     events: list[ChapterEvent] = Field(default_factory=list)
 
 
-class AnalysisSettings(ReadFellowModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    temperature: float = 0.0
-    num_predict: int = 0
-    num_ctx: int = 0
-    retries: int = 0
-
-
 class AnalysisDocument(ReadFellowModel):
     model_config = ConfigDict(extra="allow")
 
@@ -307,7 +298,7 @@ class AnalysisDocument(ReadFellowModel):
     collection: str = ""
     source_path: str = ""
     llm_model: str = ""
-    settings: AnalysisSettings = AnalysisSettings()
+    settings: DerivationSettings = DerivationSettings()
     chunk_text_hashes: dict[str, str] = Field(default_factory=dict)
     created_at: str = Field(default_factory=utc_now_iso)
     updated_at: str = Field(default_factory=utc_now_iso)

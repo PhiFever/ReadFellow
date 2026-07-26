@@ -4,7 +4,7 @@ from pathlib import Path
 
 from readfellow.cli import build_parser
 from readfellow.config import (
-    GraphConfig,
+    DerivationConfig,
     IndexingConfig,
     OllamaConfig,
     PathConfig,
@@ -31,7 +31,7 @@ def test_cli_defaults_come_from_config() -> None:
             batch_size=3,
         ),
         search=SearchConfig(top_k=9),
-        graph=GraphConfig(num_predict=512, retries=4),
+        graph=DerivationConfig(num_predict=512, retries=4),
     )
     parser = build_parser(config)
 

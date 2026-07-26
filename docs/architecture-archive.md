@@ -394,3 +394,36 @@ CLI 应只负责解析参数、调用这些模块并格式化输出。
 验证：`uv run pytest` 39 passed，**一行测试代码都没改**——这正是阶段 A 事先定下的验收信号，说明搬走的确实是没有领域耦合的通用件；`uvx ruff format`/`check` clean。
 
 已知遗留：`_chunk_text(chunk)` 与 `_chunk_value(chunk, "text")` 语义完全等价（`Chunk` 是 `BaseModel`，`getattr` 分支能覆盖），属评审前就存在的冗余，本轮未动。下一步进入阶段 B（B1 + B2）。
+
+## 2026-07-26 阶段 B 落地记录：`derivation.py` 与孪生管线合并
+
+按 `docs/module-deepening-plan.md` 阶段 B 执行 B1 + B2，B3 仍按计划待定。
+
+**B1 · 新增 `src/readfellow/derivation.py`（81 行）**，只依赖 pydantic 与标准库：
+
+- `JsonGenerator` Protocol —— 原 `app.GraphGenerator`。它同时服务两条管线，名字里的 "Graph" 已不成立；且 `generate_with_retry` 需要它，留在 `app.py` 会造成循环 import，所以随之迁移改名。
+- `generate_with_retry` —— 原来抄了两份（`build_graph` 内联 27 行 + `_analyze_chapter` 21 行）。**生成与解析算同一次尝试**：模型答出没法用的 JSON 和答不出来一样是失败。`build_graph` 那份的 `for/else` 分支在 `retries >= 0` 时不可达，合并时收敛成 analysis 版的 "no attempt was made" 写法。
+- `load_or_reset` —— 不存在 / rebuild / stale 三态，是 fail closed（不变量 1）在派生路径上的**单一落点**。合并前两边逻辑等价但写法已经漂移（graph 先读再重置，analysis 先建空再覆盖）。
+- `write_json_document`、`derivation_status`。
+
+**B2 · 模型与配置合并**：`GraphExtractionSettings` + `AnalysisSettings` → `models.DerivationSettings`；`GraphConfig` + `AnalysisConfig` → `config.DerivationConfig`（`config.yaml` 仍是 `graph:` / `analysis:` 两个独立键）。**落盘字段名 `KnowledgeGraph.extraction_settings` 与 `AnalysisDocument.settings` 未动**，因此已有 `graph.json` / `analysis.json` 不会被判 stale。
+
+**计划外补做**（同属"孪生管线"的逐字重复，B1 原文漏列）：`app._load_indexed_source` 统一 `read_manifest` + `read_chunks` + `_validate_chunk_metadata_source` + `progress_filter_from_limit`（`build_graph` / `build_analysis` / `query_graph` 三个 adapter），顺带把"读 chunk 前必须校验源文件"焊进读取路径；`app._generation_plan` 统一 per-run override 阶梯（此前 `llm_model` 用 `or`、`num_predict`/`retries` 用 `is None` 的不对称抄了两份）。
+
+**刻意没做**：
+
+- **B1 的第 5 项 `common_staleness_reason`**。两边前 5 项检查同构，但抽出来要 9 个参数配 11 行函数体——interface 复杂度追平 implementation，正是本计划拒绝 `DerivationSpec` 的同一理由；调用点净省 2 行，还要改 2 条用户可见的 stale 消息。
+- **`if generator is None: OllamaGenerator(...)` 那 6 行**。纯 pass-through 构造，抽出来不隐藏任何决策。
+- **`GraphBuildOptions`/`Event`/`Result` 与 analysis 对应物的合并**，按计划留给 B3。
+
+**行为等价性验证**（这是阶段 B 的真正验收标准）：
+
+- `uv run pytest` 39 passed；`uvx ruff format`/`check` clean。测试改动只有 1 行：`tests/test_cli_config.py` 的 `GraphConfig` → `DerivationConfig` import（类改名的必然结果，不是迁就）。
+- 真实产物：`graph-query` 在 `ch5`/`sample`/`toy` 三个 collection 上输出与改动前**逐字节一致**；`analyze --collection ch5` 仍从第 4 章续建（即 `analysis.json` 未被判 stale），重试计数与最终错误消息格式不变；`metadata/ch5/{graph,analysis}.json` 文件内容未被改写。
+
+已知遗留：
+
+- `query_graph` 里 "graph.json 缺失" 的检查现在排在源文件校验之后。仅当**chunk 元数据已 stale 且 graph.json 又不存在**时，报错从 "graph index not found" 变成 "chunk metadata is stale"——后者才是该先修的问题，且这个组合无测试覆盖。
+- `store.write_manifest` 里还有第三份 `json.dumps(..., ensure_ascii=False, indent=2)`，与 `write_json_document` 重复。属评审前就存在的冗余，且跨到 store 层，本轮未动；等阶段 C 动 `store.py` 时一并处理。
+
+下一步：阶段 C（补完 zvec seam）。

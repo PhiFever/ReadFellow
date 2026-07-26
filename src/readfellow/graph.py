@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from types import MappingProxyType
@@ -8,6 +7,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from .derivation import write_json_document
 from .extraction import (
     as_list,
     chunk_context,
@@ -20,12 +20,12 @@ from .extraction import (
 from .models import (
     Chunk,
     ChunkContext,
+    DerivationSettings,
     GraphChunkFingerprint,
     GraphEntity,
     GraphEvidence,
     GraphExtraction,
     GraphExtractionRecord,
-    GraphExtractionSettings,
     GraphQueryResult,
     GraphRelation,
     IndexManifest,
@@ -117,11 +117,7 @@ def read_graph(path: Path) -> KnowledgeGraph:
 
 def write_graph(path: Path, graph: KnowledgeGraph) -> None:
     finalize_graph(graph)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(graph.model_dump(mode="json"), ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    write_json_document(path, graph)
 
 
 def empty_graph(
@@ -129,7 +125,7 @@ def empty_graph(
     collection: str,
     manifest: IndexManifest | None = None,
     llm_model: str = "",
-    extraction_settings: GraphExtractionSettings | None = None,
+    extraction_settings: DerivationSettings | None = None,
 ) -> KnowledgeGraph:
     now = utc_now_iso()
     return KnowledgeGraph(
@@ -138,7 +134,7 @@ def empty_graph(
         collection=collection,
         source_path=manifest.source_path if manifest else "",
         llm_model=llm_model,
-        extraction_settings=extraction_settings or GraphExtractionSettings(),
+        extraction_settings=extraction_settings or DerivationSettings(),
         created_at=now,
         updated_at=now,
     )
@@ -150,7 +146,7 @@ def update_graph_metadata(
     collection: str,
     manifest: IndexManifest,
     llm_model: str,
-    extraction_settings: GraphExtractionSettings,
+    extraction_settings: DerivationSettings,
     progress: ProgressFilter,
     selected_chunk_count: int,
 ) -> None:
@@ -181,7 +177,7 @@ def graph_staleness_reason(
     collection: str,
     source_path: str,
     llm_model: str | None = None,
-    extraction_settings: GraphExtractionSettings | None = None,
+    extraction_settings: DerivationSettings | None = None,
 ) -> str | None:
     if graph.schema_version != GRAPH_SCHEMA_VERSION:
         return "graph schema version changed"

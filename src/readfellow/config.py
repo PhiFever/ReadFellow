@@ -42,14 +42,9 @@ class SearchConfig(ReadFellowModel):
     top_k: int = 5
 
 
-class GraphConfig(ReadFellowModel):
-    model_config = ConfigDict(extra="forbid")
+class DerivationConfig(ReadFellowModel):
+    """Generation limits for one derived artifact; `graph` and `analysis` differ."""
 
-    num_predict: int = 4096
-    retries: int = 2
-
-
-class AnalysisConfig(ReadFellowModel):
     model_config = ConfigDict(extra="forbid")
 
     num_predict: int = 4096
@@ -63,8 +58,8 @@ class ReadFellowConfig(ReadFellowModel):
     ollama: OllamaConfig = OllamaConfig()
     indexing: IndexingConfig = IndexingConfig()
     search: SearchConfig = SearchConfig()
-    graph: GraphConfig = GraphConfig()
-    analysis: AnalysisConfig = AnalysisConfig()
+    graph: DerivationConfig = DerivationConfig()
+    analysis: DerivationConfig = DerivationConfig()
 
     @classmethod
     def load(

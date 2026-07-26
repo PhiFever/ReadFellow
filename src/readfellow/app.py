@@ -5,7 +5,7 @@ from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Any, Literal
 
 from .analysis import (
     ChapterGroup,
@@ -26,7 +26,13 @@ from .analysis import (
     write_analysis,
 )
 from .chunking import CHUNKER_VERSION, chunk_document, sha256_file
-from .config import ReadFellowConfig
+from .config import DerivationConfig, ReadFellowConfig
+from .derivation import (
+    JsonGenerator,
+    derivation_status,
+    generate_with_retry,
+    load_or_reset,
+)
 from .graph import (
     build_extraction_prompt,
     empty_graph,
@@ -43,13 +49,12 @@ from .graph import (
     query_graph as query_knowledge_graph,
 )
 from .models import (
-    AnalysisSettings,
     ChapterAnalysis,
     Chunk,
+    DerivationSettings,
     Evidence,
     EvidenceGraphContext,
     EvidenceMatch,
-    GraphExtractionSettings,
     GraphQueryResult,
     IndexManifest,
     ProgressFilter,
@@ -160,10 +165,6 @@ class GraphBuildResult:
     selected_chunk_count: int
     entity_count: int
     relation_count: int
-
-
-class GraphGenerator(Protocol):
-    def generate_json(self, prompt: str) -> str: ...
 
 
 @dataclass(frozen=True)
@@ -463,61 +464,43 @@ def build_graph(
     progress: ProgressLimit | None = None,
     options: GraphBuildOptions | None = None,
     on_progress: Callable[[GraphBuildEvent], None] | None = None,
-    generator: GraphGenerator | None = None,
+    generator: JsonGenerator | None = None,
 ) -> GraphBuildResult:
     options = options or GraphBuildOptions()
-    manifest = read_manifest(
-        metadata_dir=config.paths.metadata_dir, collection=collection
+    manifest, all_chunks, progress_filter = _load_indexed_source(
+        config, collection, progress
     )
-    all_chunks = read_chunks(
-        metadata_dir=config.paths.metadata_dir,
-        collection=collection,
-    )
-    _validate_chunk_metadata_source(manifest, all_chunks)
-    progress_filter = progress_filter_from_limit(progress, manifest=manifest)
     chunks = [chunk for chunk in all_chunks if progress_filter.allows(chunk)]
     if options.limit:
         chunks = chunks[: options.limit]
 
     path = graph_path(config.paths.metadata_dir, collection)
-    llm_model = options.llm_model or config.ollama.generation_model
-    num_predict = (
-        config.graph.num_predict if options.num_predict is None else options.num_predict
+    llm_model, extraction_settings = _generation_plan(
+        config,
+        config.graph,
+        llm_model=options.llm_model,
+        num_predict=options.num_predict,
+        retries=options.retries,
     )
-    retries = config.graph.retries if options.retries is None else options.retries
-    extraction_settings = GraphExtractionSettings(
-        temperature=0.0,
-        num_predict=num_predict,
-        num_ctx=config.ollama.num_ctx,
-        retries=retries,
-    )
-    path_existed = path.exists()
-    rebuilt = path_existed and options.rebuild
-    if path_existed and not options.rebuild:
-        graph = read_graph(path)
-        stale_reason = graph_staleness_reason(
-            graph,
+    graph, rebuilt = load_or_reset(
+        path,
+        empty_graph(
+            collection=collection,
+            manifest=manifest,
+            llm_model=llm_model,
+            extraction_settings=extraction_settings,
+        ),
+        read=read_graph,
+        stale=lambda stored: graph_staleness_reason(
+            stored,
             all_chunks,
             collection=collection,
             source_path=manifest.source_path,
             llm_model=llm_model,
             extraction_settings=extraction_settings,
-        )
-        if stale_reason is not None:
-            graph = empty_graph(
-                collection=collection,
-                manifest=manifest,
-                llm_model=llm_model,
-                extraction_settings=extraction_settings,
-            )
-            rebuilt = True
-    else:
-        graph = empty_graph(
-            collection=collection,
-            manifest=manifest,
-            llm_model=llm_model,
-            extraction_settings=extraction_settings,
-        )
+        ),
+        rebuild=options.rebuild,
+    )
 
     processed = processed_chunk_ids(graph)
     pending = [chunk for chunk in chunks if chunk.id not in processed]
@@ -535,23 +518,12 @@ def build_graph(
         GraphBuildEvent(stage="selected", progress=progress_filter),
     )
 
-    if not chunks:
-        write_graph(path, graph)
-        return GraphBuildResult(
-            collection=collection,
-            graph_path=path,
-            status="empty",
-            selected_chunk_count=0,
-            entity_count=graph.entity_count,
-            relation_count=graph.relation_count,
-        )
-
     if not pending:
         write_graph(path, graph)
         return GraphBuildResult(
             collection=collection,
             graph_path=path,
-            status="up_to_date",
+            status=derivation_status(selected=len(chunks), pending=0, rebuilt=rebuilt),
             selected_chunk_count=len(chunks),
             entity_count=graph.entity_count,
             relation_count=graph.relation_count,
@@ -562,7 +534,7 @@ def build_graph(
             base_url=config.ollama.base_url,
             model=llm_model,
             keep_alive=config.ollama.keep_alive,
-            num_predict=num_predict,
+            num_predict=extraction_settings.num_predict,
             num_ctx=config.ollama.num_ctx,
         )
 
@@ -577,35 +549,25 @@ def build_graph(
                 chunk_id=chunk_id,
             ),
         )
-        prompt = build_extraction_prompt(chunk)
-        last_error: Exception | None = None
-        for attempt in range(retries + 1):
-            try:
-                raw = generator.generate_json(prompt)
-                extraction = parse_graph_extraction(raw, chunk)
-                break
-            except Exception as exc:
-                last_error = exc
-                if attempt >= retries:
-                    raise RuntimeError(
-                        f"failed to extract graph for chunk {chunk_id}: {exc}"
-                    ) from exc
-                _emit(
-                    on_progress,
-                    GraphBuildEvent(
-                        stage="retry",
-                        index=index,
-                        total=len(pending),
-                        chunk_id=chunk_id,
-                        attempt=attempt + 1,
-                        retries=retries,
-                        error=str(exc),
-                    ),
-                )
-        else:
-            raise RuntimeError(
-                f"failed to extract graph for chunk {chunk_id}: {last_error}"
-            )
+        extraction = generate_with_retry(
+            generator,
+            build_extraction_prompt(chunk),
+            lambda raw: parse_graph_extraction(raw, chunk),
+            retries=extraction_settings.retries,
+            label=f"failed to extract graph for chunk {chunk_id}",
+            on_retry=lambda attempt, exc: _emit(
+                on_progress,
+                GraphBuildEvent(
+                    stage="retry",
+                    index=index,
+                    total=len(pending),
+                    chunk_id=chunk_id,
+                    attempt=attempt,
+                    retries=extraction_settings.retries,
+                    error=str(exc),
+                ),
+            ),
+        )
 
         merge_extraction(graph, extraction, chunk)
         update_graph_metadata(
@@ -633,7 +595,9 @@ def build_graph(
     return GraphBuildResult(
         collection=collection,
         graph_path=path,
-        status="rebuilt" if rebuilt else "built",
+        status=derivation_status(
+            selected=len(chunks), pending=len(pending), rebuilt=rebuilt
+        ),
         selected_chunk_count=len(chunks),
         entity_count=graph.entity_count,
         relation_count=graph.relation_count,
@@ -647,18 +611,12 @@ def build_analysis(
     progress: ProgressLimit | None = None,
     options: AnalysisBuildOptions | None = None,
     on_progress: Callable[[AnalysisBuildEvent], None] | None = None,
-    generator: GraphGenerator | None = None,
+    generator: JsonGenerator | None = None,
 ) -> AnalysisBuildResult:
     options = options or AnalysisBuildOptions()
-    manifest = read_manifest(
-        metadata_dir=config.paths.metadata_dir, collection=collection
+    manifest, all_chunks, progress_filter = _load_indexed_source(
+        config, collection, progress
     )
-    all_chunks = read_chunks(
-        metadata_dir=config.paths.metadata_dir,
-        collection=collection,
-    )
-    _validate_chunk_metadata_source(manifest, all_chunks)
-    progress_filter = progress_filter_from_limit(progress, manifest=manifest)
 
     groups = group_chapters(all_chunks)
     selected = [
@@ -668,45 +626,38 @@ def build_analysis(
     ]
 
     path = analysis_path(config.paths.metadata_dir, collection)
-    llm_model = options.llm_model or config.ollama.generation_model
-    num_predict = (
-        config.analysis.num_predict
-        if options.num_predict is None
-        else options.num_predict
-    )
-    retries = config.analysis.retries if options.retries is None else options.retries
-    settings = AnalysisSettings(
-        temperature=0.0,
-        num_predict=num_predict,
-        num_ctx=config.ollama.num_ctx,
-        retries=retries,
+    llm_model, settings = _generation_plan(
+        config,
+        config.analysis,
+        llm_model=options.llm_model,
+        num_predict=options.num_predict,
+        retries=options.retries,
     )
 
-    path_existed = path.exists()
-    rebuilt = path_existed and options.rebuild
-    document = empty_analysis(
-        collection=collection,
-        manifest=manifest,
-        llm_model=llm_model,
-        settings=settings,
-    )
-    if path_existed and not options.rebuild:
-        stored = read_analysis(path)
-        stale_reason = analysis_staleness_reason(
+    document, rebuilt = load_or_reset(
+        path,
+        empty_analysis(
+            collection=collection,
+            manifest=manifest,
+            llm_model=llm_model,
+            settings=settings,
+        ),
+        read=read_analysis,
+        stale=lambda stored: analysis_staleness_reason(
             stored,
             groups,
             collection=collection,
             source_path=manifest.source_path,
             llm_model=llm_model,
             settings=settings,
-        )
-        if stale_reason is None:
-            document = stored
-        else:
-            rebuilt = True
+        ),
+        rebuild=options.rebuild,
+    )
 
     processed = processed_chapter_keys(document)
-    budget = chapter_char_budget(num_ctx=config.ollama.num_ctx, num_predict=num_predict)
+    budget = chapter_char_budget(
+        num_ctx=config.ollama.num_ctx, num_predict=settings.num_predict
+    )
     pending: list[ChapterGroup] = []
     skipped: list[tuple[str, str]] = []
     for group in selected:
@@ -737,7 +688,7 @@ def build_analysis(
             base_url=config.ollama.base_url,
             model=llm_model,
             keep_alive=config.ollama.keep_alive,
-            num_predict=num_predict,
+            num_predict=settings.num_predict,
             num_ctx=config.ollama.num_ctx,
         )
 
@@ -751,13 +702,24 @@ def build_analysis(
                 chapter_title=group.title,
             ),
         )
-        analysis = _analyze_chapter(
+        analysis = generate_with_retry(
             generator,
-            group,
-            retries=retries,
-            index=index,
-            total=len(pending),
-            on_progress=on_progress,
+            build_chapter_prompt(group),
+            lambda raw: parse_chapter_analysis(raw, group),
+            retries=settings.retries,
+            label=f"failed to analyze chapter {group.title}",
+            on_retry=lambda attempt, exc: _emit(
+                on_progress,
+                AnalysisBuildEvent(
+                    stage="retry",
+                    index=index,
+                    total=len(pending),
+                    chapter_title=group.title,
+                    attempt=attempt,
+                    retries=settings.retries,
+                    error=str(exc),
+                ),
+            ),
         )
         merge_chapter(document, analysis, group)
         update_analysis_metadata(
@@ -793,13 +755,6 @@ def build_analysis(
     )
     write_analysis(path, document)
 
-    if not selected:
-        status = "empty"
-    elif not pending:
-        status = "up_to_date"
-    else:
-        status = "rebuilt" if rebuilt else "built"
-
     chunks_by_id = {chunk.id: chunk for chunk in all_chunks}
     chapters = [
         filtered
@@ -812,44 +767,13 @@ def build_analysis(
     return AnalysisBuildResult(
         collection=collection,
         analysis_path=path,
-        status=status,
+        status=derivation_status(
+            selected=len(selected), pending=len(pending), rebuilt=rebuilt
+        ),
         progress=progress_filter,
         chapters=chapters,
         skipped=skipped,
     )
-
-
-def _analyze_chapter(
-    generator: GraphGenerator,
-    group: ChapterGroup,
-    *,
-    retries: int,
-    index: int,
-    total: int,
-    on_progress: Callable[[AnalysisBuildEvent], None] | None,
-) -> ChapterAnalysis:
-    prompt = build_chapter_prompt(group)
-    for attempt in range(retries + 1):
-        try:
-            return parse_chapter_analysis(generator.generate_json(prompt), group)
-        except Exception as exc:
-            if attempt >= retries:
-                raise RuntimeError(
-                    f"failed to analyze chapter {group.title}: {exc}"
-                ) from exc
-            _emit(
-                on_progress,
-                AnalysisBuildEvent(
-                    stage="retry",
-                    index=index,
-                    total=total,
-                    chapter_title=group.title,
-                    attempt=attempt + 1,
-                    retries=retries,
-                    error=str(exc),
-                ),
-            )
-    raise RuntimeError(f"failed to analyze chapter {group.title}: no attempt was made")
 
 
 def query_graph(
@@ -859,19 +783,13 @@ def query_graph(
     *,
     progress: ProgressLimit | None = None,
 ) -> GraphSearchResult:
-    manifest = read_manifest(
-        metadata_dir=config.paths.metadata_dir, collection=collection
+    manifest, all_chunks, progress_filter = _load_indexed_source(
+        config, collection, progress
     )
     path = graph_path(config.paths.metadata_dir, collection)
     if not path.is_file():
         raise FileNotFoundError(f"graph index not found: {path}; run graph-index first")
 
-    all_chunks = read_chunks(
-        metadata_dir=config.paths.metadata_dir,
-        collection=collection,
-    )
-    _validate_chunk_metadata_source(manifest, all_chunks)
-    progress_filter = progress_filter_from_limit(progress, manifest=manifest)
     graph = read_graph(path)
     stale_reason = graph_staleness_reason(
         graph,
@@ -958,6 +876,43 @@ def progress_filter_from_limit(
         max_chapter=progress.max_chapter,
         max_line=progress.max_line,
         max_chunk_index=progress.max_chunk_index,
+    )
+
+
+def _load_indexed_source(
+    config: ReadFellowConfig,
+    collection: str,
+    progress: ProgressLimit | None,
+) -> tuple[IndexManifest, list[Chunk], ProgressFilter]:
+    """The manifest, chunks and progress filter a derivation reads the corpus through.
+
+    The chunks are checked against the source file here, so no path that reaches
+    the stored chunks can skip that check.
+    """
+    manifest = read_manifest(
+        metadata_dir=config.paths.metadata_dir, collection=collection
+    )
+    chunks = read_chunks(metadata_dir=config.paths.metadata_dir, collection=collection)
+    _validate_chunk_metadata_source(manifest, chunks)
+    return manifest, chunks, progress_filter_from_limit(progress, manifest=manifest)
+
+
+def _generation_plan(
+    config: ReadFellowConfig,
+    derivation: DerivationConfig,
+    *,
+    llm_model: str | None,
+    num_predict: int | None,
+    retries: int | None,
+) -> tuple[str, DerivationSettings]:
+    """The model and settings one build runs with, after per-run overrides."""
+    num_predict = derivation.num_predict if num_predict is None else num_predict
+    retries = derivation.retries if retries is None else retries
+    return llm_model or config.ollama.generation_model, DerivationSettings(
+        temperature=0.0,
+        num_predict=num_predict,
+        num_ctx=config.ollama.num_ctx,
+        retries=retries,
     )
 
 

@@ -112,7 +112,7 @@ uvx ruff format . && uvx ruff check .
 
 ---
 
-# 阶段 B · 合并孪生派生管线（候选 1）
+# 阶段 B · 合并孪生派生管线（候选 1）— B1/B2 已完成
 
 `app.build_graph`（459-640，182 行）和 `app.build_analysis`（643-819，177 行）12 个阶段里有 10 个完全相同。另有 15 对镜像符号：
 
@@ -143,7 +143,7 @@ build_graph 内联重试循环 ↔ _analyze_chapter
 | B2 | 合并字段完全相同的 settings / config 模型 | 必做，与 B1 同批 |
 | B3 | 完整 `DerivationSpec` Protocol | **待定**，触发条件见下 |
 
-B1+B2 把两条管线各自砍到约 90 行。B3 留到出现第三个派生物时再评估——那时才有第三个 adapter 证明 spec 的每个成员都真的在变。这符合"两个 adapter 才算真 seam"，也避免为可配置性而可配置。
+B1+B2 把两条管线各自砍到约 90 行（**落地实测：`build_graph` 183→146、`build_analysis` 178+32→171**，没到 90。剩下的确实是领域差异——chunk 选取 vs 章分组+预算+skip、事件字段不同、metadata 更新不同——再压需要 B3 的宽 Protocol）。B3 留到出现第三个派生物时再评估——那时才有第三个 adapter 证明 spec 的每个成员都真的在变。这符合"两个 adapter 才算真 seam"，也避免为可配置性而可配置。
 
 ## B1 · 抽出无歧义共享部分
 
@@ -163,8 +163,17 @@ B1+B2 把两条管线各自砍到约 90 行。B3 留到出现第三个派生物�
 4. **`derivation_status(*, selected, pending, rebuilt) -> str`**
    `empty` / `up_to_date` / `built` / `rebuilt` 的判定，现在 graph 版散在三个 return（app.py:538-558、633-640），analysis 版集中在 796-801。语义相同。
 
-5. **`common_staleness_reason(doc, *, collection, source_path, llm_model, settings)`**
-   `graph_staleness_reason` 前 5 项检查（graph.py:200-212）与 `analysis_staleness_reason` 前 5 项（analysis.py:290-299）结构完全一致，只有错误消息里的名词不同。抽成带 `label: str` 参数的公共函数，各自的领域检查（chunk fingerprint / chapter 匹配）留在原模块。
+5. ~~**`common_staleness_reason`**~~ —— **落地时放弃**。两边前 5 项检查确实同构，但抽出来需要 9 个参数（label + 5 个期望值 + 存储侧 settings + 期望 settings + document），因为两个文档的 settings 字段名不同（`extraction_settings` vs `settings`，且不能改，见 B2）、版本常量分属两个模块、消息名词也不同。11 行函数体配 9 个参数，interface 复杂度已经追平 implementation，是本文档 B3 段落里拒绝 `DerivationSpec` 的同一个理由的小号版本；调用点算上参数列表反而只省 2 行，还要改动 2 条用户可见的 stale 消息。检查逻辑留在各自模块。
+
+改为落地了计划漏列、但同属"孪生管线"的三处逐字重复中的两处：
+
+6. **`app._load_indexed_source(config, collection, progress)`** → `(manifest, chunks, progress_filter)`
+   `build_graph`、`build_analysis`、`query_graph` 三处都在做同一串 `read_manifest` + `read_chunks` + `_validate_chunk_metadata_source` + `progress_filter_from_limit`（9 行 ×3）。**三个 adapter**，而且把"读 chunk 前必须校验源文件"这条 fail closed 规则焊死在读取路径上——新入口没法绕过。
+
+7. **`app._generation_plan(config, derivation_config, *, llm_model, num_predict, retries)`** → `(llm_model, DerivationSettings)`
+   两边各 13 行的"per-run override 盖过 config"阶梯，且 `llm_model` 用 `or`（falsy）而 `num_predict`/`retries` 用 `is None` —— 这个不对称此前抄了两份。B2 合并 settings 模型后返回值可以只有两项，下游改用 `settings.num_predict` / `settings.retries`。
+
+   **没做**：`if generator is None: generator = OllamaGenerator(...)` 那 6 行。它是纯 pass-through 构造，抽出来不隐藏任何决策，只是把代码换个地方——删掉它不会让复杂度聚集。
 
 ## B2 · 模型与配置合并（与 B1 同批）
 

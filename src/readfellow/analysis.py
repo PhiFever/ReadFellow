@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .derivation import write_json_document
 from .extraction import (
     as_list,
     chunk_context,
@@ -17,11 +17,11 @@ from .extraction import (
 )
 from .models import (
     AnalysisDocument,
-    AnalysisSettings,
     ChapterAnalysis,
     ChapterEvent,
     CharacterMention,
     Chunk,
+    DerivationSettings,
     IndexManifest,
     ProgressFilter,
     utc_now_iso,
@@ -64,12 +64,7 @@ def read_analysis(path: Path) -> AnalysisDocument:
 
 def write_analysis(path: Path, document: AnalysisDocument) -> None:
     finalize_analysis(document)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(document.model_dump(mode="json"), ensure_ascii=False, indent=2)
-        + "\n",
-        encoding="utf-8",
-    )
+    write_json_document(path, document)
 
 
 def empty_analysis(
@@ -77,7 +72,7 @@ def empty_analysis(
     collection: str,
     manifest: IndexManifest | None = None,
     llm_model: str = "",
-    settings: AnalysisSettings | None = None,
+    settings: DerivationSettings | None = None,
 ) -> AnalysisDocument:
     now = utc_now_iso()
     return AnalysisDocument(
@@ -86,7 +81,7 @@ def empty_analysis(
         collection=collection,
         source_path=manifest.source_path if manifest else "",
         llm_model=llm_model,
-        settings=settings or AnalysisSettings(),
+        settings=settings or DerivationSettings(),
         created_at=now,
         updated_at=now,
     )
@@ -98,7 +93,7 @@ def update_analysis_metadata(
     collection: str,
     manifest: IndexManifest,
     llm_model: str,
-    settings: AnalysisSettings,
+    settings: DerivationSettings,
     progress: ProgressFilter,
     selected_chapter_count: int,
 ) -> None:
@@ -285,7 +280,7 @@ def analysis_staleness_reason(
     collection: str,
     source_path: str,
     llm_model: str | None = None,
-    settings: AnalysisSettings | None = None,
+    settings: DerivationSettings | None = None,
 ) -> str | None:
     if document.schema_version != ANALYSIS_SCHEMA_VERSION:
         return "analysis schema version changed"

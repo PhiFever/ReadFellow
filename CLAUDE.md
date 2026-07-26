@@ -38,16 +38,17 @@ uvx ruff format . && uvx ruff check .          # 两者当前都保持 clean
 
 ## 架构
 
-分层严格单向：`cli.py → app.py → {chunking, store, ollama, graph, analysis, progress} → extraction.py → models.py / config.py`
+分层严格单向：`cli.py → app.py → {chunking, store, ollama, graph, analysis, progress} → {extraction.py, derivation.py} → models.py / config.py`
 
 - **`cli.py`** — 薄 adapter。只做 argparse、进度打印、Evidence 格式化。所有默认值都从 `ReadFellowConfig` 取（`build_parser(config)`），全局 flag 通过 `apply_global_overrides` 覆盖成一份 effective config。新增命令时不要在这里写编排逻辑。
 - **`app.py`** — 可复用的应用 workflow，是 CLI 之外（未来 MCP / library）唯一该调用的入口：`index_document`、`semantic_search`、`fts_search`、`fetch_chunk`、`build_graph`、`query_graph`。签名统一为 `(config, ..., collection, *, progress: ProgressLimit, options: ...Options, on_progress: Callable[[Event], None])`；进度用 frozen dataclass 事件回调外传，**不在这一层 print**。
 - **`chunking.py`** — 先按空行切成 `TextUnit`（保留行号、字节偏移、当前章节标题），再按 `target_chars` 装窗 + 尾部 overlap 拼成 `Chunk`。章节靠 `CHAPTER_RE`（`第X章/节/卷/回` + 序章/楔子/番外等）识别。
 - **`store.py`** — 唯一接触 zvec 的地方：schema 定义（`text` 字段挂 jieba `FtsIndexParam`）、collection 打开/重建、`Doc` 转换、vector/FTS query、manifest 与 `chunks.jsonl` 读写。
 - **`ollama.py`** — 纯 `urllib` 调 `/api/embed` 与 `/api/generate`（`format=json`，temperature 0），无第三方 SDK。embedding 默认 L2 归一化。`parse_generate_response` 同时兼容单体 JSON 和逐行流式响应。
-- **`graph.py`** — 只剩图谱领域：prompt、实体/关系的归一化（`ENTITY_TYPES`/`RELATION_TYPES` 白名单）、合并、失效判定、查询。**不接触网络**，generator 由 `app.build_graph` 注入（`GraphGenerator` Protocol：`generate_json(prompt) -> str`）。
+- **`graph.py`** — 只剩图谱领域：prompt、实体/关系的归一化（`ENTITY_TYPES`/`RELATION_TYPES` 白名单）、合并、失效判定、查询。**不接触网络**，generator 由 `app.build_graph` 注入（`derivation.JsonGenerator` Protocol：`generate_json(prompt) -> str`）。
 - **`analysis.py`** — 章节级分析，与 `graph.py` 结构对称（prompt / 解析 / 合并 / 失效判定 / 进度过滤），generator 同样由 `app.build_analysis` 注入。
 - **`extraction.py`** — `graph.py` 与 `analysis.py` 共用的抽取工具，只依赖 `models`：LLM JSON 读取（`parse_json_object`、`get_any`、`as_list`、`normalize_text`）、证据锚定（`locate_evidence`/`resolve_evidence`，宽松匹配后回读原文）、`Chunk | ChunkContext | Mapping` 归一（`chunk_context`、`int_value`）。**新的领域词汇不要往这里放**——只有第二个派生管线也要用的通用件才进来。
+- **`derivation.py`** — graph 与 analysis 两条派生管线共用的骨架：`JsonGenerator` Protocol、`generate_with_retry`（生成+解析算一次尝试）、`load_or_reset`（不存在 / rebuild / stale 三态，是 fail closed 的单一落点）、`write_json_document`、`derivation_status`（`empty`/`up_to_date`/`built`/`rebuilt`）。领域细节（prompt、解析、合并、各自的 staleness 检查）留在 `graph.py`/`analysis.py`。
 - **`progress.py`** — 由章节/行号算出 `ProgressFilter`：既给 zvec 用的 `expression` 字符串，也给进程内用的 `allows()`。
 - **`models.py`** — 所有 Pydantic 模型集中于此，默认 `extra="forbid"`，值对象多为 `frozen=True`。新增字段先改这里，不要在别处塞裸 dict。
 
@@ -68,7 +69,8 @@ uvx ruff format . && uvx ruff check .          # 两者当前都保持 clean
 - **graph 在进度限制下会清空 `aliases` 与 `types`**（`graph._filter_entity`）——因为它们是跨 chunk 聚合、没有逐值 provenance。不要为了"信息更全"把这个行为改掉。
 - **抽取出的 evidence 必须是所属 chunk 原文的精确子串**，否则 `parse_graph_extraction` 抛错并触发重试。关系名走 `RELATION_TYPES` 白名单 + `_RELATION_ALIASES` 归一，白名单外的关系被静默丢弃（防止"相关""有关"这类泛化边）。
 - **改 prompt 必须 bump `GRAPH_PROMPT_VERSION`**（改图谱结构则 bump `GRAPH_SCHEMA_VERSION`）。`graph_staleness_reason` 会比对 schema/prompt 版本、生成模型、extraction settings、每个已处理 chunk 的 source/text hash 与位置；stale 时 `graph-index` 整图重建、`graph-query` 直接报错。仅新增 chunk 时是断点续建（`processed_chunk_ids`）。
-- **`_validate_chunk_metadata_source`** 在 graph 路径上先校验 `chunks.jsonl` 的 source path 与源文件当前 hash，源文件被改过就要求重新 index。
+- **`_validate_chunk_metadata_source`** 在 graph 路径上先校验 `chunks.jsonl` 的 source path 与源文件当前 hash，源文件被改过就要求重新 index。它被 `app._load_indexed_source` 包住——凡是要读 `chunks.jsonl` 的入口都走这个函数，别再单独 `read_chunks`。
+- **`config.graph` 与 `config.analysis` 是同一个 `DerivationConfig` 类的两个实例**，`KnowledgeGraph.extraction_settings` 与 `AnalysisDocument.settings` 也都是 `DerivationSettings`。但这两个**落盘字段名不能动**——改了会让已有 `graph.json`/`analysis.json` 被判 stale 而全量重建。
 - 已知薄弱点：索引不是原子发布，embedding 中途失败会留下 metadata 完整而 collection 不完整的状态（见架构归档）。
 
 ## 测试约定
