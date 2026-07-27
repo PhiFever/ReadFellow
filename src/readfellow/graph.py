@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Collection, Mapping, Sequence
 from pathlib import Path
 from types import MappingProxyType
@@ -22,6 +23,7 @@ from .models import (
     Chunk,
     ChunkContext,
     DerivationSettings,
+    EvidenceGraphContext,
     GraphChunkFingerprint,
     GraphEntity,
     GraphEvidence,
@@ -38,6 +40,10 @@ from .store import metadata_path
 
 GRAPH_SCHEMA_VERSION = 3
 GRAPH_PROMPT_VERSION = "graph-extraction-v1"
+# Read-side display budget for hybrid's annotation. Not persisted and not part
+# of the staleness fingerprint, so these can move without rebuilding the graph.
+ANNOTATION_MAX_ENTITIES = 3
+ANNOTATION_MAX_RELATIONS = 3
 ENTITY_TYPES = ("人物", "地点", "组织", "物品", "事件", "概念")
 RELATION_TYPES = (
     "是",
@@ -430,35 +436,83 @@ def annotate_chunks(
     chunk_ids: Collection[str],
     *,
     progress: ProgressFilter | None = None,
-) -> GraphQueryResult:
-    """What the graph knows about the given chunks, independent of any query.
+) -> dict[str, EvidenceGraphContext]:
+    """Per chunk, the few graph items worth spending an agent's context on.
 
     A query asks the graph which chunks to go read. This asks the opposite: the
     chunks are already chosen, and the graph only says what it recorded there.
     The reading limit still applies — an entity name is as much of a spoiler as
     the text it was extracted from.
+
+    Two filters keep the annotation from crowding out the chunk it annotates.
+    Only entities the extractor actually declared are eligible, and a relation
+    needs both of its endpoints to be such entities: a name that reached the
+    graph solely as a relation endpoint has neither a type nor a quote, and that
+    class holds almost all of the extraction noise. Survivors are then ranked by
+    how few chunks they span and cut to a handful, because a name covering half
+    the book says nothing about any one chunk.
+
+    This trims the display only. Nothing is dropped from the graph, and
+    `query_graph` still answers over all of it.
     """
     wanted = set(chunk_ids)
     if not wanted:
-        return GraphQueryResult()
+        return {}
 
-    relations = [
-        relation.model_copy(deep=True)
-        for relation in graph.relations
-        if relation.chunk_id in wanted and _allowed(progress, relation)
-    ]
+    spread = {entity.name: _chunk_spread(entity) for entity in graph.entities}
+    # Read the tier off the stored entity: a progress limit blanks `types`,
+    # which would otherwise demote a declared entity to a bare endpoint.
+    declared = {
+        entity.name for entity in graph.entities if entity.types or entity.evidence
+    }
 
-    entities: list[GraphEntity] = []
+    entities: defaultdict[str, dict[str, int]] = defaultdict(dict)
     for entity in graph.entities:
+        if entity.name not in declared:
+            continue
         filtered = _filter_entity(entity, progress)
         if filtered is None:
             continue
-        if any(
-            item.chunk_id in wanted for item in (*filtered.mentions, *filtered.evidence)
-        ):
-            entities.append(filtered)
+        for item in (*filtered.mentions, *filtered.evidence):
+            if item.chunk_id in wanted:
+                entities[item.chunk_id][entity.name] = spread[entity.name]
 
-    return GraphQueryResult(entities=entities, relations=relations)
+    relations: defaultdict[str, dict[str, int]] = defaultdict(dict)
+    for relation in graph.relations:
+        if relation.chunk_id not in wanted or not _allowed(progress, relation):
+            continue
+        subject = relation.subject_entity or relation.subject
+        object_ = relation.object_entity or relation.object
+        if subject not in declared or object_ not in declared:
+            continue
+        label = f"{relation.subject} --{relation.relation}--> {relation.object}"
+        relations[relation.chunk_id][label] = spread.get(subject, 1) + spread.get(
+            object_, 1
+        )
+
+    return {
+        chunk_id: EvidenceGraphContext(
+            entities=_rarest(entities.get(chunk_id, {}), ANNOTATION_MAX_ENTITIES),
+            relations=_rarest(relations.get(chunk_id, {}), ANNOTATION_MAX_RELATIONS),
+        )
+        for chunk_id in {*entities, *relations}
+    }
+
+
+def _chunk_spread(entity: GraphEntity) -> int:
+    """How many chunks the entity is anchored to — its inverse informativeness."""
+    return len(
+        {
+            item.chunk_id
+            for item in (*entity.mentions, *entity.evidence)
+            if item.chunk_id
+        }
+    )
+
+
+def _rarest(scored: Mapping[str, int], limit: int) -> list[str]:
+    """The least widespread entries, cut to `limit`, then back into name order."""
+    return sorted(sorted(scored, key=lambda label: (scored[label], label))[:limit])
 
 
 def _parse_entity(

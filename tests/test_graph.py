@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 from readfellow.graph import (
+    annotate_chunks,
     empty_graph,
     merge_extraction,
     parse_graph_extraction,
@@ -285,3 +286,122 @@ def test_graph_query_progress_filters_future_relations() -> None:
         for entity in result.entities
         for mention in entity.mentions
     )
+
+
+def test_annotation_keeps_only_the_rarest_declared_items() -> None:
+    graph = empty_graph(collection="sample")
+    crowded = chunk(text="向山、尤基、约格、基因税、图灵机同时出现在这一段里。")
+    merge_extraction(
+        graph,
+        parse_graph_extraction(
+            {
+                "entities": [
+                    {"name": "向山", "type": "人物", "evidence": "向山"},
+                    {"name": "尤基", "type": "人物", "evidence": "尤基"},
+                    {"name": "约格", "type": "人物", "evidence": "约格"},
+                    {"name": "基因税", "type": "概念", "evidence": "基因税"},
+                    {"name": "图灵机", "type": "概念", "evidence": "图灵机"},
+                ],
+                "relations": [
+                    {
+                        "subject": "向山",
+                        "relation": "认识",
+                        "object": "尤基",
+                        "evidence": "向山、尤基",
+                    },
+                    {
+                        "subject": "向山",
+                        "relation": "认识",
+                        "object": "约格",
+                        "evidence": "向山、尤基、约格",
+                    },
+                    {
+                        "subject": "基因税",
+                        "relation": "导致",
+                        "object": "图灵机",
+                        "evidence": "基因税、图灵机",
+                    },
+                    {
+                        "subject": "约格",
+                        "relation": "认识",
+                        "object": "基因税",
+                        "evidence": "约格、基因税",
+                    },
+                ],
+            },
+            crowded,
+        ),
+        crowded,
+    )
+
+    # Spread the three characters over further chunks so they rank as common:
+    # 向山 lands in 4 chunks, 尤基 in 3, 约格 in 2, the two concepts in 1.
+    for index, (text, names) in enumerate(
+        (
+            ("向山又出现了。", ["向山"]),
+            ("向山和尤基又出现了。", ["向山", "尤基"]),
+            ("向山、尤基、约格又出现了。", ["向山", "尤基", "约格"]),
+        ),
+        start=1,
+    ):
+        later = chunk(chunk_index=index, text=text)
+        merge_extraction(
+            graph,
+            parse_graph_extraction(
+                {
+                    "entities": [
+                        {"name": name, "type": "人物", "evidence": name}
+                        for name in names
+                    ]
+                },
+                later,
+            ),
+            later,
+        )
+
+    context = annotate_chunks(graph, [crowded.id])[crowded.id]
+
+    assert context.entities == sorted(["基因税", "图灵机", "约格"])
+    assert context.relations == sorted(
+        [
+            "基因税 --导致--> 图灵机",
+            "约格 --认识--> 基因税",
+            "向山 --认识--> 约格",
+        ]
+    )
+
+
+def test_annotation_drops_undeclared_endpoints_and_their_relations() -> None:
+    graph = empty_graph(collection="sample")
+    only = chunk(text="向山帮助了尤基。")
+    merge_extraction(
+        graph,
+        parse_graph_extraction(
+            {
+                "entities": [
+                    {"name": "向山", "type": "人物", "evidence": "向山帮助了尤基"}
+                ],
+                "relations": [
+                    {
+                        "subject": "向山",
+                        "relation": "帮助",
+                        "object": "尤基",
+                        "evidence": "向山帮助了尤基",
+                    }
+                ],
+            },
+            only,
+        ),
+        only,
+    )
+
+    context = annotate_chunks(graph, [only.id])[only.id]
+
+    # 尤基 reached the graph only as a relation endpoint, so it carries neither a
+    # type nor a quote. It is not shown, and neither is the relation resting on it.
+    assert context.entities == ["向山"]
+    assert context.relations == []
+
+    # The graph still holds both, and a query still answers over them.
+    assert {entity.name for entity in graph.entities} == {"向山", "尤基"}
+    assert query_graph(graph, "尤基").relations != []

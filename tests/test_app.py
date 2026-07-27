@@ -910,7 +910,8 @@ def test_hybrid_annotates_results_a_graph_query_could_never_have_matched(
             [
                 {
                     "entities": [
-                        {"name": "向山", "type": "人物", "evidence": "向山帮助了尤基"}
+                        {"name": "向山", "type": "人物", "evidence": "向山帮助了尤基"},
+                        {"name": "尤基", "type": "人物", "evidence": "帮助了尤基"},
                     ],
                     "relations": [
                         {

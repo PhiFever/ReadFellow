@@ -831,11 +831,8 @@ def _annotate_with_graph(
     except (FileNotFoundError, RuntimeError) as exc:
         return evidence, GraphAnnotationStatus(annotated=0, skipped_reason=str(exc))
 
-    context_by_chunk = _context_by_chunk(
-        annotate_chunks(
-            graph, [item.chunk_id for item in evidence], progress=progress_filter
-        ),
-        query=None,
+    context_by_chunk = annotate_chunks(
+        graph, [item.chunk_id for item in evidence], progress=progress_filter
     )
     annotated = [
         item.model_copy(update={"graph_context": context_by_chunk.get(item.chunk_id)})
@@ -941,13 +938,12 @@ def _relative_source_path(source: Path) -> str:
 def _context_by_chunk(
     result: GraphQueryResult,
     *,
-    query: str | None,
+    query: str,
 ) -> dict[str, EvidenceGraphContext]:
-    """Per chunk, the graph items anchored to it.
+    """Per chunk, the graph items anchored to it, narrowed to what `query` hit.
 
-    A `query` narrows an entity down to the places it actually matched, which is
-    what a graph query wants to show. Passing None keeps every anchor, which is
-    what annotating an already-retrieved chunk wants.
+    An entity matched by name carries all of its anchors; one matched only
+    through a quote carries just the quotes that contain the query.
     """
     entities_by_chunk: defaultdict[str, set[str]] = defaultdict(set)
     relations_by_chunk: defaultdict[str, set[str]] = defaultdict(set)
@@ -965,9 +961,9 @@ def _context_by_chunk(
             f"{relation.subject} --{relation.relation}--> {relation.object}"
         )
 
-    needle = None if query is None else query.strip().casefold()
+    needle = query.strip().casefold()
     for entity in result.entities:
-        if needle is None or any(
+        if any(
             needle in value.casefold()
             for value in (entity.name, *entity.aliases, *entity.types)
         ):

@@ -162,7 +162,31 @@ hybrid "尤基和他的家人" --max-chapter 3
 ### 结论
 
 - **不要再调 prompt 措辞。** 已实测：加严只会让 qwen3:8b 整体变保守，噪声率不动。
-- 便宜的方向是**按 provenance 分级显示**（读侧，零重建）：标注只列 Tier 1，垃圾率 12.2% → 1.6%。关系行独立显示端点名，不受影响。
-- 从源头治要改 `_parse_relation` 校验端点形态（解析侧，不是 prompt），但会改变图谱内容，需 bump `GRAPH_SCHEMA_VERSION` 整图重建。
+- 便宜的方向是**按 provenance 分级显示**（读侧，零重建）。已实施，见下节。
+- 从源头治要改 `_parse_relation` 校验端点形态（解析侧，不是 prompt），但会改变图谱内容，需 bump `GRAPH_SCHEMA_VERSION` 整图重建。当前不做。
 
 评测集合 `evalp`（60 chunk 纯 metadata）留在 `metadata/` 下可复用；任何后续尝试都应按同样口径量。
+
+## 已实施 · 标注的显示预算
+
+采纳的原则：**可以漏掉信息，agent 会自己再检索；但不能拿垃圾污染它的 context。** 因此 `annotate_chunks` 收窄为三条规则，全部在读侧，零重建、零版本 bump：
+
+1. **只列已声明实体**（`types` 或 `evidence` 非空）。Tier 判定读的是**存储态**实体——`_filter_entity` 在进度限制下会清空 `types`，若在过滤后判定会把 Tier 1 误降级。
+2. **关系要求两端都是已声明实体。**
+3. 存活项按 `_chunk_spread`（跨越 chunk 数）升序排序，各截断到 `ANNOTATION_MAX_ENTITIES` / `ANNOTATION_MAX_RELATIONS`（均为 3）。
+
+在 496 chunk 的实测图谱上：
+
+| | 实体垃圾率 | 关系端点垃圾率 |
+|---|---|---|
+| 改动前 | 12.2% | 10.8% |
+| 只列已声明实体 | **1.6%** | — |
+| 关系两端都已声明 | — | **1.7%** |
+
+覆盖代价近乎为零：**496 个 chunk 里 0 个丢掉全部标注**（实体行始终有内容），每 chunk 实体数中位 14 → 11 → 截断到 3。有关系可显示的 chunk 从 466 降到 284。一次 `hybrid --top-k 5` 的标注体积约 260 字，改动前约 737 字。
+
+**踩到的坑：稀有度排序在关系上会反向工作。** 垃圾名天生是一次性的（98.5% 只跨 1 个 chunk），所以只按稀有度排序时它们被排到最前——第一版实现里 `女人 --导致--> 四个孩子病死`、`小爱德华 --参与事件--> 第六十二章 以高声彰高义` 全部幸存。规则 2 才是关系侧真正起作用的那条，规则 3 只负责截断。
+
+**与上面被否掉的「端点严格校验」不是同一件事**：那个是抽取侧，删数据且需 8 小时重建；这个是显示侧，关系仍在 `graph.json` 里，`graph-query` 照样全量作答（`test_annotation_drops_undeclared_endpoints_and_their_relations` 钉住了这一点）。
+
+`annotate_chunks` 的返回类型随之从 `GraphQueryResult` 改为 `dict[str, EvidenceGraphContext]`——按 chunk 截断无法用扁平列表表达。`app._context_by_chunk` 的 `query=None` 分支因此成为孤儿，已删除，该函数回归 `graph-query` 专用。
