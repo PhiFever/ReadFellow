@@ -34,9 +34,11 @@ from .derivation import (
     load_or_reset,
 )
 from .graph import (
+    GraphDiagnostics,
     annotate_chunks,
     build_extraction_prompt,
     empty_graph,
+    graph_diagnostics,
     graph_path,
     graph_staleness_reason,
     merge_extraction,
@@ -188,6 +190,50 @@ class HybridSearchResult:
     channels: list[ChannelStatus]
     graph_annotation: GraphAnnotationStatus
     evidence: list[Evidence]
+
+
+@dataclass(frozen=True)
+class IndexReport:
+    collection_path: Path
+    expected_doc_count: int
+    stored_doc_count: int
+    index_completeness: dict[str, float]
+    error: str | None = None
+
+    @property
+    def is_complete(self) -> bool:
+        """Whether the collection really holds what the metadata promises.
+
+        Indexing publishes the metadata before the embeddings, so a run killed
+        halfway leaves a manifest claiming chunks the collection never got.
+        """
+        return (
+            self.error is None
+            and self.stored_doc_count == self.expected_doc_count
+            and all(share >= 1.0 for share in self.index_completeness.values())
+        )
+
+
+@dataclass(frozen=True)
+class DerivationReport:
+    path: Path
+    exists: bool
+    processed: int
+    total: int
+    rejected_count: int = 0
+    stale_reason: str | None = None
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class CollectionStatus:
+    collection: str
+    manifest: IndexManifest
+    source_error: str | None
+    index: IndexReport
+    graph: DerivationReport
+    analysis: DerivationReport
+    diagnostics: GraphDiagnostics | None
 
 
 @dataclass(frozen=True)
@@ -748,6 +794,128 @@ def query_graph(
         progress=progress_filter,
         evidence=_graph_evidence(graph_result, chunks, query=query),
     )
+
+
+def collection_status(
+    config: ReadFellowConfig,
+    collection: str,
+    *,
+    store: ChunkStore | None = None,
+) -> CollectionStatus:
+    """What the collection holds and what a rebuild would do to it, changing nothing.
+
+    Every other entry fails closed the moment a derivative is stale. This is the
+    one that has to say so instead, so each check that would otherwise raise is
+    caught and reported. The staleness questions are asked with the *configured*
+    model and settings, because "would graph-index resume or start over" is the
+    thing worth knowing before spending another eight hours.
+    """
+    manifest = read_manifest(
+        metadata_dir=config.paths.metadata_dir, collection=collection
+    )
+    chunks = read_chunks(metadata_dir=config.paths.metadata_dir, collection=collection)
+    try:
+        _validate_chunk_metadata_source(manifest, chunks)
+        source_error = None
+    except (RuntimeError, FileNotFoundError) as exc:
+        source_error = str(exc)
+
+    graph_file = graph_path(config.paths.metadata_dir, collection)
+    graph, graph_error = _read_derivation(graph_file, read_graph)
+    graph_model, graph_settings = _generation_plan(
+        config, config.graph, llm_model=None, num_predict=None, retries=None
+    )
+    graph_report = DerivationReport(
+        path=graph_file,
+        exists=graph is not None,
+        processed=graph.processed_chunk_count if graph else 0,
+        total=len(chunks),
+        rejected_count=graph.rejected_count if graph else 0,
+        stale_reason=graph_staleness_reason(
+            graph,
+            chunks,
+            collection=collection,
+            source_path=manifest.source_path,
+            llm_model=graph_model,
+            extraction_settings=graph_settings,
+        )
+        if graph
+        else None,
+        error=graph_error,
+    )
+
+    groups = complete_chapters(group_chapters(chunks))
+    analysis_file = analysis_path(config.paths.metadata_dir, collection)
+    analysis, analysis_error = _read_derivation(analysis_file, read_analysis)
+    analysis_model, analysis_settings = _generation_plan(
+        config, config.analysis, llm_model=None, num_predict=None, retries=None
+    )
+    analysis_report = DerivationReport(
+        path=analysis_file,
+        exists=analysis is not None,
+        processed=analysis.processed_chapter_count if analysis else 0,
+        total=len(groups),
+        rejected_count=analysis.rejected_count if analysis else 0,
+        stale_reason=analysis_staleness_reason(
+            analysis,
+            groups,
+            collection=collection,
+            source_path=manifest.source_path,
+            llm_model=analysis_model,
+            settings=analysis_settings,
+        )
+        if analysis
+        else None,
+        error=analysis_error,
+    )
+
+    return CollectionStatus(
+        collection=collection,
+        manifest=manifest,
+        source_error=source_error,
+        index=_index_report(config, collection, manifest, store),
+        graph=graph_report,
+        analysis=analysis_report,
+        diagnostics=graph_diagnostics(graph) if graph else None,
+    )
+
+
+def _index_report(
+    config: ReadFellowConfig,
+    collection: str,
+    manifest: IndexManifest,
+    store: ChunkStore | None,
+) -> IndexReport:
+    path = collection_path(config.paths.index_dir, collection)
+    try:
+        stats = (store or _open_store(config, collection)).stats()
+    except (FileNotFoundError, RuntimeError, ValueError) as exc:
+        return IndexReport(
+            collection_path=path,
+            expected_doc_count=manifest.chunk_count,
+            stored_doc_count=0,
+            index_completeness={},
+            error=str(exc),
+        )
+    return IndexReport(
+        collection_path=path,
+        expected_doc_count=manifest.chunk_count,
+        stored_doc_count=stats.doc_count,
+        index_completeness=stats.index_completeness,
+    )
+
+
+def _read_derivation(
+    path: Path,
+    read: Callable[[Path], Any],
+) -> tuple[Any, str | None]:
+    """The stored document, or why it cannot be reported on."""
+    if not path.is_file():
+        return None, None
+    try:
+        return read(path), None
+    except (ValueError, OSError) as exc:
+        return None, str(exc)
 
 
 def _load_graph(

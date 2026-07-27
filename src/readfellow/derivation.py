@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol, TypeVar
@@ -65,12 +66,20 @@ def load_or_reset(
 
 
 def write_json_document(path: Path, document: BaseModel) -> None:
+    """Publish the document in one step, replacing any previous version.
+
+    A derivation rewrites the whole file after every unit and a run lasts hours,
+    so anything reading it meanwhile — `status`, an editor, a second command —
+    would otherwise be free to catch a half-written file.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
+    pending = path.with_name(f"{path.name}.tmp")
+    pending.write_text(
         json.dumps(document.model_dump(mode="json"), ensure_ascii=False, indent=2)
         + "\n",
         encoding="utf-8",
     )
+    os.replace(pending, path)
 
 
 def derivation_status(*, selected: int, pending: int, rebuilt: bool) -> str:

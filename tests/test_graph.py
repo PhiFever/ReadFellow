@@ -5,6 +5,7 @@ import json
 from readfellow.graph import (
     annotate_chunks,
     empty_graph,
+    graph_diagnostics,
     merge_extraction,
     parse_graph_extraction,
     query_graph,
@@ -369,6 +370,47 @@ def test_annotation_keeps_only_the_rarest_declared_items() -> None:
             "向山 --认识--> 约格",
         ]
     )
+
+
+def test_diagnostics_count_endpoint_stubs_and_chunks_that_yielded_nothing() -> None:
+    graph = empty_graph(collection="sample")
+    spoken = chunk(text="向山帮助了尤基。")
+    merge_extraction(
+        graph,
+        parse_graph_extraction(
+            {
+                "entities": [
+                    {"name": "向山", "type": "人物", "evidence": "向山帮助了尤基"},
+                    {"name": "约格", "type": "人物", "evidence": "约格另有打算"},
+                ],
+                "relations": [
+                    {
+                        "subject": "向山",
+                        "relation": "帮助",
+                        "object": "尤基",
+                        "evidence": "向山帮助了尤基",
+                    }
+                ],
+            },
+            spoken,
+        ),
+        spoken,
+    )
+    silent = chunk(chunk_index=1, text="夜色很深。")
+    merge_extraction(
+        graph,
+        parse_graph_extraction({"entities": [], "relations": []}, silent),
+        silent,
+    )
+
+    diagnostics = graph_diagnostics(graph)
+
+    # 尤基 reached the graph only as a relation endpoint, so it is not declared;
+    # 约格 quoted a sentence that is not in the chunk and never reached it.
+    assert (diagnostics.entity_count, diagnostics.declared_entity_count) == (2, 1)
+    assert diagnostics.dropped_item_count == 1
+    assert diagnostics.silent_chunk_count == 1
+    assert "yielded nothing at all" in " ".join(diagnostics.warnings)
 
 
 def test_annotation_drops_undeclared_endpoints_and_their_relations() -> None:

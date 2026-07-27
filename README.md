@@ -175,6 +175,39 @@ uv run readfellow analyze --collection sample --max-chapter 50
 
 **每章分析完立即落盘**，中断安全，重跑按 `(章序号, 章标题)` 续建。
 
+### 3.7 `status` — 集合体检
+
+```sh
+uv run readfellow status --collection sample
+```
+
+不联网、不改任何东西，回答两个问题：**现在有什么**，以及**再跑一次会发生什么**。
+
+```
+collection:  sample
+source:      corpus/samples/赛博英雄传.txt
+chunks:      2307 @ 2400 chars, overlap 240
+embedding:   qwen3-embedding:8b, dim 4096
+
+index:       2307/2307 docs, embedding 100% indexed
+
+graph-index: 584/2307 chunks, rejected=786
+  → graph-index would resume on the remaining 1723 chunks
+  entities   3737 (declared 48.5%), relations 4472
+  spread     p50=1 p90=3 max=222 chunks per entity
+  dropped    6.9% of 11415 extracted items quoted text not in their chunk
+  silent     0/584 chunks yielded nothing
+
+analyze:     not built (1207 chapters eligible)
+```
+
+- **`index` 行读的是 zvec 自己的 `stats`**，不是 manifest。两个数字对不上就是 §6.2 那个已知问题的现场。
+- **`→` 行是最该看的一行**：失效判定用**配置里当前的模型与参数**做，所以它回答的是「续建还是从头重来」。别的命令遇到 stale 直接报错，`status` 是唯一负责把原因说出来还继续往下走的。
+- **四个诊断数字有实测参考值**（2026-07-27，赛博英雄传 + qwen3:8b：declared 48.5%、dropped 6.9%、silent 0%）。超出范围会打 `⚠`。**换书或换模型会误报——它是提示去看一眼，不是判死。**
+  - `declared` 是**声明过的实体占比**：有类型或有引文的才算，只作为关系端点出现的名字不算（那一类几乎囊括全部噪声，也是 `hybrid` 标注唯一会显示的层）。
+  - `spread` 是每个实体跨越多少 chunk。健康形状是 p50=1：绝大多数实体只出现在一处。`max` 很大是正常的，主角本来就覆盖半本书。
+  - `silent` 是**一个实体一条关系都没产出的 chunk 数**。不为 0 通常意味着 `num_predict` 太小或 prompt 坏了。
+
 ---
 
 ## 4. 防剧透：阅读进度限制
@@ -236,7 +269,9 @@ metadata/<collection>/
 
 ### 6.2 索引不是原子发布
 
-embedding 中途失败会留下 metadata 完整而 collection 不完整的状态。用 `--rebuild` 重跑可恢复。
+embedding 中途失败会留下 metadata 完整而 collection 不完整的状态。用 `--rebuild` 重跑可恢复。**`status` 的 `index:` 行能检出它**（zvec 报的 doc 数少于 manifest 承诺的 chunk 数），但写入本身仍不是两阶段发布。
+
+派生物那边已经不再有这个问题：`graph.json` / `analysis.json` 走临时文件 + `os.replace`，跑着 `graph-index` 的时候读它拿到的要么是上一版要么是新版，不会是半个文件。
 
 ### 6.3 换模型 / 换切块参数必须 `--rebuild`
 
@@ -257,6 +292,8 @@ embedding 中途失败会留下 metadata 完整而 collection 不完整的状态
 | `fts` 查不到内容但 `search` 正常 | 索引时用了 `--no-optimize`，重新索引且不要跳过 optimize |
 | 输出里 `rejected=N` 偏高 | 引文对不上原文的条目被丢弃了，见 §6.1 |
 | `graph-query` 报 stale | prompt/schema 版本、生成模型或 chunk hash 变了，重跑 `graph-index --rebuild` |
+| 不确定重跑会续建还是重来 | `readfellow status`，看 `graph-index:` 下面那行 `→` |
+| `status` 的 `index:` 两个数字不等 | 索引没跑完（§6.2），`index --rebuild` |
 
 ---
 

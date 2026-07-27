@@ -9,12 +9,15 @@ from .app import (
     AnalysisBuildEvent,
     AnalysisBuildOptions,
     ChannelStatus,
+    DerivationReport,
     GraphAnnotationStatus,
     GraphBuildEvent,
     GraphBuildOptions,
     IndexDocumentOptions,
     IndexProgressEvent,
+    IndexReport,
     ProgressLimit,
+    collection_status,
     fts_search,
     hybrid_search,
     index_document,
@@ -33,6 +36,7 @@ from .app import (
     query_graph as query_graph_workflow,
 )
 from .config import CONFIG_FILE, ReadFellowConfig, load_config
+from .graph import GraphDiagnostics
 from .models import ChapterAnalysis, ChunkContext, Evidence, ProgressFilter
 
 
@@ -190,6 +194,16 @@ def build_parser(config: ReadFellowConfig) -> argparse.ArgumentParser:
     )
     analyze.add_argument("--rebuild", action="store_true")
     add_progress_args(analyze)
+
+    status = subparsers.add_parser(
+        "status",
+        help="report what a collection holds and what a rebuild would do to it",
+    )
+    status.add_argument(
+        "--collection",
+        type=valid_collection_name,
+        default=config.indexing.default_collection,
+    )
 
     return parser
 
@@ -366,6 +380,91 @@ def command_analyze(args: argparse.Namespace, config: ReadFellowConfig) -> int:
         f"status={result.status}"
     )
     return 0
+
+
+def command_status(args: argparse.Namespace, config: ReadFellowConfig) -> int:
+    status = collection_status(config, args.collection)
+    manifest = status.manifest
+    print(f"collection:  {status.collection}")
+    print(f"source:      {manifest.source_path}")
+    print(
+        f"chunks:      {manifest.chunk_count} @ {manifest.chunk_chars} chars, "
+        f"overlap {manifest.overlap_chars}"
+    )
+    print(f"embedding:   {manifest.model}, dim {manifest.embedding_dimension}")
+    if status.source_error is not None:
+        print(f"  ⚠ {status.source_error}")
+
+    print()
+    print_index_status(status.index)
+    print()
+    print_derivation_status("graph-index", "chunks", status.graph)
+    if status.diagnostics is not None:
+        print_graph_diagnostics(status.diagnostics)
+    print()
+    print_derivation_status("analyze", "chapters", status.analysis)
+    return 0
+
+
+def print_index_status(report: IndexReport) -> None:
+    if report.error is not None:
+        print(f"index:       ⚠ {report.error}")
+        return
+    indexed = ", ".join(
+        f"{name} {share:.0%} indexed"
+        for name, share in sorted(report.index_completeness.items())
+    )
+    counts = f"{report.stored_doc_count}/{report.expected_doc_count} docs"
+    print(f"index:       {counts}{', ' + indexed if indexed else ''}")
+    if not report.is_complete:
+        print(
+            "  ⚠ the collection holds less than the metadata promises; "
+            "re-run index to finish it"
+        )
+
+
+def print_derivation_status(command: str, unit: str, report: DerivationReport) -> None:
+    label = f"{command}:".ljust(12)
+    if report.error is not None:
+        print(f"{label} ⚠ unreadable: {report.error}")
+        return
+    if not report.exists:
+        print(f"{label} not built ({report.total} {unit} eligible)")
+        return
+
+    print(
+        f"{label} {report.processed}/{report.total} {unit}"
+        f"{_rejected_suffix(report.rejected_count)}"
+    )
+    if report.stale_reason is not None:
+        print(f"  ⚠ stale: {report.stale_reason}")
+        print(f"  → {command} would discard all {report.processed} and start over")
+    elif report.processed < report.total:
+        remaining = report.total - report.processed
+        print(f"  → {command} would resume on the remaining {remaining} {unit}")
+
+
+def print_graph_diagnostics(diagnostics: GraphDiagnostics) -> None:
+    print(
+        f"  entities   {diagnostics.entity_count} "
+        f"(declared {diagnostics.declared_entity_share:.1%}), "
+        f"relations {diagnostics.relation_count}"
+    )
+    print(
+        f"  spread     p50={diagnostics.spread_p50} p90={diagnostics.spread_p90} "
+        f"max={diagnostics.spread_max} chunks per entity"
+    )
+    print(
+        f"  dropped    {diagnostics.dropped_item_share:.1%} of "
+        f"{diagnostics.kept_item_count + diagnostics.dropped_item_count} "
+        "extracted items quoted text not in their chunk"
+    )
+    print(
+        f"  silent     {diagnostics.silent_chunk_count}/"
+        f"{diagnostics.processed_chunk_count} chunks yielded nothing"
+    )
+    for warning in diagnostics.warnings:
+        print(f"  ⚠ {warning}")
 
 
 def print_index_progress(event: IndexProgressEvent) -> None:
@@ -582,6 +681,8 @@ def main(argv: list[str] | None = None) -> int:
             return command_graph_query(args, config)
         if args.command == "analyze":
             return command_analyze(args, config)
+        if args.command == "status":
+            return command_status(args, config)
     except Exception as exc:  # noqa: BLE001
         print(f"error: {exc}", file=sys.stderr)
         return 1

@@ -119,3 +119,23 @@ def test_cli_fts_then_fetch_prints_persisted_source_evidence(
     assert fetch_exit == 0
     assert early.text in fetch_output.out
     assert f"{source}:1-2" in fetch_output.out
+
+    status_exit = main(
+        [
+            "--index-dir",
+            str(index_dir),
+            "--metadata-dir",
+            str(metadata_dir),
+            "status",
+            "--collection",
+            "books",
+        ]
+    )
+    status_output = capsys.readouterr()
+
+    # The chunk metadata here was hand-written and never matched the source file,
+    # which every other command refuses to run on. Status is the one that has to
+    # say so and keep going, and it reads the doc count out of zvec itself.
+    assert status_exit == 0
+    assert "index:       2/2 docs" in status_output.out
+    assert "⚠ chunk metadata" in status_output.out

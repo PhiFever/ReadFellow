@@ -85,6 +85,19 @@ class UpsertOutcome:
     skipped: int
 
 
+@dataclass(frozen=True)
+class StoreStats:
+    """What the storage engine itself says it holds.
+
+    `doc_count` is the only way to catch an index that was published as complete
+    metadata over an incomplete collection, and `index_completeness` maps each
+    indexed field to the fraction of documents that field has actually indexed.
+    """
+
+    doc_count: int
+    index_completeness: dict[str, float]
+
+
 class ChunkStore(Protocol):
     """Where indexed chunks live, and the only thing that knows the storage engine.
 
@@ -130,6 +143,9 @@ class ChunkStore(Protocol):
         Fetch is the one entry that must tell "no such chunk" apart from "not read
         yet", so the caller applies the limit and decides which answer to give.
         """
+
+    def stats(self) -> StoreStats:
+        """What the store holds, for checking it against the metadata."""
 
 
 class ZvecChunkStore:
@@ -264,6 +280,13 @@ class ZvecChunkStore:
         )
         doc = docs.get(chunk_id)
         return None if doc is None else _evidence_from_doc(doc, retrieval_mode="fetch")
+
+    def stats(self) -> StoreStats:
+        stats = self._collection.stats
+        return StoreStats(
+            doc_count=stats.doc_count,
+            index_completeness=dict(stats.index_completeness),
+        )
 
     def _stored_text_hashes(self, chunks: Sequence[Chunk]) -> dict[str, str]:
         stored = self._collection.fetch(

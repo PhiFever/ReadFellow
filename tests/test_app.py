@@ -12,6 +12,7 @@ from readfellow.app import (
     IndexDocumentOptions,
     ProgressLimit,
     build_graph,
+    collection_status,
     fetch_chunk,
     fts_search,
     hybrid_search,
@@ -35,7 +36,7 @@ from readfellow.graph import (
     write_graph,
 )
 from readfellow.models import Chunk, Evidence, IndexManifest, ProgressFilter
-from readfellow.store import UpsertOutcome, write_manifest
+from readfellow.store import StoreStats, UpsertOutcome, write_manifest
 
 
 def manifest_for(source: Path) -> IndexManifest:
@@ -134,6 +135,9 @@ class InMemoryChunkStore:
     def fetch(self, chunk_id: str) -> Evidence | None:
         self.calls["fetch"] = {"chunk_id": chunk_id}
         return self.fetched
+
+    def stats(self) -> StoreStats:
+        return StoreStats(doc_count=len(self.text_hashes), index_completeness={})
 
 
 def test_graph_build_records_versioned_source_fingerprints(
@@ -1043,6 +1047,52 @@ def test_hybrid_skips_the_graph_annotation_and_reports_why(
     ]
     assert result.graph_annotation.annotated == 0
     assert expected_reason in (result.graph_annotation.skipped_reason or "")
+
+
+def test_status_reports_a_stale_graph_and_a_short_index_without_repairing_either(
+    tmp_path: Path,
+) -> None:
+    config, _, _ = hybrid_workspace(tmp_path)
+    build_graph(
+        config,
+        "books",
+        options=GraphBuildOptions(retries=0),
+        generator=DeterministicGenerator(
+            [
+                {
+                    "entities": [
+                        {"name": "向山", "type": "人物", "evidence": "向山帮助了尤基"}
+                    ],
+                    "relations": [
+                        {
+                            "subject": "向山",
+                            "relation": "帮助",
+                            "object": "尤基",
+                            "evidence": "向山帮助了尤基",
+                        }
+                    ],
+                }
+            ]
+        ),
+    )
+    path = graph_path(config.paths.metadata_dir, "books")
+    stored = read_graph(path)
+    stored.prompt_version = "legacy"
+    write_graph(path, stored)
+
+    # An empty store against a manifest promising one chunk is the shape an
+    # index killed between writing metadata and writing embeddings leaves behind.
+    status = collection_status(config, "books", store=InMemoryChunkStore())
+
+    assert status.graph.stale_reason == "graph extraction prompt changed"
+    assert (status.graph.processed, status.graph.total) == (1, 1)
+    assert (status.index.stored_doc_count, status.index.expected_doc_count) == (0, 1)
+    assert status.index.is_complete is False
+    assert status.diagnostics is not None
+    assert status.diagnostics.declared_entity_count == 1
+    assert status.analysis.exists is False
+    # Reporting a stale derivative must not be a way of rebuilding it.
+    assert read_graph(path).prompt_version == "legacy"
 
 
 def test_hybrid_fails_when_the_embedding_service_is_down(

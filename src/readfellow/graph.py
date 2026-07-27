@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Collection, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -44,6 +45,15 @@ GRAPH_PROMPT_VERSION = "graph-extraction-v1"
 # of the staleness fingerprint, so these can move without rebuilding the graph.
 ANNOTATION_MAX_ENTITIES = 3
 ANNOTATION_MAX_RELATIONS = 3
+# The shape of a healthy extraction run, measured 2026-07-27 on 赛博英雄传 with
+# qwen3:8b: declared entities 48.5% at 584 chunks (56.6% / 58.5% / 77.8% on three
+# shorter runs, since endpoint stubs accumulate more slowly than declarations),
+# dropped items 6.9%–9.0%, silent chunks 0% everywhere. Another book or another
+# model moves all three, so a flagged number means "go look", not "this run is
+# void". Read-side only: not persisted, not part of the staleness fingerprint.
+MIN_DECLARED_ENTITY_SHARE = 0.35
+MAX_DROPPED_ITEM_SHARE = 0.20
+MAX_SILENT_CHUNK_SHARE = 0.05
 ENTITY_TYPES = ("人物", "地点", "组织", "物品", "事件", "概念")
 RELATION_TYPES = (
     "是",
@@ -513,6 +523,112 @@ def _chunk_spread(entity: GraphEntity) -> int:
 def _rarest(scored: Mapping[str, int], limit: int) -> list[str]:
     """The least widespread entries, cut to `limit`, then back into name order."""
     return sorted(sorted(scored, key=lambda label: (scored[label], label))[:limit])
+
+
+@dataclass(frozen=True)
+class GraphDiagnostics:
+    """How well the extraction went, as opposed to how far it got.
+
+    The counts a graph already stores say how much was produced; these say
+    whether what was produced looks like the runs that were checked by hand.
+    """
+
+    entity_count: int
+    declared_entity_count: int
+    relation_count: int
+    processed_chunk_count: int
+    silent_chunk_count: int
+    kept_item_count: int
+    dropped_item_count: int
+    spread_p50: int
+    spread_p90: int
+    spread_max: int
+    warnings: list[str] = field(default_factory=list)
+
+    @property
+    def declared_entity_share(self) -> float:
+        return _share(self.declared_entity_count, self.entity_count)
+
+    @property
+    def dropped_item_share(self) -> float:
+        return _share(
+            self.dropped_item_count, self.kept_item_count + self.dropped_item_count
+        )
+
+    @property
+    def silent_chunk_share(self) -> float:
+        return _share(self.silent_chunk_count, self.processed_chunk_count)
+
+
+def graph_diagnostics(graph: KnowledgeGraph) -> GraphDiagnostics:
+    """The quality signals a finished `graph-index` run cannot otherwise be read for.
+
+    A run reports how many entities and relations it wrote, and that number is
+    large whether or not the extraction worked. These three ratios are what
+    separate the two: how much of the graph was actually declared rather than
+    inferred from a relation endpoint, how much the evidence check threw away,
+    and how many chunks the model answered nothing usable for.
+    """
+    spreads = sorted(_chunk_spread(entity) for entity in graph.entities)
+    diagnostics = GraphDiagnostics(
+        entity_count=len(graph.entities),
+        declared_entity_count=sum(
+            1 for entity in graph.entities if entity.types or entity.evidence
+        ),
+        relation_count=len(graph.relations),
+        processed_chunk_count=len(graph.extractions),
+        silent_chunk_count=sum(
+            1
+            for record in graph.extractions
+            if not record.entity_count and not record.relation_count
+        ),
+        kept_item_count=sum(
+            record.entity_count + record.relation_count for record in graph.extractions
+        ),
+        dropped_item_count=graph.rejected_count,
+        spread_p50=_percentile(spreads, 0.5),
+        spread_p90=_percentile(spreads, 0.9),
+        spread_max=spreads[-1] if spreads else 0,
+    )
+    return replace(diagnostics, warnings=_diagnostic_warnings(diagnostics))
+
+
+def _diagnostic_warnings(diagnostics: GraphDiagnostics) -> list[str]:
+    warnings: list[str] = []
+    if (
+        diagnostics.entity_count
+        and diagnostics.declared_entity_share < MIN_DECLARED_ENTITY_SHARE
+    ):
+        warnings.append(
+            f"only {diagnostics.declared_entity_share:.1%} of entities were declared "
+            f"(reference ≥ {MIN_DECLARED_ENTITY_SHARE:.0%}); the graph is mostly "
+            "relation endpoints, which annotation will not show"
+        )
+    if diagnostics.dropped_item_share > MAX_DROPPED_ITEM_SHARE:
+        warnings.append(
+            f"{diagnostics.dropped_item_share:.1%} of extracted items quoted text that "
+            f"is not in their chunk (reference ≤ {MAX_DROPPED_ITEM_SHARE:.0%}); "
+            "the model may be paraphrasing instead of quoting"
+        )
+    if diagnostics.silent_chunk_share > MAX_SILENT_CHUNK_SHARE:
+        warnings.append(
+            f"{diagnostics.silent_chunk_count} of {diagnostics.processed_chunk_count} "
+            f"chunks yielded nothing at all (reference ≤ "
+            f"{MAX_SILENT_CHUNK_SHARE:.0%}); check num_predict and the prompt"
+        )
+    return warnings
+
+
+def _percentile(sorted_values: Sequence[int], fraction: float) -> int:
+    if not sorted_values:
+        return 0
+    return sorted_values[
+        min(len(sorted_values) - 1, int(len(sorted_values) * fraction))
+    ]
+
+
+def _share(part: int, whole: int) -> float:
+    return part / whole if whole else 0.0
 
 
 def _parse_entity(

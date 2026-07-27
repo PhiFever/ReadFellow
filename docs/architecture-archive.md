@@ -486,3 +486,26 @@ CLI 应只负责解析参数、调用这些模块并格式化输出。
 **验证**：`uv run pytest` 42 passed（净 +2）、ruff clean。全量 `sample` 上（`graph-index` 运行中）`hybrid "尤基的父亲是怎么死的"` 得到 `3/3 results annotated`，`--max-chapter 3` 时标注全部来自第一章、无越界。
 
 下一步：等全量 `graph-index` / `analyze` 出完整产物后评估实体抽取质量。阶段 D / E 仍为触发条件驱动。
+
+## 2026-07-27 `status` 子命令与派生物原子发布
+
+起因是 `graph-index` 跑完之后没有任何办法验证结果，顺带引出「是否值得引入 sqlite」。选型结论与实测见 `docs/storage-engine-decision.md`（结论：不引入，也不把图谱搬进 zvec）。本条只记代码变更。
+
+**做了什么**：
+
+- `derivation.write_json_document` 改为临时文件 + `os.replace`。这直接勾掉了上一条「刻意没做」里的第四项：`graph.json` 的非原子写。索引侧仍未改。
+- `ChunkStore` 加第 6 个方法 `stats() -> StoreStats`（`doc_count` + `index_completeness`）。`ZvecChunkStore` 读 zvec 的 `collection.stats`，`InMemoryChunkStore` 报自己存了多少。这是**唯一**能检出「索引不是原子发布」现场的手段——manifest 承诺 2307 而 collection 只有 1800 时，此前没有任何命令会说话。
+- `graph.graph_diagnostics(graph) -> GraphDiagnostics`：已声明实体占比、丢弃条目占比、零产出 chunk 数、实体跨 chunk 数的 p50/p90/max，以及三条带实测参考值的告警。
+- `app.collection_status(config, collection, *, store) -> CollectionStatus`：manifest + 索引对账 + graph/analysis 的失效原因与续建/重建判定 + 图谱诊断，全部只读。
+- `cli.py` 加 `status` 子命令，只做格式化。
+
+**关键设计点**：`status` 是唯一「报告失效而不 fail closed」的入口。它自己 `read_chunks` 并显式调 `_validate_chunk_metadata_source`，把异常 catch 成一个字段——这是 CLAUDE.md 里「凡是读 `chunks.jsonl` 都走 `_load_indexed_source`」那条规则的唯一例外，已在该处标注。失效判定传入**配置里当前的**模型与参数，因此回答的是「重跑会续建还是从头重来」。
+
+**刻意没做**：
+
+- **没给 `status` 加 `--json`**。它的读者是人和 agent，两者都读得懂这段文本；加一份机器格式就要维护两套输出契约。
+- **没定义退出码策略**。stale 不等于坏，incomplete 才是坏，而这条界线一旦编进退出码就成了 API。集合读不出来时照旧走 `main` 的通用 `except` 返回 1。
+- **没修索引的原子发布**。`status` 让它可检出，没让它可避免。
+- **没为 `os.replace` 写并发测试**。真正验证需要造并发，成本远超收益。
+
+**验证**：`uv run pytest` 46 passed（净 +2，另有 1 条断言加进既有的真 zvec 用例）、ruff clean。五个真实 collection 上跑过 `status`：`sample` 报 584/2307 可续建、`smoke` 全绿、`ch5` 同时命中 stale 与「零产出 chunk」告警、`toy` 命中源文件缺失。
