@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping
-from typing import Any
+from collections.abc import Callable, Mapping
+from typing import Any, TypeVar
 
 from pydantic import BaseModel
 
 from .models import Chunk, ChunkContext
+
+ParsedItem = TypeVar("ParsedItem")
 
 
 def parse_json_object(raw: str | Mapping[str, Any]) -> Mapping[str, Any]:
@@ -50,11 +52,12 @@ def normalize_text(value: Any) -> str:
 
 
 # Characters an extracted quote may legitimately differ in: models drop the line
-# break and the paragraph indent a quote spans, and swap the full-width quote
-# marks around dialogue. Both sides are matched with these removed, and the span
-# is then read back out of the chunk so the stored evidence stays the source's
-# own wording.
-_LOOSE_IN_EVIDENCE = re.compile(r"[\s“”‘’「」『』\"']")
+# break and the paragraph indent a quote spans, swap the full-width quote marks
+# around dialogue, mark a quote they cut short with an ellipsis, and close a 【】
+# the source opened. Both sides are matched with these removed, and the span is
+# then read back out of the chunk so the stored evidence stays the source's own
+# wording.
+_LOOSE_IN_EVIDENCE = re.compile(r"[\s“”‘’「」『』【】…\"']")
 
 
 def locate_evidence(evidence: str, chunk_text: str) -> str | None:
@@ -75,6 +78,15 @@ def locate_evidence(evidence: str, chunk_text: str) -> str | None:
     return chunk_text[offsets[position] : offsets[position + len(needle) - 1] + 1]
 
 
+class EvidenceNotFound(ValueError):
+    """One extracted item quotes something the chunk does not say.
+
+    Item-level, so it costs that item and nothing else. Its own type keeps it
+    apart from the document-level failures — unparsable JSON, a missing
+    summary — which are still worth another generation.
+    """
+
+
 def resolve_evidence(
     evidence: str,
     chunk_text: str,
@@ -86,10 +98,32 @@ def resolve_evidence(
         return ""
     located = locate_evidence(evidence, chunk_text)
     if located is None:
-        raise ValueError(
+        raise EvidenceNotFound(
             f"{label} evidence is not an exact substring of chunk {chunk_id}"
         )
     return located
+
+
+def collect_items(
+    items: list[Any],
+    parse: Callable[[int, Any], ParsedItem | None],
+) -> tuple[list[ParsedItem], int]:
+    """The items that parsed, plus how many were dropped for quoting nothing.
+
+    A dropped item is a loss the caller has to report, so it is counted rather
+    than folded into the items a model simply did not produce.
+    """
+    parsed: list[ParsedItem] = []
+    rejected = 0
+    for position, item in enumerate(items, start=1):
+        try:
+            value = parse(position, item)
+        except EvidenceNotFound:
+            rejected += 1
+            continue
+        if value is not None:
+            parsed.append(value)
+    return parsed, rejected
 
 
 def chunk_context(chunk: Chunk | ChunkContext | Mapping[str, Any]) -> ChunkContext:

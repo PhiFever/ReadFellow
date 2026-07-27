@@ -149,6 +149,7 @@ class GraphBuildEvent:
     error: str = ""
     entity_count: int = 0
     relation_count: int = 0
+    rejected_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -202,6 +203,7 @@ class AnalysisBuildEvent:
     reason: str = ""
     character_count: int = 0
     event_count: int = 0
+    rejected_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -535,6 +537,7 @@ def build_graph(
                 chunk_id=chunk_id,
                 entity_count=len(extraction.entities),
                 relation_count=len(extraction.relations),
+                rejected_count=extraction.rejected_count,
             ),
         )
 
@@ -687,6 +690,7 @@ def build_analysis(
                 chapter_title=group.title,
                 character_count=len(analysis.characters),
                 event_count=len(analysis.events),
+                rejected_count=analysis.rejected_count,
             ),
         )
 

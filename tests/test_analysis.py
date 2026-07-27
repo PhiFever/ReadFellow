@@ -3,8 +3,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
-
 from readfellow.analysis import read_analysis, write_analysis
 from readfellow.app import AnalysisBuildOptions, ProgressLimit, build_analysis
 from readfellow.chunking import CHUNKER_VERSION, chunk_document
@@ -89,27 +87,32 @@ def build_collection(tmp_path: Path) -> ReadFellowConfig:
     return config
 
 
-def test_analysis_rejects_evidence_not_found_verbatim_in_chapter(
+def test_analysis_drops_evidence_not_found_verbatim_in_chapter(
     tmp_path: Path,
 ) -> None:
     config = build_collection(tmp_path)
-    invalid = {
+    payload = {
         "summary": "梗概",
-        "characters": [{"name": "向山", "evidence": "向山打败了尤基"}],
+        "characters": [
+            {"name": "向山", "evidence": "向山打败了尤基"},
+            {"name": "尤基", "evidence": "尤基修好了机器"},
+        ],
         "events": [],
     }
-    generator = DeterministicGenerator([invalid, invalid])
+    generator = DeterministicGenerator([payload])
 
-    with pytest.raises(RuntimeError, match="failed to analyze chapter 第一章 开始"):
-        build_analysis(
-            config,
-            "books",
-            progress=ProgressLimit(max_chapter=1),
-            options=AnalysisBuildOptions(retries=1),
-            generator=generator,
-        )
+    result = build_analysis(
+        config,
+        "books",
+        progress=ProgressLimit(max_chapter=1),
+        options=AnalysisBuildOptions(retries=1),
+        generator=generator,
+    )
 
-    assert len(generator.prompts) == 2
+    assert len(generator.prompts) == 1
+    chapter = result.chapters[0]
+    assert [mention.name for mention in chapter.characters] == ["尤基"]
+    assert chapter.rejected_count == 1
 
 
 def test_analysis_resumes_and_only_analyzes_new_chapters(tmp_path: Path) -> None:

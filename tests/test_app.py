@@ -219,6 +219,7 @@ def test_graph_build_records_versioned_source_fingerprints(
         "text_hash": chunks[0].text_hash,
         "entity_count": 2,
         "relation_count": 1,
+        "rejected_count": 0,
     }
 
     fail_if_called = DeterministicGenerator([])
@@ -259,7 +260,7 @@ def test_graph_build_records_versioned_source_fingerprints(
     assert len(refreshed.prompts) == 1
 
 
-def test_graph_build_retries_evidence_that_is_not_source_grounded(
+def test_graph_build_drops_evidence_that_is_not_source_grounded(
     tmp_path: Path,
 ) -> None:
     source = tmp_path / "novel.txt"
@@ -292,18 +293,13 @@ def test_graph_build_retries_evidence_that_is_not_source_grounded(
                         "relation": "帮助",
                         "object": "尤基",
                         "evidence": "向山打败了尤基",
-                    }
-                ],
-            },
-            {
-                "entities": [],
-                "relations": [
+                    },
                     {
                         "subject": "向山",
-                        "relation": "帮助",
+                        "relation": "认识",
                         "object": "尤基",
                         "evidence": "向山帮助了尤基",
-                    }
+                    },
                 ],
             },
         ]
@@ -317,8 +313,9 @@ def test_graph_build_retries_evidence_that_is_not_source_grounded(
     )
 
     graph = read_graph(result.graph_path)
-    assert len(generator.prompts) == 2
+    assert len(generator.prompts) == 1
     assert [relation.evidence for relation in graph.relations] == ["向山帮助了尤基"]
+    assert graph.rejected_count == 1
 
 
 def test_changed_chunk_metadata_invalidates_queries_and_rebuilds_graph(

@@ -1,9 +1,9 @@
 # 全量 MVP 执行 Runbook
 
 日期：2026-07-27
-状态：**检索链路可全量跑通；两条 LLM 派生链路（`graph-index` / `analyze`）存在确定性阻塞，全量跑不完**
+状态：**四条链路都可全量跑**（派生管线的阻塞已按 `docs/derivation-hardening-plan.md` 修复并在 20 chunk 上验收）
 
-本文档记录对 `corpus/samples/赛博英雄传.txt` 做一次完整分析的执行步骤、实测成本基线，以及当前挡住全量运行的问题。所有数字来自 2026-07-27 在本机（Ollama + `qwen3:8b` + `qwen3-embedding:8b`）的实测，不是估算。
+本文档记录对 `corpus/samples/赛博英雄传.txt` 做一次完整分析的执行步骤与实测成本基线。所有数字来自 2026-07-27 在本机（Ollama + `qwen3:8b` + `qwen3-embedding:8b`）的实测，不是估算。
 
 ## 结论前置
 
@@ -11,8 +11,8 @@
 |---|---|---|
 | `index` | ✅ 可全量跑 | 约 12 分钟 |
 | `search` / `fts` / `hybrid` / `fetch` | ✅ 可用 | 秒级 |
-| `graph-index` | ❌ 中途确定性终止 | 若能跑完约 7 小时 |
-| `analyze` | ❌ 中途确定性终止 | 若能跑完约 4.5 小时 |
+| `graph-index` | ✅ 可全量跑（20 chunk 验收 0 abort） | 约 7 小时 |
+| `analyze` | ✅ 可全量跑（10 章验收 0 abort） | 约 4.5 小时 |
 
 **代码质量本身不是阻塞**：`uv run pytest` 40 passed（约 2.4s，全离线），`uvx ruff check` / `ruff format --check` 均 clean。挡路的是模型输出与 evidence 校验规则的配合。
 
@@ -50,7 +50,7 @@ chunks         2,307
 | `graph-index` | 约 11s / chunk（含失败重试） | 2,307 chunks ≈ **7 小时** |
 | `analyze` | 约 13s / 章 | 1,207 章 ≈ **4.5 小时** |
 
-`graph-index` 关闭思考模式后每次生成省约 20% token（`eval_count` 1182–1211 → 841–1012），全量耗时应相应下降，待改动落地后重测。
+关闭思考模式后每次生成省约 20% token（`eval_count` 1182–1211 → 841–1012），上面两行是修复前的口径，实际应更快。
 
 `index` 比 `docs/architecture-archive.md` 的旧估算表快得多——那张表把 embedding 和生成混在一起估了。**embedding 不是瓶颈，生成才是。**
 
@@ -98,18 +98,20 @@ uv run readfellow fetch  <上面返回的 chunk-id> --collection sample --max-ch
 
 最后一条应对越界 chunk 返回 `outside_progress` 且**不打印原文**——这是防剧透不变量的直接验收点。
 
-### 阶段 2 · 派生管线（当前受阻，见下节）
-
-原计划：
+### 阶段 2 · 派生管线
 
 ```sh
 uv run readfellow analyze     --collection sample --max-chapter 50
 uv run readfellow graph-index --collection sample --max-chapter 50
 ```
 
-两者都逐单元落盘、支持断点续建，因此**本应**可以分批推进、随时 Ctrl-C。实际会在遇到第一个"硬骨头"单元时抛异常终止，且重跑仍卡在同一处。
+两者都逐单元落盘、支持断点续建，可以分批推进、随时 Ctrl-C 后重跑。
 
-## 阻塞详情
+输出里的 `rejected=N` 是**被丢弃的条目数**：模型给的引文在原文里找不到，该实体／关系／人物／事件被丢掉，其余照常入库。实测约 7%（graph 7.8%、analysis 6.9%）。显著高于这个数说明模型或 prompt 出了问题，值得查；个位数属正常。
+
+## 阻塞详情（已修复，保留作为背景）
+
+2026-07-27 修复前，两条管线都会在第一个"硬骨头"单元上抛异常终止，重跑仍卡在同一处。
 
 ### 现象
 
@@ -155,40 +157,29 @@ error: failed to analyze chapter 第一章 生锈的智人
 
 另外 chunk 0 抽出 `entities=0, relations=0`：那一段是小说开头，人物地点密集，抽零个说明 prompt 与 `qwen3:8b` 的配合本身偏弱，不只是校验太严。
 
-### 当前可行的绕行
+### 修复（2026-07-27 已落地）
 
-用进度参数跳过卡住的位置，分段推进；已完成部分因逐次落盘而保留：
-
-```sh
-uv run readfellow graph-index --collection sample --max-chunk-index 0
-# 卡在 N 号 chunk 时，从 N+1 之后继续需要手工分段
-uv run readfellow analyze --collection sample --max-chapter 30
-```
-
-代价是图谱/分析不完整，且需要人工盯着。**不适合无人值守的全量跑。**
-
-### 修复计划
-
-三项改动已决策，执行细节（含受影响的 4 个测试与验收判据）见 **`docs/derivation-hardening-plan.md`**：
+三项改动，细节与验收见 **`docs/derivation-hardening-plan.md`**：
 
 1. `OllamaGenerateRequest` 增加 `think: bool = False`
-2. 单条 evidence 锚定失败改为丢弃该条目并计数上报，不再终止整个 unit
+2. 单条 evidence 锚定失败改为丢弃该条目并计数上报（`rejected=N`），不再终止整个 unit
 3. `_LOOSE_IN_EVIDENCE` 补上 `【】…`
+
+20 chunk 复测：`graph-index` 20/20、`analyze` 10/10 全部跑完，0 次 abort、0 次 retry，丢弃率 7.8% / 6.9%。
 
 注意：早先列过的「放宽 chunk 归属」**不需要做**——`analysis._resolve_evidence`（`analysis.py:398-409`）在 claimed chunk 匹配不上时已会遍历本章所有 chunk，报错里的 chunk id 只是回退失败后沿用的 claimed 值。
 
 ## 刻意没做
 
-- **没有改任何代码**。本轮只做了可行性实测与文档。
-- **没有跑全量 `index`**。12 分钟的成本不高，但阶段 2 受阻时先跑完它没有意义，留给决策之后。
+- **没有跑全量 `index`**。12 分钟的成本不高，但留给真正要出全量产物的那次。
 - **没有清理 `metadata/sample/` 的旧产物**。它会被 `--rebuild` 覆盖，且当前 fail closed 行为正确，留着能验证 staleness 检查。
-- **没有调 `num_ctx` / `num_predict`**。超预算章节只有 0.2%，JSON 截断只是三个失败模式里最次要的一个，调它救不了主因。
+- **没有调 `num_ctx` / `num_predict`**。超预算章节只有 0.2%，JSON 失败的根因是思考模式而非预算不足。
 
 ## 附：冒烟用的一次性集合
 
-实测用的 `smoke` 集合（12 chunks）可以随时重建或删除：
+验收用的 `smoke` 集合（20 chunks）可以随时重建或删除：
 
 ```sh
-uv run readfellow index corpus/samples/赛博英雄传.txt --collection smoke --rebuild --limit 12
+uv run readfellow index corpus/samples/赛博英雄传.txt --collection smoke --rebuild --limit 20
 rm -rf indexes/smoke metadata/smoke     # 不再需要时
 ```

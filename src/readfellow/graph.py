@@ -11,6 +11,7 @@ from .derivation import write_json_document
 from .extraction import (
     as_list,
     chunk_context,
+    collect_items,
     get_any,
     int_value,
     normalize_text,
@@ -35,7 +36,7 @@ from .models import (
 )
 from .store import metadata_path
 
-GRAPH_SCHEMA_VERSION = 2
+GRAPH_SCHEMA_VERSION = 3
 GRAPH_PROMPT_VERSION = "graph-extraction-v1"
 ENTITY_TYPES = ("人物", "地点", "组织", "物品", "事件", "概念")
 RELATION_TYPES = (
@@ -268,22 +269,21 @@ def parse_graph_extraction(
     payload = parse_json_object(raw)
     context = chunk_context(chunk)
     chunk_text = _chunk_text(chunk)
-    entities: list[GraphEntity] = []
-    relations: list[GraphRelation] = []
 
-    for item in as_list(get_any(payload, ("entities", "实体"), [])):
-        entity = _parse_entity(item, context, chunk_text)
-        if entity is not None:
-            entities.append(entity)
+    entities, rejected_entities = collect_items(
+        as_list(get_any(payload, ("entities", "实体"), [])),
+        lambda _, item: _parse_entity(item, context, chunk_text),
+    )
+    relations, rejected_relations = collect_items(
+        as_list(get_any(payload, ("relations", "关系", "triples", "edges"), [])),
+        lambda _, item: _parse_relation(item, context, chunk_text),
+    )
 
-    for item in as_list(
-        get_any(payload, ("relations", "关系", "triples", "edges"), [])
-    ):
-        relation = _parse_relation(item, context, chunk_text)
-        if relation is not None:
-            relations.append(relation)
-
-    return GraphExtraction(entities=entities, relations=relations)
+    return GraphExtraction(
+        entities=entities,
+        relations=relations,
+        rejected_count=rejected_entities + rejected_relations,
+    )
 
 
 def merge_extraction(
@@ -389,6 +389,7 @@ def finalize_graph(graph: KnowledgeGraph) -> None:
     graph.processed_chunk_count = len(graph.extractions)
     graph.entity_count = len(graph.entities)
     graph.relation_count = len(graph.relations)
+    graph.rejected_count = sum(record.rejected_count for record in graph.extractions)
 
 
 def query_graph(
@@ -553,6 +554,7 @@ def _mark_extracted(
             text_hash=_chunk_value(chunk, "text_hash"),
             entity_count=len(extraction.entities),
             relation_count=len(extraction.relations),
+            rejected_count=extraction.rejected_count,
         )
     )
 

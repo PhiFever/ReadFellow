@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
-
 from readfellow.graph import (
     empty_graph,
     merge_extraction,
@@ -146,21 +144,28 @@ def test_parse_skips_unknown_relation_types() -> None:
     ] == [("帮助", "尤基")]
 
 
-def test_parse_rejects_evidence_not_found_verbatim_in_chunk() -> None:
-    with pytest.raises(ValueError, match="entity evidence is not an exact substring"):
-        parse_graph_extraction(
-            {
-                "entities": [
-                    {
-                        "name": "向山",
-                        "type": "人物",
-                        "evidence": "向山打败了尤基",
-                    }
-                ],
-                "relations": [],
-            },
-            chunk(),
-        )
+def test_parse_drops_and_counts_evidence_not_found_verbatim_in_chunk() -> None:
+    extraction = parse_graph_extraction(
+        {
+            "entities": [
+                {
+                    "name": "向山",
+                    "type": "人物",
+                    "evidence": "向山打败了尤基",
+                },
+                {
+                    "name": "尤基",
+                    "type": "人物",
+                    "evidence": "他帮助了尤基",
+                },
+            ],
+            "relations": [],
+        },
+        chunk(),
+    )
+
+    assert [entity.name for entity in extraction.entities] == ["尤基"]
+    assert extraction.rejected_count == 1
 
 
 def test_parse_stores_the_source_wording_of_a_loosely_quoted_evidence() -> None:
@@ -184,22 +189,30 @@ def test_parse_stores_the_source_wording_of_a_loosely_quoted_evidence() -> None:
     )
 
 
-def test_parse_rejects_relation_evidence_not_found_verbatim_in_chunk() -> None:
-    with pytest.raises(ValueError, match="relation evidence is not an exact substring"):
-        parse_graph_extraction(
-            {
-                "entities": [],
-                "relations": [
-                    {
-                        "subject": "向山",
-                        "relation": "帮助",
-                        "object": "尤基",
-                        "evidence": "向山打败了尤基",
-                    }
-                ],
-            },
-            chunk(),
-        )
+def test_parse_drops_and_counts_relation_evidence_not_found_verbatim_in_chunk() -> None:
+    extraction = parse_graph_extraction(
+        {
+            "entities": [],
+            "relations": [
+                {
+                    "subject": "向山",
+                    "relation": "帮助",
+                    "object": "尤基",
+                    "evidence": "向山打败了尤基",
+                },
+                {
+                    "subject": "向山",
+                    "relation": "是",
+                    "object": "武神",
+                    "evidence": "向山被人称作武神",
+                },
+            ],
+        },
+        chunk(),
+    )
+
+    assert [relation.object for relation in extraction.relations] == ["武神"]
+    assert extraction.rejected_count == 1
 
 
 def test_graph_query_progress_filters_future_relations() -> None:

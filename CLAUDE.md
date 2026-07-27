@@ -69,7 +69,7 @@ uvx ruff format . && uvx ruff check .          # 两者当前都保持 clean
 - **`optimize()` 不能随便跳**。`--no-optimize` 只用于测写入速度；不 optimize 时持久化的中文 FTS 重开后可能查不到。
 - **进度过滤有两条路径**，新入口必须两边都走：`ProgressFilter` 整体传给 `ChunkStore`（zvec adapter 用它的 `expression`）、进程内则用 `ProgressFilter.allows(fields)`（graph、fetch 走后者）。`ChunkStore.fetch` **不施加进度限制**——因为只有它要区分「没这个 chunk」和「还没读到」；`fetch_chunk` 拿到 Evidence 后自己判，返回 `found` / `not_found` / `outside_progress` 三态，越界时**不带 text**。
 - **graph 在进度限制下会清空 `aliases` 与 `types`**（`graph._filter_entity`）——因为它们是跨 chunk 聚合、没有逐值 provenance。不要为了"信息更全"把这个行为改掉。
-- **抽取出的 evidence 必须是所属 chunk 原文的精确子串**，否则 `parse_graph_extraction` 抛错并触发重试。关系名走 `RELATION_TYPES` 白名单 + `_RELATION_ALIASES` 归一，白名单外的关系被静默丢弃（防止"相关""有关"这类泛化边）。
+- **抽取出的 evidence 必须是所属 chunk 原文的精确子串**（`extraction._LOOSE_IN_EVIDENCE` 允许空白/引号/`…`/`【】`的差异，随后按偏移回读原文）。对不上的**单个条目**被丢弃并计入 `rejected_count`（`extraction.EvidenceNotFound` + `collect_items`），不再终止整个 unit；**文档级失败（JSON 解析不了、缺 `summary`）仍然抛出并触发重试**——这条边界不要模糊。派生物因此是真实但不完整的子集，实测约丢 7%。关系名走 `RELATION_TYPES` 白名单 + `_RELATION_ALIASES` 归一，白名单外的关系在证据校验之前就被静默丢弃（防止"相关""有关"这类泛化边），**不计入 `rejected_count`**。
 - **改 prompt 必须 bump `GRAPH_PROMPT_VERSION`**（改图谱结构则 bump `GRAPH_SCHEMA_VERSION`）。`graph_staleness_reason` 会比对 schema/prompt 版本、生成模型、extraction settings、每个已处理 chunk 的 source/text hash 与位置；stale 时 `graph-index` 整图重建、`graph-query` 直接报错。仅新增 chunk 时是断点续建（`processed_chunk_ids`）。
 - **`_validate_chunk_metadata_source`** 在 graph 路径上先校验 `chunks.jsonl` 的 source path 与源文件当前 hash，源文件被改过就要求重新 index。它被 `app._load_indexed_source` 包住——凡是要读 `chunks.jsonl` 的入口都走这个函数，别再单独 `read_chunks`。
 - **`config.graph` 与 `config.analysis` 是同一个 `DerivationConfig` 类的两个实例**，`KnowledgeGraph.extraction_settings` 与 `AnalysisDocument.settings` 也都是 `DerivationSettings`。但这两个**落盘字段名不能动**——改了会让已有 `graph.json`/`analysis.json` 被判 stale 而全量重建。
@@ -84,8 +84,8 @@ uvx ruff format . && uvx ruff check .          # 两者当前都保持 clean
 
 ## 相关文档
 
-- `docs/derivation-hardening-plan.md`（中文）— 2026-07-27 排查出的三个根因（思考模式默认开 / 单条 quote 失败杀死整个 run / 宽松匹配字符类漏 `【】…`）与已决策的三项改动。**动 `graph-index` / `analyze` 前先读它的「不重新讨论的事」。**
-- `docs/mvp-runbook.md`（中文）— 全量跑通示例小说的执行步骤 + 2026-07-27 实测吞吐基线，以及阻塞的现象与根因。
+- `docs/derivation-hardening-plan.md`（中文）— 2026-07-27 排查出的三个根因（思考模式默认开 / 单条 quote 失败杀死整个 run / 宽松匹配字符类漏 `【】…`）与三项改动，均已实施并在 20 chunk 上验收。**动 `graph-index` / `analyze` 前先读它的「不重新讨论的事」。**
+- `docs/mvp-runbook.md`（中文）— 全量跑通示例小说的执行步骤 + 2026-07-27 实测吞吐基线。
 - `README.md`（中文）— 面向使用者的命令手册：全局参数、8 个子命令、进度限制、故障排查表。
 - `docs/architecture-archive.md`（中文）— 架构不足清单 + 优先级路线图 + graph-index 成本估算 + zvec MCP 边界。优先级 1（app 层）、2（Evidence 模型）、3（graph 加固）、4（hybrid retrieval）均已完成。
 - `docs/module-deepening-plan.md`（中文）— 2026-07-26 架构评审的执行计划。阶段 A（拆 `graph.py`）、B（合并 graph/analysis 孪生管线）、C（补完 zvec seam）均已落地；D/E 与 B3 待触发条件。开工前先读它的「不重新讨论的事」。

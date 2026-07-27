@@ -208,25 +208,20 @@ metadata/<collection>/
 
 ## 6. 已知问题
 
-### 6.1 `graph-index` / `analyze` 全量运行会中途终止（阻塞中）
+### 6.1 派生管线会丢弃引文对不上的条目
 
-**现象**：抽取出的 evidence 必须是所属 chunk 原文的精确子串。一旦某个条目的证据锚定不上，该 chunk 耗尽重试后整个 run 抛异常退出。重试**无法**解决。
+抽取出的 evidence 必须是所属 chunk 原文的精确子串。锚定不上的条目会被**丢弃并计数**，其余照常入库：
 
 ```
-[    2/8] extracting graph from bdd935754e17_000001
-        retry 1/6: Expecting ',' delimiter: line 1 column 3218 (char 3217)
-        retry 2/6: entity evidence is not an exact substring of chunk bdd935754e17_000001
-        ...
-error: failed to extract graph for chunk bdd935754e17_000001
+[    2/20] extracting graph from bdd935754e17_000001
+        entities=12, relations=14, rejected=1
 ```
 
-**影响**：全量 `graph-index`（2307 chunks）与全量 `analyze`（1207 章）目前都跑不完。
+`rejected=N` 就是这一个 unit 丢掉的条目数，落盘在 `graph.json` / `analysis.json` 的 `rejected_count`。实测约 7%（graph 7.8%、analysis 6.9%），主要是模型把代词换成人名这类改写——放宽匹配等于伪造出处，所以按设计丢弃。**显著高于 7% 说明模型或 prompt 出了问题，值得查。**
 
-**根因**（2026-07-27 实测）：三个独立原因叠加——(1) 每 chunk 约 18.7 条证据，单条锚定失败率 7–9%，而一条失败就杀死整个 run；(2) 宽松匹配漏了 `…` 与 `【】`，模型的截断省略号和补齐的右括号被误判；(3) qwen3 思考模式在 Ollama 里默认开启，导致部分响应丢失 JSON 收尾大括号。
+这意味着图谱与分析是**真实但不完整**的子集：留下的每一条都能回落到原文精确子串，但模型引错的那部分不会出现。
 
-**当前可行的绕行**：用 `--max-chunk-index` / `--max-chapter` 跳过卡住的位置分段推进，已完成部分因逐次落盘而保留。代价是图谱/分析不完整。
-
-根因排查与修复计划见 [`docs/derivation-hardening-plan.md`](docs/derivation-hardening-plan.md)，执行步骤与成本基线见 [`docs/mvp-runbook.md`](docs/mvp-runbook.md)。
+2026-07-27 之前，一条引文对不上会耗尽重试并终止整个 run，全量因此跑不完。根因排查与修复见 [`docs/derivation-hardening-plan.md`](docs/derivation-hardening-plan.md)，执行步骤与成本基线见 [`docs/mvp-runbook.md`](docs/mvp-runbook.md)。
 
 ### 6.2 索引不是原子发布
 
@@ -249,7 +244,7 @@ embedding 中途失败会留下 metadata 完整而 collection 不完整的状态
 | `chunk metadata is stale (source path changed)` | 源文档被移动或改名，重新索引 |
 | 源文件 hash 不符 | 源文档被修改过。源文档不可变是第一不变量，必须重新索引 |
 | `fts` 查不到内容但 `search` 正常 | 索引时用了 `--no-optimize`，重新索引且不要跳过 optimize |
-| `... evidence is not an exact substring of chunk ...` | 见 §6.1 |
+| 输出里 `rejected=N` 偏高 | 引文对不上原文的条目被丢弃了，见 §6.1 |
 | `graph-query` 报 stale | prompt/schema 版本、生成模型或 chunk hash 变了，重跑 `graph-index --rebuild` |
 
 ---

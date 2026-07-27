@@ -225,11 +225,13 @@ class GraphExtractionRecord(ChunkContext):
     text_hash: str = ""
     entity_count: int = 0
     relation_count: int = 0
+    rejected_count: int = 0
 
 
 class GraphExtraction(ReadFellowModel):
     entities: list[GraphEntity] = Field(default_factory=list)
     relations: list[GraphRelation] = Field(default_factory=list)
+    rejected_count: int = 0
 
 
 class GraphChunkFingerprint(ReadFellowModel):
@@ -256,6 +258,7 @@ class KnowledgeGraph(ReadFellowModel):
     processed_chunk_count: int = 0
     entity_count: int = 0
     relation_count: int = 0
+    rejected_count: int = 0
     entities: list[GraphEntity] = Field(default_factory=list)
     relations: list[GraphRelation] = Field(default_factory=list)
     extractions: list[GraphExtractionRecord] = Field(default_factory=list)
@@ -288,6 +291,7 @@ class ChapterAnalysis(ReadFellowModel):
     summary: str = ""
     characters: list[CharacterMention] = Field(default_factory=list)
     events: list[ChapterEvent] = Field(default_factory=list)
+    rejected_count: int = 0
 
 
 class AnalysisDocument(ReadFellowModel):
@@ -305,6 +309,7 @@ class AnalysisDocument(ReadFellowModel):
     progress_limit: str = ""
     selected_chapter_count: int = 0
     processed_chapter_count: int = 0
+    rejected_count: int = 0
     chapters: list[ChapterAnalysis] = Field(default_factory=list)
 
 
@@ -332,6 +337,11 @@ class OllamaGenerateRequest(ReadFellowModel):
     prompt: str
     format: Literal["json"] = "json"
     stream: bool = False
+    # Ollama turns thinking on for a model that supports it unless the field is
+    # sent, and a thinking qwen3 stops emitting the closing brace of its JSON
+    # answer and pads with blank lines until num_predict runs out. Sending false
+    # is accepted by models without the capability, so it is safe to hardcode.
+    think: bool = False
     keep_alive: str
     options: OllamaGenerateOptions
 

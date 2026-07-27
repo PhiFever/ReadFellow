@@ -405,7 +405,9 @@ def print_graph_progress(event: GraphBuildEvent) -> None:
         return
     if event.stage == "extracted":
         print(
-            f"        entities={event.entity_count}, relations={event.relation_count}",
+            f"        entities={event.entity_count},"
+            f" relations={event.relation_count}"
+            f"{_rejected_suffix(event.rejected_count)}",
             flush=True,
         )
 
@@ -431,9 +433,16 @@ def print_analysis_progress(event: AnalysisBuildEvent) -> None:
         return
     if event.stage == "analyzed":
         print(
-            f"        characters={event.character_count}, events={event.event_count}",
+            f"        characters={event.character_count},"
+            f" events={event.event_count}"
+            f"{_rejected_suffix(event.rejected_count)}",
             flush=True,
         )
+
+
+def _rejected_suffix(rejected_count: int) -> str:
+    """How many items were dropped for quoting nothing, shown only when some were."""
+    return f", rejected={rejected_count}" if rejected_count else ""
 
 
 def print_chapter_analyses(chapters: list[ChapterAnalysis]) -> None:

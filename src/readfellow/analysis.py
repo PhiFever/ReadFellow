@@ -7,8 +7,10 @@ from typing import Any
 
 from .derivation import write_json_document
 from .extraction import (
+    EvidenceNotFound,
     as_list,
     chunk_context,
+    collect_items,
     get_any,
     locate_evidence,
     normalize_text,
@@ -28,7 +30,7 @@ from .models import (
 )
 from .store import metadata_path
 
-ANALYSIS_SCHEMA_VERSION = 1
+ANALYSIS_SCHEMA_VERSION = 2
 ANALYSIS_PROMPT_VERSION = "chapter-analysis-v1"
 
 # Rough qwen ratio for Chinese prose, used only to keep a chapter prompt inside
@@ -205,19 +207,14 @@ def parse_chapter_analysis(
     if not summary:
         raise ValueError(f"chapter analysis has no summary for {group.title}")
 
-    characters: list[CharacterMention] = []
-    for item in as_list(get_any(payload, _CHARACTER_KEYS, [])):
-        mention = _parse_character(item, group)
-        if mention is not None:
-            characters.append(mention)
-
-    events: list[ChapterEvent] = []
-    for position, item in enumerate(
-        as_list(get_any(payload, _EVENT_KEYS, [])), start=1
-    ):
-        event = _parse_event(item, group, position=position)
-        if event is not None:
-            events.append(event)
+    characters, rejected_characters = collect_items(
+        as_list(get_any(payload, _CHARACTER_KEYS, [])),
+        lambda _, item: _parse_character(item, group),
+    )
+    events, rejected_events = collect_items(
+        as_list(get_any(payload, _EVENT_KEYS, [])),
+        lambda position, item: _parse_event(item, group, position=position),
+    )
 
     return ChapterAnalysis(
         chapter_index=group.index,
@@ -229,6 +226,7 @@ def parse_chapter_analysis(
         summary=summary,
         characters=characters,
         events=events,
+        rejected_count=rejected_characters + rejected_events,
     )
 
 
@@ -265,6 +263,9 @@ def finalize_analysis(document: AnalysisDocument) -> None:
         if chunk_id in referenced
     }
     document.processed_chapter_count = len(document.chapters)
+    document.rejected_count = sum(
+        chapter.rejected_count for chapter in document.chapters
+    )
 
 
 def processed_chapter_keys(document: AnalysisDocument) -> set[tuple[int, str]]:
@@ -390,9 +391,14 @@ def _resolve_evidence(
     *,
     label: str,
 ) -> tuple[Chunk, str]:
-    """The chapter chunk a quote comes from, plus that chunk's own wording for it."""
+    """The chapter chunk a quote comes from, plus that chunk's own wording for it.
+
+    A chapter spans several chunks, so which one an item belongs to is derived
+    from where its quote matches. An item without a usable quote therefore has
+    no chunk to attribute and cannot be built at all.
+    """
     if not evidence:
-        raise ValueError(f"{label} in chapter {group.title} has no evidence")
+        raise EvidenceNotFound(f"{label} in chapter {group.title} has no evidence")
 
     claimed = normalize_text(get_any(item, _CHUNK_ID_KEYS, ""))
     chunk = next(
@@ -408,5 +414,7 @@ def _resolve_evidence(
             chunk,
         )
     if chunk is None:
-        raise ValueError(f"{label} evidence matches no chunk in chapter {group.title}")
+        raise EvidenceNotFound(
+            f"{label} evidence matches no chunk in chapter {group.title}"
+        )
     return chunk, resolve_evidence(evidence, chunk.text, label=label, chunk_id=chunk.id)

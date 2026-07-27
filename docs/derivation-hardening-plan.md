@@ -1,7 +1,7 @@
 # 派生管线加固执行计划
 
 日期：2026-07-27
-状态：**已决策，待实施**
+状态：**三项改动已实施并通过验收**（实测结果见文末「验收」）
 触发：`graph-index` / `analyze` 全量跑不完（见 `docs/mvp-runbook.md`）
 
 本文是 2026-07-27 对「派生管线抛异常终止」的排查结论与执行计划。所有数字来自本机实测（Ollama 0.32.4 + `qwen3:8b`，语料 `corpus/samples/赛博英雄传.txt`），不是估算。
@@ -147,6 +147,8 @@ if slices.Contains(modelCaps, model.CapabilityThinking) {
 
 按 CLAUDE.md「不要为健壮性过度加测试」：**不新增用例**，只改写这 4 个。字符类的两个新字符不单独补测——`test_graph.py:166` 已覆盖「宽松匹配后回读原文」这条语义。
 
+实施时还多改了一处（计划外，但不是新用例）：`tests/test_app.py::test_graph_build_records_versioned_source_fingerprints` 对 `GraphExtractionRecord` 做逐字段 `model_dump()` 全等比对，新增字段必须同步补 `"rejected_count": 0`。
+
 ## 验收
 
 ```sh
@@ -157,12 +159,17 @@ uv run readfellow graph-index --collection smoke     # 期望：跑完 20 个 ch
 uv run readfellow analyze     --collection smoke     # 期望：跑完，0 次 abort
 ```
 
-成功判据：
+成功判据与 2026-07-27 实测结果：
 
-1. `graph-index` 与 `analyze` 在 20 chunk 上**不再中途终止**
-2. 输出里出现 `rejected=N`，且 `graph.json` / `analysis.json` 里有 `rejected_count`
-3. 丢弃率约 7%（实测基线：373 条 quote 里 27 条，7.2%）——显著高于这个数说明改动引入了新问题
-4. 全程无 JSON 解析失败
+| 判据 | 结果 |
+|---|---|
+| `graph-index` / `analyze` 在 20 chunk 上不再中途终止 | ✅ 20/20 chunk、10/10 章全部跑完，0 次 abort |
+| 输出里出现 `rejected=N`，落盘有 `rejected_count` | ✅ `graph.json` 28、`analysis.json` 8 |
+| 丢弃率约 7% | ✅ graph 28/359 = **7.8%**、analysis 8/116 = **6.9%** |
+| 全程无 JSON 解析失败 | ✅ 两条管线各 0 次 retry |
+| `uv run pytest` / `uvx ruff` | ✅ 40 passed；format 与 check 均 clean |
+
+产出规模：图谱 143 实体 / 142 关系，分析 10 章。原先必死的 `bdd935754e17_000001` 现在得到 12 实体 / 14 关系，只丢 1 条。
 
 过了之后再跑全量（`index` 约 12 分钟；`graph-index` 约 7 小时、`analyze` 约 4.5 小时，见 runbook）。
 
