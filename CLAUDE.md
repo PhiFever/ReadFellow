@@ -14,16 +14,18 @@ ReadFellow 是一个本地优先的 CLI 工作流：把长文档（主要是中�
 
 ## 常用命令
 
-Python 相关一律走 `uv`（见 `~/.claude/CLAUDE.md`）。`index` / `search` / `graph-index` 需要本地 Ollama 在 `config.yaml` 配置的端点上运行；测试不需要。
+Python 相关一律走 `uv`（见 `~/.claude/CLAUDE.md`）。除 `fts` / `fetch` / `graph-query` 外都需要本地 Ollama 在 `config.yaml` 配置的端点上运行（`index` / `search` / `hybrid` 要 embedding 模型，`graph-index` / `analyze` 要生成模型）；测试不需要。
 
 ```sh
 uv run readfellow index corpus/samples/<doc>.txt --collection sample --rebuild --limit 8  # 冒烟索引前 8 个 chunk
 uv run readfellow index corpus/samples/<doc>.txt --collection sample --rebuild            # 全量索引
 uv run readfellow search "问题" --collection sample --top-k 5      # 向量检索
 uv run readfellow fts "关键词" --collection sample --top-k 5       # zvec jieba 中文全文检索
+uv run readfellow hybrid "问题" --collection sample --top-k 5      # 向量+FTS+图谱三路融合
 uv run readfellow fetch <chunk-id> --collection sample             # 取回单个 chunk 原文
 uv run readfellow graph-index --collection sample --limit 20       # LLM 抽取实体/关系到 graph.json
 uv run readfellow graph-query "向山" --collection sample           # 按实体/别名/关系关键词查图谱
+uv run readfellow analyze --collection sample --max-chapter 50     # LLM 章节级分析到 analysis.json
 
 # 所有检索命令都支持进度限制：--max-chapter N / --max-line N / --max-chunk-index N
 ```
@@ -82,6 +84,9 @@ uvx ruff format . && uvx ruff check .          # 两者当前都保持 clean
 
 ## 相关文档
 
+- `docs/derivation-hardening-plan.md`（中文）— 2026-07-27 排查出的三个根因（思考模式默认开 / 单条 quote 失败杀死整个 run / 宽松匹配字符类漏 `【】…`）与已决策的三项改动。**动 `graph-index` / `analyze` 前先读它的「不重新讨论的事」。**
+- `docs/mvp-runbook.md`（中文）— 全量跑通示例小说的执行步骤 + 2026-07-27 实测吞吐基线，以及阻塞的现象与根因。
+- `README.md`（中文）— 面向使用者的命令手册：全局参数、8 个子命令、进度限制、故障排查表。
 - `docs/architecture-archive.md`（中文）— 架构不足清单 + 优先级路线图 + graph-index 成本估算 + zvec MCP 边界。优先级 1（app 层）、2（Evidence 模型）、3（graph 加固）、4（hybrid retrieval）均已完成。
 - `docs/module-deepening-plan.md`（中文）— 2026-07-26 架构评审的执行计划。阶段 A（拆 `graph.py`）、B（合并 graph/analysis 孪生管线）、C（补完 zvec seam）均已落地；D/E 与 B3 待触发条件。开工前先读它的「不重新讨论的事」。
 - `.codex/skills/readfellow/SKILL.md` — 面向使用者的检索/引用/防剧透规则，回答用户关于语料内容的问题时按它执行。
