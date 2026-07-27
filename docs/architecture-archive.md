@@ -465,3 +465,24 @@ CLI 应只负责解析参数、调用这些模块并格式化输出。
 - 索引仍不是原子发布：embedding 中途失败会留下 metadata 完整而 collection 不完整的状态。seam 让这件事**变得可修**（`upsert` + `commit` 已经是两阶段的形状），但本轮没有动。
 
 下一步：阶段 D（ReadingWindow）与阶段 E 均为触发条件驱动，暂不启动。
+
+## 2026-07-27 图谱通道降级为标注
+
+`hybrid` 从 vector / FTS / graph 三路 RRF 融合改为**两路打分 + 图谱标注**。详细论证与实测见 `docs/graph-channel-demotion.md`。
+
+**为什么**：`graph._matches_entity` 按 `needle in value` 匹配，要求查询串是实体名的子串，而 `hybrid` 把用户原始问句整个喂了进去——`graph-query "基因税"` 命中，`"基因税是什么"` 返回空。三路融合在真实提问上长期只有两路在跑。
+
+两个修法都被实测否决：切词取并集需要一份自己维护的中文停用词表（`的` 在 1580 实体的部分图谱上命中 832 个实体、1160 条关系，而目标「基因税」只命中 4 个），且 `jieba` 是全新依赖、zvec 不暴露分词 API；实体桥接则撞上一条硬约束——**桥接产出量与实体区分度互为倒数**（尤基覆盖 53.8% 的已处理 chunk，全量外推约 1241 块；而 79.5% 的实体只跨 1 个 chunk，桥接产出为零）。两者缺的是同一样东西：按语料内稀有度加权的选择函数，而 FTS 通道的 BM25 已经免费提供了它。
+
+**做了什么**：新增 `graph.annotate_chunks`（给定 chunk id 返回挂在其上的实体/关系，走同一套进度过滤）与 `app._annotate_with_graph`；`app._load_graph` 收拢 `query_graph` 与标注路径共用的加载+staleness 校验；`_context_by_chunk` 从 `_graph_evidence` 抽出，`query=None` 即标注语义。`ChannelMode` 与 `EvidenceMatch.mode` 收窄为 `vector | fts`。
+
+**刻意没做**：
+
+- **没改 `graph-query`**。它是关键词工具，子串匹配是它的正确语义，输出逐字不变。
+- **没改 RRF 参数**。等权、`RRF_K=60` 不进 config 的决定沿用 `hybrid-retrieval-mvp.md`。
+- **没修实体抽取噪声**（整句话、对白、`一个人`/`世界` 这类泛化词被抽成实体）。改 prompt 要 bump `GRAPH_PROMPT_VERSION` 并整图重建，等全量 `graph-index` 跑完有完整样本再一次性评估。
+- **没修 `graph.json` 的非原子写**。`write_json_document` 直接 `write_text`，全量约 17 MB，并发读有概率拿到截断 JSON。既有行为，与「索引不是原子发布」同类。
+
+**验证**：`uv run pytest` 42 passed（净 +2）、ruff clean。全量 `sample` 上（`graph-index` 运行中）`hybrid "尤基的父亲是怎么死的"` 得到 `3/3 results annotated`，`--max-chapter 3` 时标注全部来自第一章、无越界。
+
+下一步：等全量 `graph-index` / `analyze` 出完整产物后评估实体抽取质量。阶段 D / E 仍为触发条件驱动。

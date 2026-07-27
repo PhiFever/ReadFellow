@@ -48,7 +48,7 @@ uv run readfellow search "尤基的父亲" --collection smoke --top-k 2
 # 3) 中文全文检索
 uv run readfellow fts "回收站镇" --collection smoke --top-k 2
 
-# 4) 三路融合检索
+# 4) 融合检索（向量+全文打分，图谱标注）
 uv run readfellow hybrid "基因税" --collection smoke --top-k 3
 
 # 5) 按 id 取回单个 chunk 原文
@@ -105,16 +105,23 @@ uv run readfellow index <文档.txt> --collection sample --rebuild
 ```sh
 uv run readfellow search "要查询的问题" --collection sample --top-k 5   # 向量语义
 uv run readfellow fts    "关键词"       --collection sample --top-k 5   # zvec jieba 中文全文
-uv run readfellow hybrid "问题或关键词" --collection sample --top-k 5   # 向量+全文+图谱融合
+uv run readfellow hybrid "问题或关键词" --collection sample --top-k 5   # 向量+全文融合，图谱做标注
 ```
 
-`hybrid` 会先打印各通道的候选数，某通道不可用时说明原因（例如图谱尚未构建）：
+`hybrid` 用向量和全文两路打分，融合后再用图谱标注选中的结果：
 
 ```
-channels: vector=12, fts=7, graph=0
+channels: vector=12, fts=7
+graph context: 3/5 results annotated
 ```
 
-命中项带 `matched: vector#1, fts#3`，标明它在各通道的排名。
+命中项带 `matched: vector#1, fts#3`，标明它在两条打分通道里的排名；带图谱标注的还会多出 `graph entities:` 与 `graph relation:` 行。
+
+**图谱不参与打分,只做标注**。它按子串匹配查询串（见 3.5），自然语言问句几乎不可能匹配到实体名，所以曾经的图谱召回通道对真实提问长期是空的；而它能产出结果的高频实体（主角出现在过半 chunk 里）又恰恰没有区分度。标注不查询、只回答「这个 chunk 上挂着什么」，因此对任何提问都有效。图谱缺失或 stale 时只丢标注，两路打分照常返回：
+
+```
+graph context: skipped (graph index not found: ...; run graph-index first)
+```
 
 ### 3.4 `fetch` — 按 id 取回原文
 

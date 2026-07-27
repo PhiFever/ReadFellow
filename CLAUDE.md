@@ -21,7 +21,7 @@ uv run readfellow index corpus/samples/<doc>.txt --collection sample --rebuild -
 uv run readfellow index corpus/samples/<doc>.txt --collection sample --rebuild            # 全量索引
 uv run readfellow search "问题" --collection sample --top-k 5      # 向量检索
 uv run readfellow fts "关键词" --collection sample --top-k 5       # zvec jieba 中文全文检索
-uv run readfellow hybrid "问题" --collection sample --top-k 5      # 向量+FTS+图谱三路融合
+uv run readfellow hybrid "问题" --collection sample --top-k 5      # 向量+FTS 两路融合，图谱标注结果
 uv run readfellow fetch <chunk-id> --collection sample             # 取回单个 chunk 原文
 uv run readfellow graph-index --collection sample --limit 20       # LLM 抽取实体/关系到 graph.json
 uv run readfellow graph-query "向山" --collection sample           # 按实体/别名/关系关键词查图谱
@@ -69,6 +69,7 @@ uvx ruff format . && uvx ruff check .          # 两者当前都保持 clean
 - **`optimize()` 不能随便跳**。`--no-optimize` 只用于测写入速度；不 optimize 时持久化的中文 FTS 重开后可能查不到。
 - **进度过滤有两条路径**，新入口必须两边都走：`ProgressFilter` 整体传给 `ChunkStore`（zvec adapter 用它的 `expression`）、进程内则用 `ProgressFilter.allows(fields)`（graph、fetch 走后者）。`ChunkStore.fetch` **不施加进度限制**——因为只有它要区分「没这个 chunk」和「还没读到」；`fetch_chunk` 拿到 Evidence 后自己判，返回 `found` / `not_found` / `outside_progress` 三态，越界时**不带 text**。
 - **graph 在进度限制下会清空 `aliases` 与 `types`**（`graph._filter_entity`）——因为它们是跨 chunk 聚合、没有逐值 provenance。不要为了"信息更全"把这个行为改掉。
+- **图谱在 `hybrid` 里只标注、不打分**（`app._annotate_with_graph` → `graph.annotate_chunks`）。融合只有 vector 和 FTS 两路，取 `top_k` 之后才用图谱给选中的 chunk 挂上实体与关系。不要把它改回召回通道：`query_graph` 按子串匹配（`needle in value`），自然语言问句匹配不到实体名；而唯一能大量命中的高频实体（主角覆盖过半 chunk）没有区分度——**桥接产出量与实体区分度互为倒数**。理由与实测见 `docs/graph-channel-demotion.md`。
 - **抽取出的 evidence 必须是所属 chunk 原文的精确子串**（`extraction._LOOSE_IN_EVIDENCE` 允许空白/引号/`…`/`【】`的差异，随后按偏移回读原文）。对不上的**单个条目**被丢弃并计入 `rejected_count`（`extraction.EvidenceNotFound` + `collect_items`），不再终止整个 unit；**文档级失败（JSON 解析不了、缺 `summary`）仍然抛出并触发重试**——这条边界不要模糊。派生物因此是真实但不完整的子集，实测约丢 7%。关系名走 `RELATION_TYPES` 白名单 + `_RELATION_ALIASES` 归一，白名单外的关系在证据校验之前就被静默丢弃（防止"相关""有关"这类泛化边），**不计入 `rejected_count`**。
 - **改 prompt 必须 bump `GRAPH_PROMPT_VERSION`**（改图谱结构则 bump `GRAPH_SCHEMA_VERSION`）。`graph_staleness_reason` 会比对 schema/prompt 版本、生成模型、extraction settings、每个已处理 chunk 的 source/text hash 与位置；stale 时 `graph-index` 整图重建、`graph-query` 直接报错。仅新增 chunk 时是断点续建（`processed_chunk_ids`）。
 - **`_validate_chunk_metadata_source`** 在 graph 路径上先校验 `chunks.jsonl` 的 source path 与源文件当前 hash，源文件被改过就要求重新 index。它被 `app._load_indexed_source` 包住——凡是要读 `chunks.jsonl` 的入口都走这个函数，别再单独 `read_chunks`。
@@ -88,6 +89,7 @@ uvx ruff format . && uvx ruff check .          # 两者当前都保持 clean
 - `docs/mvp-runbook.md`（中文）— 全量跑通示例小说的执行步骤 + 2026-07-27 实测吞吐基线。
 - `README.md`（中文）— 面向使用者的命令手册：全局参数、8 个子命令、进度限制、故障排查表。
 - `docs/architecture-archive.md`（中文）— 架构不足清单 + 优先级路线图 + graph-index 成本估算 + zvec MCP 边界。优先级 1（app 层）、2（Evidence 模型）、3（graph 加固）、4（hybrid retrieval）均已完成。
+- `docs/graph-channel-demotion.md`（中文）— 2026-07-27 把图谱从 hybrid 的打分通道降级为结果标注的论证与实测。**想把图谱改回召回通道前先读它的「不重新讨论的事」。**
 - `docs/module-deepening-plan.md`（中文）— 2026-07-26 架构评审的执行计划。阶段 A（拆 `graph.py`）、B（合并 graph/analysis 孪生管线）、C（补完 zvec seam）均已落地；D/E 与 B3 待触发条件。开工前先读它的「不重新讨论的事」。
 - `.codex/skills/readfellow/SKILL.md` — 面向使用者的检索/引用/防剧透规则，回答用户关于语料内容的问题时按它执行。
 - `AGENTS.md` — 仓库约定（源文档不可变、产物目录、provenance 字段要求、uv 工作流）与 zvec 能力背景。

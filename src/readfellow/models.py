@@ -116,7 +116,9 @@ class EvidenceGraphContext(ReadFellowModel):
 class EvidenceMatch(ReadFellowModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    mode: Literal["vector", "fts", "graph"]
+    # Only the channels that are scored and ranked. The graph annotates the
+    # results the other two found; it never contributes a rank of its own.
+    mode: Literal["vector", "fts"]
     rank: int
 
 

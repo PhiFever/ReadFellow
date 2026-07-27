@@ -34,6 +34,7 @@ from .derivation import (
     load_or_reset,
 )
 from .graph import (
+    annotate_chunks,
     build_extraction_prompt,
     empty_graph,
     graph_path,
@@ -57,6 +58,7 @@ from .models import (
     EvidenceMatch,
     GraphQueryResult,
     IndexManifest,
+    KnowledgeGraph,
     ProgressFilter,
 )
 from .ollama import OllamaEmbedder, OllamaGenerator
@@ -74,7 +76,7 @@ from .store import (
 RRF_K = 60
 FAN_OUT_MULTIPLIER = 10
 
-ChannelMode = Literal["vector", "fts", "graph"]
+ChannelMode = Literal["vector", "fts"]
 
 
 @dataclass(frozen=True)
@@ -172,6 +174,11 @@ class GraphSearchResult:
 class ChannelStatus:
     mode: ChannelMode
     candidates: int
+
+
+@dataclass(frozen=True)
+class GraphAnnotationStatus:
+    annotated: int
     skipped_reason: str | None = None
 
 
@@ -179,6 +186,7 @@ class ChannelStatus:
 class HybridSearchResult:
     progress: ProgressFilter
     channels: list[ChannelStatus]
+    graph_annotation: GraphAnnotationStatus
     evidence: list[Evidence]
 
 
@@ -733,6 +741,20 @@ def query_graph(
     *,
     progress: ProgressLimit | None = None,
 ) -> GraphSearchResult:
+    graph, all_chunks, progress_filter = _load_graph(config, collection, progress)
+    graph_result = query_knowledge_graph(graph, query, progress=progress_filter)
+    chunks = [chunk for chunk in all_chunks if progress_filter.allows(chunk)]
+    return GraphSearchResult(
+        progress=progress_filter,
+        evidence=_graph_evidence(graph_result, chunks, query=query),
+    )
+
+
+def _load_graph(
+    config: ReadFellowConfig,
+    collection: str,
+    progress: ProgressLimit | None,
+) -> tuple[KnowledgeGraph, list[Chunk], ProgressFilter]:
     manifest, all_chunks, progress_filter = _load_indexed_source(
         config, collection, progress
     )
@@ -751,13 +773,7 @@ def query_graph(
         raise RuntimeError(
             f"graph index is stale ({stale_reason}); run graph-index to rebuild it"
         )
-
-    graph_result = query_knowledge_graph(graph, query, progress=progress_filter)
-    chunks = [chunk for chunk in all_chunks if progress_filter.allows(chunk)]
-    return GraphSearchResult(
-        progress=progress_filter,
-        evidence=_graph_evidence(graph_result, chunks, query=query),
-    )
+    return graph, all_chunks, progress_filter
 
 
 def hybrid_search(
@@ -780,31 +796,53 @@ def hybrid_search(
         config, query, collection, top_k=fan_out, progress=progress, store=store
     )
 
-    graph_evidence: list[Evidence] = []
-    skipped_reason: str | None = None
-    try:
-        graph_result = query_graph(config, query, collection, progress=progress)
-    except (FileNotFoundError, RuntimeError) as exc:
-        skipped_reason = str(exc)
-    else:
-        graph_evidence = _rank_graph_evidence(graph_result.evidence)[:fan_out]
-
     channels: list[tuple[ChannelMode, list[Evidence]]] = [
         ("vector", vector_result.evidence),
         ("fts", fts_result.evidence),
-        ("graph", graph_evidence),
     ]
+    evidence, annotation = _annotate_with_graph(
+        _fuse_channels(channels)[:limit], config, collection, progress=progress
+    )
     return HybridSearchResult(
         progress=vector_result.progress,
         channels=[
-            ChannelStatus(
-                mode=mode,
-                candidates=len(items),
-                skipped_reason=skipped_reason if mode == "graph" else None,
-            )
-            for mode, items in channels
+            ChannelStatus(mode=mode, candidates=len(items)) for mode, items in channels
         ],
-        evidence=_fuse_channels(channels)[:limit],
+        graph_annotation=annotation,
+        evidence=evidence,
+    )
+
+
+def _annotate_with_graph(
+    evidence: list[Evidence],
+    config: ReadFellowConfig,
+    collection: str,
+    *,
+    progress: ProgressLimit | None,
+) -> tuple[list[Evidence], GraphAnnotationStatus]:
+    """The same results, carrying whatever the graph recorded about them.
+
+    The graph is a derivative, so a missing or stale one costs the annotation
+    and nothing else — the two scored channels already stand on the chunks
+    themselves.
+    """
+    try:
+        graph, _, progress_filter = _load_graph(config, collection, progress)
+    except (FileNotFoundError, RuntimeError) as exc:
+        return evidence, GraphAnnotationStatus(annotated=0, skipped_reason=str(exc))
+
+    context_by_chunk = _context_by_chunk(
+        annotate_chunks(
+            graph, [item.chunk_id for item in evidence], progress=progress_filter
+        ),
+        query=None,
+    )
+    annotated = [
+        item.model_copy(update={"graph_context": context_by_chunk.get(item.chunk_id)})
+        for item in evidence
+    ]
+    return annotated, GraphAnnotationStatus(
+        annotated=sum(1 for item in annotated if item.graph_context is not None)
     )
 
 
@@ -900,20 +938,22 @@ def _relative_source_path(source: Path) -> str:
         return str(source.resolve())
 
 
-def _graph_evidence(
+def _context_by_chunk(
     result: GraphQueryResult,
-    chunks: list[Chunk],
     *,
-    query: str,
-) -> list[Evidence]:
-    context_by_chunk: dict[str, tuple[set[str], set[str]]] = {}
+    query: str | None,
+) -> dict[str, EvidenceGraphContext]:
+    """Per chunk, the graph items anchored to it.
 
-    def context_for(chunk_id: str) -> tuple[set[str], set[str]]:
-        return context_by_chunk.setdefault(chunk_id, (set(), set()))
+    A `query` narrows an entity down to the places it actually matched, which is
+    what a graph query wants to show. Passing None keeps every anchor, which is
+    what annotating an already-retrieved chunk wants.
+    """
+    entities_by_chunk: defaultdict[str, set[str]] = defaultdict(set)
+    relations_by_chunk: defaultdict[str, set[str]] = defaultdict(set)
 
     for relation in result.relations:
-        entities, relations = context_for(relation.chunk_id)
-        entities.update(
+        entities_by_chunk[relation.chunk_id].update(
             value
             for value in (
                 relation.subject_entity or relation.subject,
@@ -921,58 +961,59 @@ def _graph_evidence(
             )
             if value
         )
-        relations.add(f"{relation.subject} --{relation.relation}--> {relation.object}")
+        relations_by_chunk[relation.chunk_id].add(
+            f"{relation.subject} --{relation.relation}--> {relation.object}"
+        )
 
-    needle = query.strip().casefold()
+    needle = None if query is None else query.strip().casefold()
     for entity in result.entities:
-        identity_values = [entity.name, *entity.aliases, *entity.types]
-        if any(needle in value.casefold() for value in identity_values):
-            matching_contexts = [*entity.mentions, *entity.evidence]
+        if needle is None or any(
+            needle in value.casefold()
+            for value in (entity.name, *entity.aliases, *entity.types)
+        ):
+            anchors = [*entity.mentions, *entity.evidence]
         else:
-            matching_contexts = [
+            anchors = [
                 item for item in entity.evidence if needle in item.text.casefold()
             ]
-        for item in matching_contexts:
+        for item in anchors:
             if item.chunk_id:
-                entities, _ = context_for(item.chunk_id)
-                entities.add(entity.name)
+                entities_by_chunk[item.chunk_id].add(entity.name)
 
-    evidence: list[Evidence] = []
-    for chunk in chunks:
-        context = context_by_chunk.get(chunk.id)
-        if context is None:
-            continue
-        entities, relations = context
-        evidence.append(
-            Evidence(
-                chunk_id=chunk.id,
-                source_path=chunk.source_path,
-                chunk_index=chunk.chunk_index,
-                line_start=chunk.line_start,
-                line_end=chunk.line_end,
-                byte_start=chunk.byte_start,
-                byte_end=chunk.byte_end,
-                chapter=chunk.chapter,
-                text_hash=chunk.text_hash,
-                text=chunk.text,
-                retrieval_mode="graph",
-                graph_context=EvidenceGraphContext(
-                    entities=sorted(entities),
-                    relations=sorted(relations),
-                ),
-            )
+    return {
+        chunk_id: EvidenceGraphContext(
+            entities=sorted(entities_by_chunk.get(chunk_id, ())),
+            relations=sorted(relations_by_chunk.get(chunk_id, ())),
         )
-    return evidence
+        for chunk_id in {*entities_by_chunk, *relations_by_chunk}
+    }
 
 
-def _rank_graph_evidence(evidence: list[Evidence]) -> list[Evidence]:
-    def rank_key(item: Evidence) -> tuple[int, int, int]:
-        context = item.graph_context
-        relations = len(context.relations) if context is not None else 0
-        entities = len(context.entities) if context is not None else 0
-        return (-relations, -entities, item.chunk_index)
-
-    return sorted(evidence, key=rank_key)
+def _graph_evidence(
+    result: GraphQueryResult,
+    chunks: list[Chunk],
+    *,
+    query: str,
+) -> list[Evidence]:
+    context_by_chunk = _context_by_chunk(result, query=query)
+    return [
+        Evidence(
+            chunk_id=chunk.id,
+            source_path=chunk.source_path,
+            chunk_index=chunk.chunk_index,
+            line_start=chunk.line_start,
+            line_end=chunk.line_end,
+            byte_start=chunk.byte_start,
+            byte_end=chunk.byte_end,
+            chapter=chunk.chapter,
+            text_hash=chunk.text_hash,
+            text=chunk.text,
+            retrieval_mode="graph",
+            graph_context=context_by_chunk[chunk.id],
+        )
+        for chunk in chunks
+        if chunk.id in context_by_chunk
+    ]
 
 
 def _fuse_channels(
@@ -980,32 +1021,24 @@ def _fuse_channels(
 ) -> list[Evidence]:
     scores: defaultdict[str, float] = defaultdict(float)
     matches: defaultdict[str, list[EvidenceMatch]] = defaultdict(list)
-    stored_docs: dict[str, Evidence] = {}
-    graph_docs: dict[str, Evidence] = {}
+    docs: dict[str, Evidence] = {}
 
     for mode, items in channels:
         for rank, item in enumerate(items, start=1):
             scores[item.chunk_id] += 1.0 / (RRF_K + rank)
             matches[item.chunk_id].append(EvidenceMatch(mode=mode, rank=rank))
-            target = graph_docs if mode == "graph" else stored_docs
-            target.setdefault(item.chunk_id, item)
+            docs.setdefault(item.chunk_id, item)
 
-    fused: list[Evidence] = []
-    for chunk_id, score in scores.items():
-        graph_hit = graph_docs.get(chunk_id)
-        base = stored_docs.get(chunk_id) or graph_docs[chunk_id]
-        fused.append(
-            base.model_copy(
-                update={
-                    "retrieval_mode": "hybrid",
-                    "score": score,
-                    "matches": matches[chunk_id],
-                    "graph_context": graph_hit.graph_context
-                    if graph_hit is not None
-                    else None,
-                }
-            )
+    fused = [
+        docs[chunk_id].model_copy(
+            update={
+                "retrieval_mode": "hybrid",
+                "score": score,
+                "matches": matches[chunk_id],
+            }
         )
+        for chunk_id, score in scores.items()
+    ]
     fused.sort(key=lambda item: (-(item.score or 0.0), item.chunk_index))
     return fused
 

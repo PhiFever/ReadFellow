@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -420,6 +420,42 @@ def query_graph(
         if filtered is None:
             continue
         if _matches_entity(filtered, needle) or filtered.name in relation_entities:
+            entities.append(filtered)
+
+    return GraphQueryResult(entities=entities, relations=relations)
+
+
+def annotate_chunks(
+    graph: KnowledgeGraph,
+    chunk_ids: Collection[str],
+    *,
+    progress: ProgressFilter | None = None,
+) -> GraphQueryResult:
+    """What the graph knows about the given chunks, independent of any query.
+
+    A query asks the graph which chunks to go read. This asks the opposite: the
+    chunks are already chosen, and the graph only says what it recorded there.
+    The reading limit still applies — an entity name is as much of a spoiler as
+    the text it was extracted from.
+    """
+    wanted = set(chunk_ids)
+    if not wanted:
+        return GraphQueryResult()
+
+    relations = [
+        relation.model_copy(deep=True)
+        for relation in graph.relations
+        if relation.chunk_id in wanted and _allowed(progress, relation)
+    ]
+
+    entities: list[GraphEntity] = []
+    for entity in graph.entities:
+        filtered = _filter_entity(entity, progress)
+        if filtered is None:
+            continue
+        if any(
+            item.chunk_id in wanted for item in (*filtered.mentions, *filtered.evidence)
+        ):
             entities.append(filtered)
 
     return GraphQueryResult(entities=entities, relations=relations)

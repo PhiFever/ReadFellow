@@ -3,6 +3,8 @@
 日期：2026-07-26
 状态：**已实施**（「决策」以上部分写于动手之前，末尾「实施结果」为事后追加）
 
+> **2026-07-27 部分被取代**：图谱已从打分通道降级为结果标注，融合只剩 vector / FTS 两路。本文档中与 graph 参与 RRF 相关的部分（决策 3「graph 路的名次」、决策 6/7 的通道跳过语义、字段合并规则第 2/3 条）**记录的是当时的决策，不再是现状**；其余部分仍然有效。理由与实测见 `docs/graph-channel-demotion.md`。
+
 本文档归档一次 grilling 会话的结论：实现 `docs/architecture-archive.md` 路线图的**优先级 4 —— hybrid retrieval**。目标是把现有的 vector / FTS / graph 三路检索按 chunk id 合并后统一排序，返回单一的 evidence 列表。
 
 不在范围内：重型 GraphRAG、二次 rerank（cross-encoder / LLM rerank）、评估集（那是优先级 5）、MCP 暴露。

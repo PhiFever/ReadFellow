@@ -9,6 +9,7 @@ from .app import (
     AnalysisBuildEvent,
     AnalysisBuildOptions,
     ChannelStatus,
+    GraphAnnotationStatus,
     GraphBuildEvent,
     GraphBuildOptions,
     IndexDocumentOptions,
@@ -273,6 +274,7 @@ def command_hybrid(args: argparse.Namespace, config: ReadFellowConfig) -> int:
     )
     print_progress(result.progress)
     print_channels(result.channels)
+    print_graph_annotation(result.graph_annotation, results=len(result.evidence))
     print_evidence(result.evidence)
     return 0
 
@@ -518,13 +520,18 @@ def print_progress(progress: ProgressFilter) -> None:
 
 
 def print_channels(channels: list[ChannelStatus]) -> None:
-    parts = [
-        f"{channel.mode}=skipped ({channel.skipped_reason})"
-        if channel.skipped_reason is not None
-        else f"{channel.mode}={channel.candidates}"
-        for channel in channels
-    ]
+    parts = [f"{channel.mode}={channel.candidates}" for channel in channels]
     print("channels: " + ", ".join(parts), file=sys.stderr)
+
+
+def print_graph_annotation(annotation: GraphAnnotationStatus, *, results: int) -> None:
+    if annotation.skipped_reason is not None:
+        print(f"graph context: skipped ({annotation.skipped_reason})", file=sys.stderr)
+        return
+    print(
+        f"graph context: {annotation.annotated}/{results} results annotated",
+        file=sys.stderr,
+    )
 
 
 def config_path_from_argv(argv: list[str] | None) -> Path:

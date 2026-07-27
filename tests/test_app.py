@@ -897,11 +897,96 @@ def test_hybrid_ranks_multi_channel_agreement_above_a_single_channel_top_hit(
     ]
 
 
+def test_hybrid_annotates_results_a_graph_query_could_never_have_matched(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    config, _, chunks = hybrid_workspace(tmp_path)
+    build_graph(
+        config,
+        "books",
+        options=GraphBuildOptions(retries=0),
+        generator=DeterministicGenerator(
+            [
+                {
+                    "entities": [
+                        {"name": "向山", "type": "人物", "evidence": "向山帮助了尤基"}
+                    ],
+                    "relations": [
+                        {
+                            "subject": "向山",
+                            "relation": "帮助",
+                            "object": "尤基",
+                            "evidence": "向山帮助了尤基",
+                        }
+                    ],
+                }
+            ]
+        ),
+    )
+    store = stub_channels(
+        monkeypatch,
+        vector_hits=[hybrid_hit(chunks[0].id, 0, retrieval_mode="vector")],
+        fts_hits=[hybrid_hit(chunks[0].id, 0, retrieval_mode="fts")],
+    )
+    question = "向山对尤基做了什么"
+
+    # The graph query matches by substring, so a question never hits an entity.
+    assert query_graph(config, question, "books").evidence == []
+
+    result = hybrid_search(config, question, "books", store=store)
+
+    assert result.graph_annotation.annotated == 1
+    assert result.graph_annotation.skipped_reason is None
+    context = result.evidence[0].graph_context
+    assert context is not None
+    assert context.entities == ["向山", "尤基"]
+    assert context.relations == ["向山 --帮助--> 尤基"]
+
+
+def test_hybrid_annotation_obeys_the_reading_progress(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    config, _, chunks = hybrid_workspace(tmp_path)
+    build_graph(
+        config,
+        "books",
+        options=GraphBuildOptions(retries=0),
+        generator=DeterministicGenerator(
+            [
+                {
+                    "entities": [
+                        {"name": "向山", "type": "人物", "evidence": "向山帮助了尤基"}
+                    ],
+                    "relations": [],
+                }
+            ]
+        ),
+    )
+    store = stub_channels(
+        monkeypatch,
+        vector_hits=[hybrid_hit(chunks[0].id, 0, retrieval_mode="vector")],
+        fts_hits=[],
+    )
+
+    result = hybrid_search(
+        config,
+        "向山对尤基做了什么",
+        "books",
+        store=store,
+        progress=ProgressLimit(max_line=1),
+    )
+
+    assert result.graph_annotation.annotated == 0
+    assert result.evidence[0].graph_context is None
+
+
 @pytest.mark.parametrize(
     ("graph_state", "expected_reason"),
     [("missing", "graph index not found"), ("stale", "graph index is stale")],
 )
-def test_hybrid_skips_the_graph_channel_and_reports_why(
+def test_hybrid_skips_the_graph_annotation_and_reports_why(
     monkeypatch,
     tmp_path: Path,
     graph_state: str,
@@ -951,16 +1036,12 @@ def test_hybrid_skips_the_graph_channel_and_reports_why(
     result = hybrid_search(config, "向山", "books", store=store)
 
     assert [item.chunk_id for item in result.evidence] == ["chunk_a"]
-    assert [
-        (channel.mode, channel.candidates, channel.skipped_reason is None)
-        for channel in result.channels
-        if channel.mode != "graph"
-    ] == [("vector", 1, True), ("fts", 1, True)]
-    graph_channel = next(
-        channel for channel in result.channels if channel.mode == "graph"
-    )
-    assert graph_channel.candidates == 0
-    assert expected_reason in (graph_channel.skipped_reason or "")
+    assert [(channel.mode, channel.candidates) for channel in result.channels] == [
+        ("vector", 1),
+        ("fts", 1),
+    ]
+    assert result.graph_annotation.annotated == 0
+    assert expected_reason in (result.graph_annotation.skipped_reason or "")
 
 
 def test_hybrid_fails_when_the_embedding_service_is_down(
