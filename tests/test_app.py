@@ -54,13 +54,18 @@ def manifest_for(source: Path) -> IndexManifest:
 
 
 class DeterministicGenerator:
-    def __init__(self, responses: list[dict[str, object]]) -> None:
+    """Canned answers. A `str` is returned verbatim, so it can be unparsable."""
+
+    def __init__(self, responses: list[dict[str, object] | str]) -> None:
         self._responses = iter(responses)
         self.prompts: list[str] = []
 
-    def generate_json(self, prompt: str) -> str:
+    def generate_json(self, prompt: str, schema: dict[str, object]) -> str:
         self.prompts.append(prompt)
-        return json.dumps(next(self._responses), ensure_ascii=False)
+        response = next(self._responses)
+        if isinstance(response, str):
+            return response
+        return json.dumps(response, ensure_ascii=False)
 
 
 class InMemoryChunkStore:
@@ -205,7 +210,12 @@ def test_graph_build_records_versioned_source_fingerprints(
         }
     }
     assert graph.extraction_settings.model_dump() == {
-        "temperature": 0.0,
+        "temperature": 0.7,
+        "top_p": 0.8,
+        "top_k": 20,
+        "min_p": 0.0,
+        "presence_penalty": 1.5,
+        "repeat_penalty": 1.08,
         "num_predict": config.graph.num_predict,
         "num_ctx": config.ollama.num_ctx,
         "retries": 0,
@@ -320,6 +330,59 @@ def test_graph_build_drops_evidence_that_is_not_source_grounded(
     assert len(generator.prompts) == 1
     assert [relation.evidence for relation in graph.relations] == ["向山帮助了尤基"]
     assert graph.rejected_count == 1
+
+
+def test_graph_build_survives_a_chunk_it_cannot_parse(tmp_path: Path) -> None:
+    source = tmp_path / "novel.txt"
+    source.write_text(
+        "第一章 开始\n\n向山帮助了尤基。\n\n尤基认识向山。\n", encoding="utf-8"
+    )
+    chunks = chunk_document(
+        source,
+        source_path=str(source),
+        target_chars=12,
+        overlap_chars=0,
+    )
+    assert len(chunks) > 1
+    config = ReadFellowConfig(
+        paths=PathConfig(
+            index_dir=tmp_path / "indexes",
+            metadata_dir=tmp_path / "metadata",
+        )
+    )
+    write_manifest(
+        metadata_dir=config.paths.metadata_dir,
+        collection="books",
+        manifest=manifest_for(source),
+        chunks=chunks,
+    )
+    answer: dict[str, object] = {"entities": [{"name": "向山", "type": "人物"}]}
+    generator = DeterministicGenerator(['{"entities": [{"name":', *[answer] * 9])
+
+    result = build_graph(
+        config,
+        "books",
+        options=GraphBuildOptions(retries=0),
+        generator=generator,
+    )
+
+    assert result.failed_chunk_count == 1
+    assert len(generator.prompts) == len(chunks)
+    graph = read_graph(result.graph_path)
+    assert [record.chunk_id for record in graph.extractions] == [
+        chunk.id for chunk in chunks[1:]
+    ]
+
+    # The chunk was skipped, not recorded as empty, so it is still pending.
+    retry = build_graph(
+        config,
+        "books",
+        options=GraphBuildOptions(retries=0),
+        generator=DeterministicGenerator([answer]),
+    )
+
+    assert retry.failed_chunk_count == 0
+    assert len(read_graph(retry.graph_path).extractions) == len(chunks)
 
 
 def test_changed_chunk_metadata_invalidates_queries_and_rebuilds_graph(

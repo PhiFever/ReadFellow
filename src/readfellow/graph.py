@@ -51,6 +51,15 @@ ANNOTATION_MAX_RELATIONS = 3
 # dropped items 6.9%–9.0%, silent chunks 0% everywhere. Another book or another
 # model moves all three, so a flagged number means "go look", not "this run is
 # void". Read-side only: not persisted, not part of the staleness fingerprint.
+#
+# The dropped-item range predates `collect_items` counting shape failures, so it
+# only ever measured evidence that was not in its chunk. It now also counts what
+# used to vanish silently, and the largest such class by far is a relation whose
+# predicate is outside RELATION_TYPES: 36% of 401 relations over 40 chunks, once
+# _RELATION_ALIASES absorbs the synonyms. That share is mostly the vocabulary
+# refusing narration rather than a defect, so the reported number will sit well
+# above this threshold by design. The number is honest; the reference is stale
+# and wants remeasuring against a full run before it means anything again.
 MIN_DECLARED_ENTITY_SHARE = 0.35
 MAX_DROPPED_ITEM_SHARE = 0.20
 MAX_SILENT_CHUNK_SHARE = 0.05
@@ -100,18 +109,47 @@ _TYPE_ALIASES = MappingProxyType(
     }
 )
 
+# Synonyms only. A 40-chunk survey of what qwen3:8b asks for found 156 distinct
+# predicates outside RELATION_TYPES, 146 of them used exactly once — 哼歌,
+# 推开门, 碎裂, and bare particles like 被 and 由. That tail is the model
+# narrating rather than naming a relation, and dropping it is the vocabulary
+# working. Only predicates that mean an existing type belong here; anything
+# needing a direction flip (被攻击) or a wider reading (使用 as 拥有) does not.
 _RELATION_ALIASES = MappingProxyType(
     {
         "参加": "参与事件",
         "参与": "参与事件",
         "参与了": "参与事件",
+        "并肩作战": "参与事件",
+        "执行": "参与事件",
         "别名": "别名是",
         "化名": "别名是",
         "身份": "身份是",
         "说": "说过",
         "说过": "说过",
+        "说道": "说过",
+        "叫道": "说过",
+        "说话": "说过",
+        "讲述": "说过",
         "造成": "导致",
         "引发": "导致",
+        "触发": "导致",
+        "存在于": "位于",
+        "潜伏于": "位于",
+        "镶嵌在": "位于",
+        "汇合于": "位于",
+        "占据": "位于",
+        "持有": "拥有",
+        "包含": "拥有",
+        "具有": "拥有",
+        "缴获了": "拥有",
+        "取得": "拥有",
+        "摧毁": "伤害",
+        "斩杀": "伤害",
+        "破坏": "伤害",
+        "反对": "敌对",
+        "抵抗": "敌对",
+        "本质上是": "是",
     }
 )
 
@@ -241,6 +279,43 @@ def graph_staleness_reason(
         ):
             return "graph source chunk metadata changed"
     return None
+
+
+# The shape half of the prompt, in the form Ollama can constrain decoding with.
+# The prompt still spells the schema out in prose because it also has to carry
+# the type vocabularies and the evidence rule, which a JSON schema cannot say.
+GRAPH_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "entities": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "type": {"type": "string"},
+                    "aliases": {"type": "array", "items": {"type": "string"}},
+                    "evidence": {"type": "string"},
+                },
+                "required": ["name", "type", "evidence"],
+            },
+        },
+        "relations": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "subject": {"type": "string"},
+                    "relation": {"type": "string"},
+                    "object": {"type": "string"},
+                    "evidence": {"type": "string"},
+                },
+                "required": ["subject", "relation", "object", "evidence"],
+            },
+        },
+    },
+    "required": ["entities", "relations"],
+}
 
 
 def build_extraction_prompt(chunk: Chunk | ChunkContext | Mapping[str, Any]) -> str:

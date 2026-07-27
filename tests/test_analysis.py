@@ -48,7 +48,7 @@ class DeterministicGenerator:
         self._responses = list(responses)
         self.prompts: list[str] = []
 
-    def generate_json(self, prompt: str) -> str:
+    def generate_json(self, prompt: str, schema: dict[str, object]) -> str:
         self.prompts.append(prompt)
         return json.dumps(self._responses.pop(0), ensure_ascii=False)
 

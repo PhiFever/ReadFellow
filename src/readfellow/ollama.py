@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 import math
 from collections.abc import Iterable
+from typing import Any
 from urllib import error, request
 
 from pydantic import ValidationError
 
 from .models import (
+    DerivationSettings,
     OllamaEmbedRequest,
     OllamaEmbedResponse,
     OllamaGenerateOptions,
@@ -95,28 +97,21 @@ class OllamaGenerator:
         model: str = "qwen3:8b",
         keep_alive: str = "30m",
         timeout: int = 600,
-        temperature: float = 0.0,
-        num_predict: int = 2048,
-        num_ctx: int = 16384,
+        settings: DerivationSettings,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.keep_alive = keep_alive
         self.timeout = timeout
-        self.temperature = temperature
-        self.num_predict = num_predict
-        self.num_ctx = num_ctx
+        self.options = OllamaGenerateOptions.from_settings(settings)
 
-    def generate_json(self, prompt: str) -> str:
+    def generate_json(self, prompt: str, schema: dict[str, Any]) -> str:
         generate_request = OllamaGenerateRequest(
             model=self.model,
             prompt=prompt,
+            format=schema,
             keep_alive=self.keep_alive,
-            options=OllamaGenerateOptions(
-                temperature=self.temperature,
-                num_predict=self.num_predict,
-                num_ctx=self.num_ctx,
-            ),
+            options=self.options,
         )
         body = generate_request.model_dump_json().encode("utf-8")
         req = request.Request(

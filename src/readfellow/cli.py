@@ -342,9 +342,14 @@ def command_graph_index(args: argparse.Namespace, config: ReadFellowConfig) -> i
         )
         return 0
 
+    failed = (
+        f", failed_chunks={result.failed_chunk_count} (rerun to retry them)"
+        if result.failed_chunk_count
+        else ""
+    )
     print(
         f"done: collection={result.collection}, graph={result.graph_path}, "
-        f"entities={result.entity_count}, relations={result.relation_count}"
+        f"entities={result.entity_count}, relations={result.relation_count}{failed}"
     )
     return 0
 
@@ -503,6 +508,9 @@ def print_graph_progress(event: GraphBuildEvent) -> None:
             f"        retry {event.attempt}/{event.retries}: {event.error}",
             flush=True,
         )
+        return
+    if event.stage == "failed":
+        print(f"        skipped: {event.error}", flush=True)
         return
     if event.stage == "extracted":
         print(

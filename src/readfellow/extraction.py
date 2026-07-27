@@ -108,10 +108,14 @@ def collect_items(
     items: list[Any],
     parse: Callable[[int, Any], ParsedItem | None],
 ) -> tuple[list[ParsedItem], int]:
-    """The items that parsed, plus how many were dropped for quoting nothing.
+    """The items that parsed, plus how many the model produced but lost.
 
     A dropped item is a loss the caller has to report, so it is counted rather
-    than folded into the items a model simply did not produce.
+    than folded into the items a model simply did not produce. Both ways of
+    losing one count: quoting text the chunk does not contain, and arriving in a
+    shape `parse` cannot read at all — an entity with no name, a relation whose
+    predicate is outside the vocabulary, or, before decoding was schema
+    constrained, a whole relation flattened into a bare string.
     """
     parsed: list[ParsedItem] = []
     rejected = 0
@@ -121,8 +125,10 @@ def collect_items(
         except EvidenceNotFound:
             rejected += 1
             continue
-        if value is not None:
-            parsed.append(value)
+        if value is None:
+            rejected += 1
+            continue
+        parsed.append(value)
     return parsed, rejected
 
 

@@ -165,6 +165,41 @@ def strip_overlap(previous_text: str, text: str) -> str:
     return text
 
 
+ANALYSIS_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "summary": {"type": "string"},
+        "characters": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "role_in_chapter": {"type": "string"},
+                    "chunk_id": {"type": "string"},
+                    "evidence": {"type": "string"},
+                },
+                "required": ["name", "role_in_chapter", "chunk_id", "evidence"],
+            },
+        },
+        "events": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "order": {"type": "integer"},
+                    "description": {"type": "string"},
+                    "chunk_id": {"type": "string"},
+                    "evidence": {"type": "string"},
+                },
+                "required": ["order", "description", "chunk_id", "evidence"],
+            },
+        },
+    },
+    "required": ["summary", "characters", "events"],
+}
+
+
 def build_chapter_prompt(group: ChapterGroup) -> str:
     chunk_ids = "、".join(chunk.id for chunk in group.chunks)
     title = group.title or "(无章节)"

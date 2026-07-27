@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from .analysis import (
+    ANALYSIS_RESPONSE_SCHEMA,
     ChapterGroup,
     analysis_path,
     analysis_staleness_reason,
@@ -34,6 +35,7 @@ from .derivation import (
     load_or_reset,
 )
 from .graph import (
+    GRAPH_RESPONSE_SCHEMA,
     GraphDiagnostics,
     annotate_chunks,
     build_extraction_prompt,
@@ -164,6 +166,7 @@ class GraphBuildResult:
     selected_chunk_count: int
     entity_count: int
     relation_count: int
+    failed_chunk_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -536,10 +539,10 @@ def build_graph(
             base_url=config.ollama.base_url,
             model=llm_model,
             keep_alive=config.ollama.keep_alive,
-            num_predict=extraction_settings.num_predict,
-            num_ctx=config.ollama.num_ctx,
+            settings=extraction_settings,
         )
 
+    failed_chunk_count = 0
     for index, chunk in enumerate(pending, start=1):
         chunk_id = chunk.id
         _emit(
@@ -551,25 +554,45 @@ def build_graph(
                 chunk_id=chunk_id,
             ),
         )
-        extraction = generate_with_retry(
-            generator,
-            build_extraction_prompt(chunk),
-            lambda raw: parse_graph_extraction(raw, chunk),
-            retries=extraction_settings.retries,
-            label=f"failed to extract graph for chunk {chunk_id}",
-            on_retry=lambda attempt, exc: _emit(
+        try:
+            extraction = generate_with_retry(
+                generator,
+                build_extraction_prompt(chunk),
+                lambda raw: parse_graph_extraction(raw, chunk),
+                schema=GRAPH_RESPONSE_SCHEMA,
+                retries=extraction_settings.retries,
+                label=f"failed to extract graph for chunk {chunk_id}",
+                on_retry=lambda attempt, exc: _emit(
+                    on_progress,
+                    GraphBuildEvent(
+                        stage="retry",
+                        index=index,
+                        total=len(pending),
+                        chunk_id=chunk_id,
+                        attempt=attempt,
+                        retries=extraction_settings.retries,
+                        error=str(exc),
+                    ),
+                ),
+            )
+        except RuntimeError as exc:
+            # One chunk the model never answered usably costs that chunk. A book
+            # is thousands of them, and the run has already paid for every one
+            # before it. The chunk stays unprocessed rather than being recorded
+            # as empty, so a later run picks it up again — with sampling, a
+            # second run is a genuinely different attempt.
+            failed_chunk_count += 1
+            _emit(
                 on_progress,
                 GraphBuildEvent(
-                    stage="retry",
+                    stage="failed",
                     index=index,
                     total=len(pending),
                     chunk_id=chunk_id,
-                    attempt=attempt,
-                    retries=extraction_settings.retries,
                     error=str(exc),
                 ),
-            ),
-        )
+            )
+            continue
 
         merge_extraction(graph, extraction, chunk)
         update_graph_metadata(
@@ -604,6 +627,7 @@ def build_graph(
         selected_chunk_count=len(chunks),
         entity_count=graph.entity_count,
         relation_count=graph.relation_count,
+        failed_chunk_count=failed_chunk_count,
     )
 
 
@@ -691,8 +715,7 @@ def build_analysis(
             base_url=config.ollama.base_url,
             model=llm_model,
             keep_alive=config.ollama.keep_alive,
-            num_predict=settings.num_predict,
-            num_ctx=config.ollama.num_ctx,
+            settings=settings,
         )
 
     for index, group in enumerate(pending, start=1):
@@ -709,6 +732,7 @@ def build_analysis(
             generator,
             build_chapter_prompt(group),
             lambda raw: parse_chapter_analysis(raw, group),
+            schema=ANALYSIS_RESPONSE_SCHEMA,
             retries=settings.retries,
             label=f"failed to analyze chapter {group.title}",
             on_retry=lambda attempt, exc: _emit(
@@ -1061,7 +1085,6 @@ def _generation_plan(
     num_predict = derivation.num_predict if num_predict is None else num_predict
     retries = derivation.retries if retries is None else retries
     return llm_model or config.ollama.generation_model, DerivationSettings(
-        temperature=0.0,
         num_predict=num_predict,
         num_ctx=config.ollama.num_ctx,
         retries=retries,

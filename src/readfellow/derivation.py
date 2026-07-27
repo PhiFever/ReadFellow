@@ -6,7 +6,7 @@ import json
 import os
 from collections.abc import Callable
 from pathlib import Path
-from typing import Protocol, TypeVar
+from typing import Any, Protocol, TypeVar
 
 from pydantic import BaseModel
 
@@ -15,7 +15,7 @@ Parsed = TypeVar("Parsed")
 
 
 class JsonGenerator(Protocol):
-    def generate_json(self, prompt: str) -> str: ...
+    def generate_json(self, prompt: str, schema: dict[str, Any]) -> str: ...
 
 
 def generate_with_retry(
@@ -23,6 +23,7 @@ def generate_with_retry(
     prompt: str,
     parse: Callable[[str], Parsed],
     *,
+    schema: dict[str, Any],
     retries: int,
     label: str,
     on_retry: Callable[[int, Exception], None],
@@ -31,10 +32,15 @@ def generate_with_retry(
 
     A model that answers with unusable JSON has failed just as much as one that
     fails to answer, so the whole round trip is one attempt.
+
+    Retrying only buys anything because generation samples. Under greedy
+    decoding an attempt is a pure repeat of the one before it, down to the
+    column the JSON broke at, which is why `DerivationSettings` does not offer
+    temperature 0 as its default.
     """
     for attempt in range(retries + 1):
         try:
-            return parse(generator.generate_json(prompt))
+            return parse(generator.generate_json(prompt, schema))
         except Exception as exc:
             if attempt >= retries:
                 raise RuntimeError(f"{label}: {exc}") from exc

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -193,7 +193,19 @@ class ChunkContext(ReadFellowModel):
 class DerivationSettings(ReadFellowModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    temperature: float = 0.0
+    # Qwen3's published non-thinking defaults. Its model card names greedy
+    # decoding as a cause of "performance degradation and endless repetitions",
+    # and qwen3:8b reproduces exactly that on some chunks: it answers a relation
+    # as the flat string "subject: X, relation: Y, ..." instead of an object,
+    # identically on every retry. Sampling is what stops that, so temperature is
+    # a stored setting rather than a constant, and every knob that shapes an
+    # answer belongs here — a derived document is stale when any of them moves.
+    temperature: float = 0.7
+    top_p: float = 0.8
+    top_k: int = 20
+    min_p: float = 0.0
+    presence_penalty: float = 1.5
+    repeat_penalty: float = 1.08
     num_predict: int = 0
     num_ctx: int = 0
     retries: int = 0
@@ -328,16 +340,30 @@ class OllamaEmbedResponse(ReadFellowModel):
 
 
 class OllamaGenerateOptions(ReadFellowModel):
-    temperature: float = 0.0
-    num_predict: int = 2048
-    num_ctx: int = 16384
-    repeat_penalty: float = 1.08
+    """The wire form of `DerivationSettings`, which is where the values live."""
+
+    temperature: float
+    top_p: float
+    top_k: int
+    min_p: float
+    presence_penalty: float
+    repeat_penalty: float
+    num_predict: int
+    num_ctx: int
+
+    @classmethod
+    def from_settings(cls, settings: DerivationSettings) -> OllamaGenerateOptions:
+        return cls(**settings.model_dump(exclude={"retries"}))
 
 
 class OllamaGenerateRequest(ReadFellowModel):
     model: str
     prompt: str
-    format: Literal["json"] = "json"
+    # A JSON schema rather than "json". Both constrain decoding, but "json" only
+    # promises the answer parses: a relation answered as a flat string instead of
+    # an object is valid JSON, and `_parse_relation` drops it. The schema is what
+    # makes the shape a guarantee instead of a request the prompt has to win.
+    format: dict[str, Any]
     stream: bool = False
     # Ollama turns thinking on for a model that supports it unless the field is
     # sent, and a thinking qwen3 stops emitting the closing brace of its JSON
