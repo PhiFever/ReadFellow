@@ -89,7 +89,7 @@ uvx ruff format . && uvx ruff check .          # 两者当前都保持 clean
 - `docs/mvp-runbook.md`（中文）— 全量跑通示例小说的执行步骤 + 2026-07-27 实测吞吐基线。
 - `README.md`（中文）— 面向使用者的命令手册：全局参数、8 个子命令、进度限制、故障排查表。
 - `docs/architecture-archive.md`（中文）— 架构不足清单 + 优先级路线图 + graph-index 成本估算 + zvec MCP 边界。优先级 1（app 层）、2（Evidence 模型）、3（graph 加固）、4（hybrid retrieval）均已完成。
-- `docs/graph-channel-demotion.md`（中文）— 2026-07-27 把图谱从 hybrid 的打分通道降级为结果标注的论证与实测。**想把图谱改回召回通道前先读它的「不重新讨论的事」。**
+- `docs/graph-channel-demotion.md`（中文）— 2026-07-27 把图谱从 hybrid 的打分通道降级为结果标注的论证与实测。**想把图谱改回召回通道前先读它的「不重新讨论的事」；想靠改 prompt 降实体噪声前先读它的「prompt 加严实测无效」。**
 - `docs/module-deepening-plan.md`（中文）— 2026-07-26 架构评审的执行计划。阶段 A（拆 `graph.py`）、B（合并 graph/analysis 孪生管线）、C（补完 zvec seam）均已落地；D/E 与 B3 待触发条件。开工前先读它的「不重新讨论的事」。
 - `.codex/skills/readfellow/SKILL.md` — 面向使用者的检索/引用/防剧透规则，回答用户关于语料内容的问题时按它执行。
 - `AGENTS.md` — 仓库约定（源文档不可变、产物目录、provenance 字段要求、uv 工作流）与 zvec 能力背景。
