@@ -234,6 +234,7 @@ def test_graph_build_records_versioned_source_fingerprints(
         "entity_count": 2,
         "relation_count": 1,
         "rejected_count": 0,
+        "unanchored_count": 0,
     }
 
     fail_if_called = DeterministicGenerator([])
@@ -330,6 +331,7 @@ def test_graph_build_drops_evidence_that_is_not_source_grounded(
     assert len(generator.prompts) == 1
     assert [relation.evidence for relation in graph.relations] == ["向山帮助了尤基"]
     assert graph.rejected_count == 1
+    assert graph.unanchored_count == 1
 
 
 def test_graph_build_survives_a_chunk_it_cannot_parse(tmp_path: Path) -> None:

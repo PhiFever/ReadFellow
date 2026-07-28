@@ -113,6 +113,7 @@ def test_analysis_drops_evidence_not_found_verbatim_in_chapter(
     chapter = result.chapters[0]
     assert [mention.name for mention in chapter.characters] == ["尤基"]
     assert chapter.rejected_count == 1
+    assert chapter.unanchored_count == 1
 
 
 def test_analysis_resumes_and_only_analyzes_new_chapters(tmp_path: Path) -> None:

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .derivation import write_json_document
+from .derivation import sum_or_unknown, write_json_document
 from .extraction import (
     EvidenceNotFound,
     as_list,
@@ -250,6 +250,7 @@ def parse_chapter_analysis(
         as_list(get_any(payload, _EVENT_KEYS, [])),
         lambda position, item: _parse_event(item, group, position=position),
     )
+    rejected = rejected_characters + rejected_events
 
     return ChapterAnalysis(
         chapter_index=group.index,
@@ -261,7 +262,8 @@ def parse_chapter_analysis(
         summary=summary,
         characters=characters,
         events=events,
-        rejected_count=rejected_characters + rejected_events,
+        rejected_count=rejected.total,
+        unanchored_count=rejected.unanchored,
     )
 
 
@@ -300,6 +302,9 @@ def finalize_analysis(document: AnalysisDocument) -> None:
     document.processed_chapter_count = len(document.chapters)
     document.rejected_count = sum(
         chapter.rejected_count for chapter in document.chapters
+    )
+    document.unanchored_count = sum_or_unknown(
+        chapter.unanchored_count for chapter in document.chapters
     )
 
 

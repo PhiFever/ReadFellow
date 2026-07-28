@@ -183,29 +183,32 @@ uv run readfellow status --collection sample
 
 不联网、不改任何东西，回答两个问题：**现在有什么**，以及**再跑一次会发生什么**。
 
+下面是一次 `--limit 8` 冒烟索引之后的真实输出：
+
 ```
 collection:  sample
 source:      corpus/samples/赛博英雄传.txt
-chunks:      2307 @ 2400 chars, overlap 240
+chunks:      8 @ 2400 chars, overlap 240
 embedding:   qwen3-embedding:8b, dim 4096
 
-index:       2307/2307 docs, embedding 100% indexed
+index:       8/8 docs, embedding 100% indexed
 
-graph-index: 584/2307 chunks, rejected=786
-  → graph-index would resume on the remaining 1723 chunks
-  entities   3737 (declared 48.5%), relations 4472
-  spread     p50=1 p90=3 max=222 chunks per entity
-  dropped    6.9% of 11415 extracted items quoted text not in their chunk
-  silent     0/584 chunks yielded nothing
+graph-index: 8/8 chunks, rejected=44 (unanchored 4, unreadable 40)
+  entities   74 (declared 64.9%), relations 50
+  spread     p50=1 p90=2 max=6 chunks per entity
+  dropped    25.1% of 175 extracted items, mostly relations whose predicate is outside the vocabulary
+  unanchored 2.3% of them, the part that quoted text not in its chunk
+  silent     0/8 chunks yielded nothing
 
-analyze:     not built (1207 chapters eligible)
+analyze:     not built (4 chapters eligible)
 ```
 
 - **`index` 行读的是 zvec 自己的 `stats`**，不是 manifest。两个数字对不上就是 §6.2 那个已知问题的现场。
-- **`→` 行是最该看的一行**：失效判定用**配置里当前的模型与参数**做，所以它回答的是「续建还是从头重来」。别的命令遇到 stale 直接报错，`status` 是唯一负责把原因说出来还继续往下走的。
-- **四个诊断数字有实测参考值**（2026-07-27，赛博英雄传 + qwen3:8b：declared 48.5%、dropped 6.9%、silent 0%）。超出范围会打 `⚠`。**换书或换模型会误报——它是提示去看一眼，不是判死。**
+- **没跑完时会多出一行 `→`，那是最该看的一行**：失效判定用**配置里当前的模型与参数**做，所以它回答的是「续建还是从头重来」（例如 `→ graph-index would resume on the remaining 1723 chunks`，stale 时则是 `would discard all ... and start over`）。别的命令遇到 stale 直接报错，`status` 是唯一负责把原因说出来还继续往下走的。
+- **诊断数字有实测参考值**（2026-07-28，赛博英雄传 + qwen3:8b 全量 2307 chunk：declared 47.0%、unanchored 3.9%、silent 1/2307）。超出范围会打 `⚠`。**换书或换模型会误报——它是提示去看一眼，不是判死。**
   - `declared` 是**声明过的实体占比**：有类型或有引文的才算，只作为关系端点出现的名字不算（那一类几乎囊括全部噪声，也是 `hybrid` 标注唯一会显示的层）。
   - `spread` 是每个实体跨越多少 chunk。健康形状是 p50=1：绝大多数实体只出现在一处。`max` 很大是正常的，主角本来就覆盖半本书。
+  - `dropped` 是**丢弃条目占比**，`unanchored` 是其中引文对不上原文的那部分（同一个分母）。**只有 `unanchored` 有阈值**：`dropped` 的大头是白名单在拒绝叙事谓词，那是词表的性质而不是这次跑得好坏，见 §6.1。
   - `silent` 是**一个实体一条关系都没产出的 chunk 数**。不为 0 通常意味着 `num_predict` 太小或 prompt 坏了。
 
 ---
@@ -252,18 +255,21 @@ metadata/<collection>/
 
 ## 6. 已知问题
 
-### 6.1 派生管线会丢弃引文对不上的条目
+### 6.1 派生管线会丢弃两类条目
 
-抽取出的 evidence 必须是所属 chunk 原文的精确子串。锚定不上的条目会被**丢弃并计数**，其余照常入库：
+单个条目抽不出来时会被**丢弃并计数**，其余照常入库。丢弃分两种成因，按成因分开报：
 
 ```
 [    2/20] extracting graph from bdd935754e17_000001
-        entities=12, relations=14, rejected=1
+        entities=12, relations=12, rejected=5 (unanchored 1, unreadable 4)
 ```
 
-`rejected=N` 就是这一个 unit 丢掉的条目数，落盘在 `graph.json` / `analysis.json` 的 `rejected_count`。实测约 7%（graph 7.8%、analysis 6.9%），主要是模型把代词换成人名这类改写——放宽匹配等于伪造出处，所以按设计丢弃。**显著高于 7% 说明模型或 prompt 出了问题，值得查。**
+- **unanchored** —— 模型给的 evidence 不是所属 chunk 原文的精确子串（多为把代词换成人名这类改写）。放宽匹配等于伪造出处，所以按设计丢弃。这是唯一一个"模型没读好"的信号，实测 **3.9%**（2307 chunk 全量）。显著高于此值才值得查模型或 prompt。
+- **unreadable** —— 条目根本读不出形状：关系谓词不在 `RELATION_TYPES` 白名单内、实体没有名字、字段缺失。其中**绝大部分是白名单拒绝**（全量实测 20.7%），拒掉的是 `怀疑`／`担心`／`回答` 这类叙事长尾谓词。这是封闭谓词表的**设计成本，不是缺陷**：调采样参数、改 prompt 都不会让它下降。
 
-这意味着图谱与分析是**真实但不完整**的子集：留下的每一条都能回落到原文精确子串，但模型引错的那部分不会出现。
+两者相加就是 `rejected=N`，落盘在 `graph.json` / `analysis.json` 的 `rejected_count`，其中 unanchored 那部分单独落在 `unanchored_count`。**总数偏高本身不说明问题，要看拆开后的 unanchored。**
+
+这意味着图谱与分析是**真实但不完整**的子集：留下的每一条都能回落到原文精确子串，但模型引错的、以及词表不收的那部分不会出现。
 
 2026-07-27 之前，一条引文对不上会耗尽重试并终止整个 run，全量因此跑不完。根因排查与修复见 [`docs/derivation-hardening-plan.md`](docs/derivation-hardening-plan.md)，执行步骤与成本基线见 [`docs/mvp-runbook.md`](docs/mvp-runbook.md)。
 
@@ -290,7 +296,7 @@ embedding 中途失败会留下 metadata 完整而 collection 不完整的状态
 | `chunk metadata is stale (source path changed)` | 源文档被移动或改名，重新索引 |
 | 源文件 hash 不符 | 源文档被修改过。源文档不可变是第一不变量，必须重新索引 |
 | `fts` 查不到内容但 `search` 正常 | 索引时用了 `--no-optimize`，重新索引且不要跳过 optimize |
-| 输出里 `rejected=N` 偏高 | 引文对不上原文的条目被丢弃了，见 §6.1 |
+| 输出里 `rejected=N` 偏高 | 先看括号里的 unanchored：高才是模型问题，unreadable 高是词表在拒绝叙事谓词，见 §6.1 |
 | `graph-query` 报 stale | prompt/schema 版本、生成模型或 chunk hash 变了，重跑 `graph-index --rebuild` |
 | 不确定重跑会续建还是重来 | `readfellow status`，看 `graph-index:` 下面那行 `→` |
 | `status` 的 `index:` 两个数字不等 | 索引没跑完（§6.2），`index --rebuild` |

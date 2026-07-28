@@ -156,6 +156,7 @@ class GraphBuildEvent:
     entity_count: int = 0
     relation_count: int = 0
     rejected_count: int = 0
+    unanchored_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -224,6 +225,7 @@ class DerivationReport:
     processed: int
     total: int
     rejected_count: int = 0
+    unanchored_count: int | None = None
     stale_reason: str | None = None
     error: str | None = None
 
@@ -261,6 +263,7 @@ class AnalysisBuildEvent:
     character_count: int = 0
     event_count: int = 0
     rejected_count: int = 0
+    unanchored_count: int | None = None
 
 
 @dataclass(frozen=True)
@@ -615,6 +618,7 @@ def build_graph(
                 entity_count=len(extraction.entities),
                 relation_count=len(extraction.relations),
                 rejected_count=extraction.rejected_count,
+                unanchored_count=extraction.unanchored_count,
             ),
         )
 
@@ -769,6 +773,7 @@ def build_analysis(
                 character_count=len(analysis.characters),
                 event_count=len(analysis.events),
                 rejected_count=analysis.rejected_count,
+                unanchored_count=analysis.unanchored_count,
             ),
         )
 
@@ -855,6 +860,7 @@ def collection_status(
         processed=graph.processed_chunk_count if graph else 0,
         total=len(chunks),
         rejected_count=graph.rejected_count if graph else 0,
+        unanchored_count=graph.unanchored_count if graph else 0,
         stale_reason=graph_staleness_reason(
             graph,
             chunks,
@@ -880,6 +886,7 @@ def collection_status(
         processed=analysis.processed_chapter_count if analysis else 0,
         total=len(groups),
         rejected_count=analysis.rejected_count if analysis else 0,
+        unanchored_count=analysis.unanchored_count if analysis else 0,
         stale_reason=analysis_staleness_reason(
             analysis,
             groups,

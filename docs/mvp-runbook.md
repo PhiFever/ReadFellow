@@ -107,7 +107,7 @@ uv run readfellow graph-index --collection sample --max-chapter 50
 
 两者都逐单元落盘、支持断点续建，可以分批推进、随时 Ctrl-C 后重跑。
 
-输出里的 `rejected=N` 是**被丢弃的条目数**：模型给的引文在原文里找不到，该实体／关系／人物／事件被丢掉，其余照常入库。实测约 7%（graph 7.8%、analysis 6.9%）。显著高于这个数说明模型或 prompt 出了问题，值得查；个位数属正常。
+输出里的 `rejected=N (unanchored A, unreadable B)` 是**被丢弃的条目数**，按成因拆开：`unanchored` 是模型给的引文在原文里找不到（全量实测 3.9%，只有它偏高才说明模型或 prompt 出了问题）；`unreadable` 是条目读不出形状，大头是关系谓词不在白名单内（全量实测 20.7%，是封闭谓词表的设计成本）。**别看总数，看 `unanchored`。**
 
 ## 阻塞详情（已修复，保留作为背景）
 

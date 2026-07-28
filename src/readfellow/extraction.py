@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from typing import Any, TypeVar
 
 from pydantic import BaseModel
@@ -104,32 +105,61 @@ def resolve_evidence(
     return located
 
 
+@dataclass(frozen=True)
+class Rejections:
+    """Items the model produced and the parser could not keep, by cause.
+
+    The two are worth telling apart because only one of them says anything about
+    how well the model read its chunk. `unanchored` is a quote the chunk does not
+    contain — the model paraphrasing instead of quoting, which is exactly what
+    the evidence check exists to catch. `unreadable` is everything `parse` could
+    not build at all, and its largest class by far is a relation whose predicate
+    is outside the vocabulary: a closed predicate list refusing narration is that
+    list working, not the extraction failing. Summed into one ratio the second
+    buries the first, and the total reads far worse than the run deserves.
+    """
+
+    unanchored: int = 0
+    unreadable: int = 0
+
+    @property
+    def total(self) -> int:
+        return self.unanchored + self.unreadable
+
+    def __add__(self, other: Rejections) -> Rejections:
+        return Rejections(
+            unanchored=self.unanchored + other.unanchored,
+            unreadable=self.unreadable + other.unreadable,
+        )
+
+
 def collect_items(
     items: list[Any],
     parse: Callable[[int, Any], ParsedItem | None],
-) -> tuple[list[ParsedItem], int]:
-    """The items that parsed, plus how many the model produced but lost.
+) -> tuple[list[ParsedItem], Rejections]:
+    """The items that parsed, plus what the model produced and lost, by cause.
 
     A dropped item is a loss the caller has to report, so it is counted rather
-    than folded into the items a model simply did not produce. Both ways of
-    losing one count: quoting text the chunk does not contain, and arriving in a
-    shape `parse` cannot read at all — an entity with no name, a relation whose
-    predicate is outside the vocabulary, or, before decoding was schema
-    constrained, a whole relation flattened into a bare string.
+    than folded into the items a model simply did not produce. `parse` raising
+    `EvidenceNotFound` is the unanchored half; `parse` returning None is the
+    unreadable one — an entity with no name, a relation whose predicate is
+    outside the vocabulary or which is missing an end, or, before decoding was
+    schema constrained, a whole relation flattened into a bare string.
     """
     parsed: list[ParsedItem] = []
-    rejected = 0
+    unanchored = 0
+    unreadable = 0
     for position, item in enumerate(items, start=1):
         try:
             value = parse(position, item)
         except EvidenceNotFound:
-            rejected += 1
+            unanchored += 1
             continue
         if value is None:
-            rejected += 1
+            unreadable += 1
             continue
         parsed.append(value)
-    return parsed, rejected
+    return parsed, Rejections(unanchored=unanchored, unreadable=unreadable)
 
 
 def chunk_context(chunk: Chunk | ChunkContext | Mapping[str, Any]) -> ChunkContext:

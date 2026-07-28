@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any, Protocol, TypeVar
 
@@ -86,6 +86,23 @@ def write_json_document(path: Path, document: BaseModel) -> None:
         encoding="utf-8",
     )
     os.replace(pending, path)
+
+
+def sum_or_unknown(values: Iterable[int | None]) -> int | None:
+    """The total, or None when any part of it was never recorded.
+
+    A derived document outlives the moment a counter was added to it: units
+    written before then carry no value rather than a zero one, and a run resumed
+    across that point holds both kinds. Summing the missing ones as zero would
+    report a measurement nobody made, so one absent part makes the whole total
+    unknown — which is what it is.
+    """
+    total = 0
+    for value in values:
+        if value is None:
+            return None
+        total += value
+    return total
 
 
 def derivation_status(*, selected: int, pending: int, rebuilt: bool) -> str:

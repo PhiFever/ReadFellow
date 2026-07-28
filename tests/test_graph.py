@@ -5,6 +5,7 @@ import json
 from readfellow.graph import (
     annotate_chunks,
     empty_graph,
+    finalize_graph,
     graph_diagnostics,
     merge_extraction,
     parse_graph_extraction,
@@ -144,6 +145,10 @@ def test_parse_skips_unknown_relation_types() -> None:
     assert [
         (relation.relation, relation.object) for relation in extraction.relations
     ] == [("帮助", "尤基")]
+    # Refused by the vocabulary, not by the evidence check, so it is dropped
+    # without being counted against how faithfully the model quoted its chunk.
+    assert extraction.rejected_count == 1
+    assert extraction.unanchored_count == 0
 
 
 def test_parse_drops_and_counts_evidence_not_found_verbatim_in_chunk() -> None:
@@ -168,6 +173,7 @@ def test_parse_drops_and_counts_evidence_not_found_verbatim_in_chunk() -> None:
 
     assert [entity.name for entity in extraction.entities] == ["尤基"]
     assert extraction.rejected_count == 1
+    assert extraction.unanchored_count == 1
 
 
 def test_parse_stores_the_source_wording_of_a_loosely_quoted_evidence() -> None:
@@ -215,6 +221,7 @@ def test_parse_drops_and_counts_relation_evidence_not_found_verbatim_in_chunk() 
 
     assert [relation.object for relation in extraction.relations] == ["武神"]
     assert extraction.rejected_count == 1
+    assert extraction.unanchored_count == 1
 
 
 def test_graph_query_progress_filters_future_relations() -> None:
@@ -372,6 +379,32 @@ def test_annotation_keeps_only_the_rarest_declared_items() -> None:
     )
 
 
+def test_a_graph_resumed_across_the_split_reports_no_unanchored_total() -> None:
+    graph = empty_graph(collection="sample")
+    for index in (0, 1):
+        unit = chunk(chunk_index=index)
+        merge_extraction(
+            graph,
+            parse_graph_extraction(
+                {
+                    "entities": [
+                        {"name": "向山", "type": "人物", "evidence": "向山被人称作武神"}
+                    ],
+                    "relations": [],
+                },
+                unit,
+            ),
+            unit,
+        )
+    # What a unit extracted before the causes were counted apart looks like.
+    graph.extractions[0].unanchored_count = None
+    finalize_graph(graph)
+
+    assert graph.rejected_count == 0
+    assert graph.unanchored_count is None
+    assert graph_diagnostics(graph).unanchored_item_share is None
+
+
 def test_diagnostics_count_endpoint_stubs_and_chunks_that_yielded_nothing() -> None:
     graph = empty_graph(collection="sample")
     spoken = chunk(text="向山帮助了尤基。")
@@ -389,7 +422,13 @@ def test_diagnostics_count_endpoint_stubs_and_chunks_that_yielded_nothing() -> N
                         "relation": "帮助",
                         "object": "尤基",
                         "evidence": "向山帮助了尤基",
-                    }
+                    },
+                    {
+                        "subject": "向山",
+                        "relation": "怀疑",
+                        "object": "尤基",
+                        "evidence": "向山帮助了尤基",
+                    },
                 ],
             },
             spoken,
@@ -408,7 +447,10 @@ def test_diagnostics_count_endpoint_stubs_and_chunks_that_yielded_nothing() -> N
     # 尤基 reached the graph only as a relation endpoint, so it is not declared;
     # 约格 quoted a sentence that is not in the chunk and never reached it.
     assert (diagnostics.entity_count, diagnostics.declared_entity_count) == (2, 1)
-    assert diagnostics.dropped_item_count == 1
+    # Two items were dropped — 约格's quote and a 怀疑 relation the vocabulary
+    # does not carry — but only the first says the model misquoted its chunk.
+    assert diagnostics.dropped_item_count == 2
+    assert diagnostics.unanchored_item_count == 1
     assert diagnostics.silent_chunk_count == 1
     assert "yielded nothing at all" in " ".join(diagnostics.warnings)
 

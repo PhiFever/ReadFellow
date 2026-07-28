@@ -9,7 +9,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from .derivation import write_json_document
+from .derivation import sum_or_unknown, write_json_document
 from .extraction import (
     as_list,
     chunk_context,
@@ -45,23 +45,20 @@ GRAPH_PROMPT_VERSION = "graph-extraction-v1"
 # of the staleness fingerprint, so these can move without rebuilding the graph.
 ANNOTATION_MAX_ENTITIES = 3
 ANNOTATION_MAX_RELATIONS = 3
-# The shape of a healthy extraction run, measured 2026-07-27 on 赛博英雄传 with
-# qwen3:8b: declared entities 48.5% at 584 chunks (56.6% / 58.5% / 77.8% on three
-# shorter runs, since endpoint stubs accumulate more slowly than declarations),
-# dropped items 6.9%–9.0%, silent chunks 0% everywhere. Another book or another
-# model moves all three, so a flagged number means "go look", not "this run is
-# void". Read-side only: not persisted, not part of the staleness fingerprint.
+# The shape of a healthy extraction run, measured on 赛博英雄传 with qwen3:8b over
+# the whole 2307-chunk book (2026-07-28): declared entities 47.0%, unanchored
+# items 3.9%, 1 silent chunk. Another book or another model moves all three, so a
+# flagged number means "go look", not "this run is void". Read-side only: not
+# persisted, not part of the staleness fingerprint.
 #
-# The dropped-item range predates `collect_items` counting shape failures, so it
-# only ever measured evidence that was not in its chunk. It now also counts what
-# used to vanish silently, and the largest such class by far is a relation whose
-# predicate is outside RELATION_TYPES: 36% of 401 relations over 40 chunks, once
-# _RELATION_ALIASES absorbs the synonyms. That share is mostly the vocabulary
-# refusing narration rather than a defect, so the reported number will sit well
-# above this threshold by design. The number is honest; the reference is stale
-# and wants remeasuring against a full run before it means anything again.
+# Only the unanchored part of the dropped items has a threshold. The rest of them
+# is the relation vocabulary refusing narration — 20.7% of all items on that same
+# run, and 91 of the 108 drops in a hand-checked 25-chunk sample — which is a
+# property of the vocabulary rather than of how the run went. An earlier
+# threshold on dropped items as a whole read that share as misquotation and
+# warned on every healthy run; `status` now reports the total and warns on this.
 MIN_DECLARED_ENTITY_SHARE = 0.35
-MAX_DROPPED_ITEM_SHARE = 0.20
+MAX_UNANCHORED_ITEM_SHARE = 0.10
 MAX_SILENT_CHUNK_SHARE = 0.05
 ENTITY_TYPES = ("人物", "地点", "组织", "物品", "事件", "概念")
 RELATION_TYPES = (
@@ -369,11 +366,13 @@ def parse_graph_extraction(
         as_list(get_any(payload, ("relations", "关系", "triples", "edges"), [])),
         lambda _, item: _parse_relation(item, context, chunk_text),
     )
+    rejected = rejected_entities + rejected_relations
 
     return GraphExtraction(
         entities=entities,
         relations=relations,
-        rejected_count=rejected_entities + rejected_relations,
+        rejected_count=rejected.total,
+        unanchored_count=rejected.unanchored,
     )
 
 
@@ -481,6 +480,9 @@ def finalize_graph(graph: KnowledgeGraph) -> None:
     graph.entity_count = len(graph.entities)
     graph.relation_count = len(graph.relations)
     graph.rejected_count = sum(record.rejected_count for record in graph.extractions)
+    graph.unanchored_count = sum_or_unknown(
+        record.unanchored_count for record in graph.extractions
+    )
 
 
 def query_graph(
@@ -615,10 +617,15 @@ class GraphDiagnostics:
     silent_chunk_count: int
     kept_item_count: int
     dropped_item_count: int
+    unanchored_item_count: int | None
     spread_p50: int
     spread_p90: int
     spread_max: int
     warnings: list[str] = field(default_factory=list)
+
+    @property
+    def extracted_item_count(self) -> int:
+        return self.kept_item_count + self.dropped_item_count
 
     @property
     def declared_entity_share(self) -> float:
@@ -626,9 +633,21 @@ class GraphDiagnostics:
 
     @property
     def dropped_item_share(self) -> float:
-        return _share(
-            self.dropped_item_count, self.kept_item_count + self.dropped_item_count
-        )
+        return _share(self.dropped_item_count, self.extracted_item_count)
+
+    @property
+    def unanchored_item_share(self) -> float | None:
+        """The share that quoted text its chunk does not contain, where recorded.
+
+        The only part of `dropped_item_share` that is about the model. The rest
+        is a shape the parser could not read, which is mostly the relation
+        vocabulary doing its job. None for a graph written before the two were
+        counted apart — reporting 0 for it would invent a measurement that run
+        never made.
+        """
+        if self.unanchored_item_count is None:
+            return None
+        return _share(self.unanchored_item_count, self.extracted_item_count)
 
     @property
     def silent_chunk_share(self) -> float:
@@ -639,10 +658,11 @@ def graph_diagnostics(graph: KnowledgeGraph) -> GraphDiagnostics:
     """The quality signals a finished `graph-index` run cannot otherwise be read for.
 
     A run reports how many entities and relations it wrote, and that number is
-    large whether or not the extraction worked. These three ratios are what
-    separate the two: how much of the graph was actually declared rather than
-    inferred from a relation endpoint, how much the evidence check threw away,
-    and how many chunks the model answered nothing usable for.
+    large whether or not the extraction worked. These ratios are what separate
+    the two: how much of the graph was actually declared rather than inferred
+    from a relation endpoint, how much was dropped and how much of that was the
+    evidence check specifically, and how many chunks the model answered nothing
+    usable for.
     """
     spreads = sorted(_chunk_spread(entity) for entity in graph.entities)
     diagnostics = GraphDiagnostics(
@@ -661,6 +681,7 @@ def graph_diagnostics(graph: KnowledgeGraph) -> GraphDiagnostics:
             record.entity_count + record.relation_count for record in graph.extractions
         ),
         dropped_item_count=graph.rejected_count,
+        unanchored_item_count=graph.unanchored_count,
         spread_p50=_percentile(spreads, 0.5),
         spread_p90=_percentile(spreads, 0.9),
         spread_max=spreads[-1] if spreads else 0,
@@ -679,11 +700,12 @@ def _diagnostic_warnings(diagnostics: GraphDiagnostics) -> list[str]:
             f"(reference ≥ {MIN_DECLARED_ENTITY_SHARE:.0%}); the graph is mostly "
             "relation endpoints, which annotation will not show"
         )
-    if diagnostics.dropped_item_share > MAX_DROPPED_ITEM_SHARE:
+    unanchored_share = diagnostics.unanchored_item_share
+    if unanchored_share is not None and unanchored_share > MAX_UNANCHORED_ITEM_SHARE:
         warnings.append(
-            f"{diagnostics.dropped_item_share:.1%} of extracted items quoted text that "
-            f"is not in their chunk (reference ≤ {MAX_DROPPED_ITEM_SHARE:.0%}); "
-            "the model may be paraphrasing instead of quoting"
+            f"{unanchored_share:.1%} of extracted items quoted text that is not in "
+            f"their chunk (reference ≤ {MAX_UNANCHORED_ITEM_SHARE:.0%}); the model "
+            "may be paraphrasing instead of quoting"
         )
     if diagnostics.silent_chunk_share > MAX_SILENT_CHUNK_SHARE:
         warnings.append(
@@ -836,6 +858,7 @@ def _mark_extracted(
             entity_count=len(extraction.entities),
             relation_count=len(extraction.relations),
             rejected_count=extraction.rejected_count,
+            unanchored_count=extraction.unanchored_count,
         )
     )
 

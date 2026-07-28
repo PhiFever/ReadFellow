@@ -439,7 +439,7 @@ def print_derivation_status(command: str, unit: str, report: DerivationReport) -
 
     print(
         f"{label} {report.processed}/{report.total} {unit}"
-        f"{_rejected_suffix(report.rejected_count)}"
+        f"{_rejected_suffix(report.rejected_count, report.unanchored_count)}"
     )
     if report.stale_reason is not None:
         print(f"  ⚠ stale: {report.stale_reason}")
@@ -461,9 +461,16 @@ def print_graph_diagnostics(diagnostics: GraphDiagnostics) -> None:
     )
     print(
         f"  dropped    {diagnostics.dropped_item_share:.1%} of "
-        f"{diagnostics.kept_item_count + diagnostics.dropped_item_count} "
-        "extracted items quoted text not in their chunk"
+        f"{diagnostics.extracted_item_count} extracted items, mostly relations "
+        "whose predicate is outside the vocabulary"
     )
+    if diagnostics.unanchored_item_share is None:
+        print("  unanchored not recorded; this graph predates the split by cause")
+    else:
+        print(
+            f"  unanchored {diagnostics.unanchored_item_share:.1%} of them, the part "
+            "that quoted text not in its chunk"
+        )
     print(
         f"  silent     {diagnostics.silent_chunk_count}/"
         f"{diagnostics.processed_chunk_count} chunks yielded nothing"
@@ -516,7 +523,7 @@ def print_graph_progress(event: GraphBuildEvent) -> None:
         print(
             f"        entities={event.entity_count},"
             f" relations={event.relation_count}"
-            f"{_rejected_suffix(event.rejected_count)}",
+            f"{_rejected_suffix(event.rejected_count, event.unanchored_count)}",
             flush=True,
         )
 
@@ -544,14 +551,28 @@ def print_analysis_progress(event: AnalysisBuildEvent) -> None:
         print(
             f"        characters={event.character_count},"
             f" events={event.event_count}"
-            f"{_rejected_suffix(event.rejected_count)}",
+            f"{_rejected_suffix(event.rejected_count, event.unanchored_count)}",
             flush=True,
         )
 
 
-def _rejected_suffix(rejected_count: int) -> str:
-    """How many items were dropped for quoting nothing, shown only when some were."""
-    return f", rejected={rejected_count}" if rejected_count else ""
+def _rejected_suffix(rejected_count: int, unanchored_count: int | None) -> str:
+    """How many items were dropped and why, shown only when some were.
+
+    The two causes want opposite reactions — a quote its chunk does not contain
+    is the model failing, a predicate outside the vocabulary is the vocabulary
+    working — so a bare total gets read as the first when it is mostly the
+    second. A document older than that split has only the total to give.
+    """
+    if not rejected_count:
+        return ""
+    if unanchored_count is None:
+        return f", rejected={rejected_count} (cause not recorded)"
+    unreadable = rejected_count - unanchored_count
+    return (
+        f", rejected={rejected_count}"
+        f" (unanchored {unanchored_count}, unreadable {unreadable})"
+    )
 
 
 def print_chapter_analyses(chapters: list[ChapterAnalysis]) -> None:
