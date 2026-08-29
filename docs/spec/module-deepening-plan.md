@@ -1,4 +1,4 @@
-# 模块深化计划（Module Deepening Plan）
+# 模块深化规格（Module Deepening Spec）
 
 日期：2026-07-26
 基线 commit：`18c5500`（行号均以此为准，改动后会漂移，请以**符号名**为主要定位手段）
@@ -9,8 +9,8 @@
 
 以下已有结论，本计划不触碰：
 
-- **重型 GraphRAG** —— `architecture-archive.md` 已定：在评估集证明轻量 hybrid 不够之前不引入。
-- **RRF 参数进 config** —— `hybrid-retrieval-mvp.md` 已定：k、权重、召回倍数刻意不进 config。
+- **重型 GraphRAG** —— `docs/architecture-archive.md` 已定：在评估集证明轻量 hybrid 不够之前不引入。
+- **RRF 参数进 config** —— `docs/spec/hybrid-retrieval-mvp.md` 已定：k、权重、召回倍数刻意不进 config。
 - **索引非原子发布** —— archive 已记录为已知弱点。这是正确性缺口，不是深化，不在本计划内。
 - **候选 6（`FusedEvidence` 拆分）** —— 不做。hybrid MVP 刻意选了单一扁平模型以保证其他命令输出逐字节不变。只有当第二个消费者（MCP、reranker）需要跨通道比较分数时才重开。
 

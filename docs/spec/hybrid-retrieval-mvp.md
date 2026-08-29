@@ -1,4 +1,4 @@
-# Hybrid Retrieval MVP 设计归档
+# Hybrid Retrieval MVP 规格归档
 
 日期：2026-07-26
 状态：**已实施**（「决策」以上部分写于动手之前，末尾「实施结果」为事后追加）
@@ -155,7 +155,7 @@ class HybridSearchResult:
 
 - **带 `rank` 而非只记通道名**：融合分是 0.03 量级的抽象数字，本身无法解释排序。排序看着不对时第一个问题必然是「它凭什么排第一」，`matches=[{vector,1},{fts,7}]` 一眼可答。这是可解释性，不是调参旋钮。
 - **不记每路原生分**：决策 2 已论证跨通道原生分不可比，记下来无人能用。
-- **扩展 `Evidence` 而非新建 `HybridEvidence`**：包一层会让 `print_evidence` 和未来 MCP 的 evidence 处理各自分叉；Evidence 的存在意义就是统一形状（`architecture-archive.md:62` 明确把「四路返回不同形状」列为阻碍 hybrid 的问题）。
+- **扩展 `Evidence` 而非新建 `HybridEvidence`**：包一层会让 `print_evidence` 和未来 MCP 的 evidence 处理各自分叉；Evidence 的存在意义就是统一形状（`docs/architecture-archive.md:62` 明确把「四路返回不同形状」列为阻碍 hybrid 的问题）。
 - **`HybridSearchResult` 是新类型而非给 `SearchResult` 加 `channels`**：否则 `search`/`fts` 结果里会永远挂一个空列表，是骗人的字段。
 
 ### 9. 字段合并规则

@@ -3,7 +3,7 @@
 日期：2026-07-27
 状态：**已实施**
 
-`hybrid` 曾是 vector / FTS / graph 三路 RRF 融合（见 `docs/hybrid-retrieval-mvp.md`）。本次把图谱从**打分通道**降级为**结果标注**：融合只剩两路，取 `top_k` 之后再用图谱给选中的 chunk 挂上实体与关系。
+`hybrid` 曾是 vector / FTS / graph 三路 RRF 融合（见 `docs/spec/hybrid-retrieval-mvp.md`）。本次把图谱从**打分通道**降级为**结果标注**：融合只剩两路，取 `top_k` 之后再用图谱给选中的 chunk 挂上实体与关系。
 
 起因是一次实测：`hybrid "基因税是什么"` 打印 `graph=0`，而图谱里明明有「基因税」这个实体。
 
@@ -12,7 +12,7 @@
 - **不引入分词依赖**（jieba 或其他）。理由见下「方案一」。
 - **不做实体桥接**（用命中 chunk 反查实体、再用实体的其他 evidence chunk 扩召回）。理由见下「方案二」。
 - **不改 `graph-query`**。它是关键词工具，按子串匹配是它的正确语义，输出逐字不变。
-- **不改 RRF 参数**。`RRF_K=60`、`FAN_OUT_MULTIPLIER=10`、等权，按 `hybrid-retrieval-mvp.md` 刻意不进 config。
+- **不改 RRF 参数**。`RRF_K=60`、`FAN_OUT_MULTIPLIER=10`、等权，按 `docs/spec/hybrid-retrieval-mvp.md` 刻意不进 config。
 
 ## 根因
 

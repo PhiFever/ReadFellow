@@ -1,7 +1,7 @@
 # 全量 MVP 执行 Runbook
 
 日期：2026-07-27
-状态：**四条链路都可全量跑**（派生管线的阻塞已按 `docs/derivation-hardening-plan.md` 修复并在 20 chunk 上验收）
+状态：**四条链路都可全量跑**（派生管线的阻塞已按 `docs/spec/derivation-hardening-plan.md` 修复并在 20 chunk 上验收）
 
 本文档记录对 `corpus/samples/赛博英雄传.txt` 做一次完整分析的执行步骤与实测成本基线。所有数字来自 2026-07-27 在本机（Ollama + `qwen3:8b` + `qwen3-embedding:8b`）的实测，不是估算。
 
@@ -141,7 +141,7 @@ error: failed to extract graph for chunk bdd935754e17_000001
 error: failed to analyze chapter 第一章 生锈的智人
 ```
 
-### 根因（2026-07-27 实测排查，结论见 `docs/derivation-hardening-plan.md`）
+### 根因（2026-07-27 实测排查，结论见 `docs/spec/derivation-hardening-plan.md`）
 
 三个独立根因叠加，**不是单一问题**：
 
@@ -159,7 +159,7 @@ error: failed to analyze chapter 第一章 生锈的智人
 
 ### 修复（2026-07-27 已落地）
 
-三项改动，细节与验收见 **`docs/derivation-hardening-plan.md`**：
+三项改动，细节与验收见 **`docs/spec/derivation-hardening-plan.md`**：
 
 1. `OllamaGenerateRequest` 增加 `think: bool = False`
 2. 单条 evidence 锚定失败改为丢弃该条目并计数上报（`rejected=N`），不再终止整个 unit

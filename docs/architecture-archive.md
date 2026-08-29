@@ -283,7 +283,7 @@ CLI 应只负责解析参数、调用这些模块并格式化输出。
 - 当 chunk metadata 改变时的 rebuild/invalidate 行为。
 - 使用确定性 generator adapter 的测试。
 
-### 优先级 4：增加 hybrid retrieval（已完成，见 `docs/hybrid-retrieval-mvp.md`）
+### 优先级 4：增加 hybrid retrieval（已完成，见 `docs/spec/hybrid-retrieval-mvp.md`）
 
 先实现简单本地策略，再考虑引入更重框架：
 
@@ -359,7 +359,7 @@ CLI 应只负责解析参数、调用这些模块并格式化输出。
 
 ## 2026-07-26 Hybrid Retrieval MVP 记录
 
-已完成优先级 4 的最小可用实现（设计论证见 `docs/hybrid-retrieval-mvp.md`）：
+已完成优先级 4 的最小可用实现（设计论证见 `docs/spec/hybrid-retrieval-mvp.md`）：
 
 - 新增 `hybrid` 子命令与 `app.hybrid_search`，组合既有的 `semantic_search` / `fts_search` / `query_graph`，不重复三者的 manifest / collection / progress filter 前置逻辑。
 - 用 RRF（`Σ 1/(60 + rank)`）按名次融合，不做分数归一化——实测 vector 余弦区间 0.458–0.544 与 FTS 的 0.972–1.945 量纲不可比，且 graph 路本就没有分数。k、权重、召回倍数均不进 config。
@@ -373,7 +373,7 @@ CLI 应只负责解析参数、调用这些模块并格式化输出。
 
 ## 2026-07-26 模块深化评审
 
-优先级 1-4 落地后做了一轮完整架构评审（读完全部 src），识别出 6 个 deepening 候选。执行计划见 `docs/module-deepening-plan.md`，此处只记结论：
+优先级 1-4 落地后做了一轮完整架构评审（读完全部 src），识别出 6 个 deepening 候选。执行计划见 `docs/spec/module-deepening-plan.md`，此处只记结论：
 
 - **阶段 A（先做）**：`graph.py` 824 行装了三件事——知识图谱领域、通用 LLM-JSON + 证据锚定工具、`chunks.jsonl` 读取。拆出 `extraction.py`；`read_chunks` 移回 `store.py` 与其写方 `write_manifest` 同处。seam 位置由现状证明：`analysis.py` 从 `graph.py` 导入的 7 个符号全部是通用工具，且无任何测试导入它们。
 - **阶段 B**：`build_graph` 与 `build_analysis` 12 个阶段有 10 个相同，另有 15 对镜像符号。抽出共享的重试、三态加载、落盘、status 判定与公共 staleness 检查；合并字段完全相同的 `GraphExtractionSettings`/`AnalysisSettings` 与 `GraphConfig`/`AnalysisConfig`。**刻意不做**完整 `DerivationSpec` Protocol——它需要约 14 个成员，用宽 interface 换掉实现重复并不提升 depth，留到第三个派生物出现时再评估。
@@ -383,7 +383,7 @@ CLI 应只负责解析参数、调用这些模块并格式化输出。
 
 ## 2026-07-26 阶段 A 落地记录：拆出 `extraction.py`
 
-按 `docs/module-deepening-plan.md` 阶段 A 执行完毕，纯搬迁，无行为变更：
+按 `docs/spec/module-deepening-plan.md` 阶段 A 执行完毕，纯搬迁，无行为变更：
 
 - 新增 `src/readfellow/extraction.py`（125 行），只依赖 `models`：LLM JSON 读取（`parse_json_object`、`get_any`、`as_list`、`normalize_text`）、证据锚定（`_LOOSE_IN_EVIDENCE`、`locate_evidence`、`resolve_evidence`）、chunk 归一（`chunk_context`、`int_value`）。`_int_value` 因为跨两个 module 被用（`chunk_context` 与 `finalize_graph` 的 7 处排序键）而公开为 `int_value`。
 - `read_chunks` 从 `graph.py` 移到 `store.py`，紧邻写方 `write_manifest`——`chunks.jsonl` 的读写方从此同处。`graph.py` 仍 import `store.metadata_path` 用于 `graph_path`，这是对的：派生物存在哪儿本就是领域模块该知道的事。
@@ -397,7 +397,7 @@ CLI 应只负责解析参数、调用这些模块并格式化输出。
 
 ## 2026-07-26 阶段 B 落地记录：`derivation.py` 与孪生管线合并
 
-按 `docs/module-deepening-plan.md` 阶段 B 执行 B1 + B2，B3 仍按计划待定。
+按 `docs/spec/module-deepening-plan.md` 阶段 B 执行 B1 + B2，B3 仍按计划待定。
 
 **B1 · 新增 `src/readfellow/derivation.py`（81 行）**，只依赖 pydantic 与标准库：
 
@@ -436,7 +436,7 @@ CLI 应只负责解析参数、调用这些模块并格式化输出。
 
 `store.py` 对外的 interface 收成一个 `ChunkStore` Protocol，5 个方法：`upsert` / `commit` / `search_vector` / `search_fts` / `fetch`。两个 adapter：`ZvecChunkStore`（生产）、`InMemoryChunkStore`（`tests/test_app.py`）。
 
-三个设计决定与计划原文不同，理由记在 `docs/module-deepening-plan.md` 的阶段 C 小节：`open` 不进 Protocol（改为两个 classmethod）；`upsert` 收 `embed` callback 而不是算好的 `vectors`（否则"跳过未变 chunk"省不掉唯一昂贵的那步）；`filter: str` 改成 `progress: ProgressFilter`（filter 表达式是 zvec 方言）。
+三个设计决定与计划原文不同，理由记在 `docs/spec/module-deepening-plan.md` 的阶段 C 小节：`open` 不进 Protocol（改为两个 classmethod）；`upsert` 收 `embed` callback 而不是算好的 `vectors`（否则"跳过未变 chunk"省不掉唯一昂贵的那步）；`filter: str` 改成 `progress: ProgressFilter`（filter 表达式是 zvec 方言）。
 
 **检索结果以 `Evidence` 跨 seam**：`_evidence_from_doc` 从 `app.py` 移进 `store.py` 变私有，`Doc` / `Status` / `CollectionOption` / `QueryChunkFields` 都不再出现在 `app.py`。这直接服务不变量 2——store 递出来的东西已经带着 `source_path:line_start-line_end`。
 
@@ -479,7 +479,7 @@ CLI 应只负责解析参数、调用这些模块并格式化输出。
 **刻意没做**：
 
 - **没改 `graph-query`**。它是关键词工具，子串匹配是它的正确语义，输出逐字不变。
-- **没改 RRF 参数**。等权、`RRF_K=60` 不进 config 的决定沿用 `hybrid-retrieval-mvp.md`。
+- **没改 RRF 参数**。等权、`RRF_K=60` 不进 config 的决定沿用 `docs/spec/hybrid-retrieval-mvp.md`。
 - **没修实体抽取噪声**（整句话、对白、`一个人`/`世界` 这类泛化词被抽成实体）。改 prompt 要 bump `GRAPH_PROMPT_VERSION` 并整图重建，等全量 `graph-index` 跑完有完整样本再一次性评估。
 - **没修 `graph.json` 的非原子写**。`write_json_document` 直接 `write_text`，全量约 17 MB，并发读有概率拿到截断 JSON。既有行为，与「索引不是原子发布」同类。
 

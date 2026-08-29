@@ -271,7 +271,7 @@ metadata/<collection>/
 
 这意味着图谱与分析是**真实但不完整**的子集：留下的每一条都能回落到原文精确子串，但模型引错的、以及词表不收的那部分不会出现。
 
-2026-07-27 之前，一条引文对不上会耗尽重试并终止整个 run，全量因此跑不完。根因排查与修复见 [`docs/derivation-hardening-plan.md`](docs/derivation-hardening-plan.md)，执行步骤与成本基线见 [`docs/mvp-runbook.md`](docs/mvp-runbook.md)。
+2026-07-27 之前，一条引文对不上会耗尽重试并终止整个 run，全量因此跑不完。根因排查与修复见 [`docs/spec/derivation-hardening-plan.md`](docs/spec/derivation-hardening-plan.md)，执行步骤与成本基线见 [`docs/mvp-runbook.md`](docs/mvp-runbook.md)。
 
 ### 6.2 索引不是原子发布
 
