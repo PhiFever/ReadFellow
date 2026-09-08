@@ -5,12 +5,13 @@ from pathlib import Path
 
 from readfellow.cli import main
 from readfellow.models import Chunk, IndexManifest
-from readfellow.store import ZvecChunkStore, collection_path, write_manifest
+from readfellow.store import ZvecChunkStore, collection_path
 
 
 def test_cli_fts_then_fetch_prints_persisted_source_evidence(
     tmp_path: Path,
     capsys,
+    artifacts,
 ) -> None:
     index_dir = tmp_path / "indexes"
     metadata_dir = tmp_path / "metadata"
@@ -46,6 +47,9 @@ def test_cli_fts_then_fetch_prints_persisted_source_evidence(
         byte_end=len(late_prefix.encode("utf-8")) + len(late_text.encode("utf-8")),
         chapter="第二章 之后",
     )
+    backup = metadata_dir / "books" / "graph.json"
+    backup.parent.mkdir(parents=True)
+    backup.write_text("legacy backup", encoding="utf-8")
     store = ZvecChunkStore.open_for_write(
         index_dir=index_dir,
         metadata_dir=metadata_dir,
@@ -59,12 +63,11 @@ def test_cli_fts_then_fetch_prints_persisted_source_evidence(
         embed=lambda texts: [[1.0, 0.0], [0.0, 1.0]][: len(texts)],
     )
     assert (outcome.written, outcome.skipped) == (2, 0)
+    assert backup.read_text(encoding="utf-8") == "legacy backup"
     store.commit(optimize=True)
     del store
     gc.collect()
-    write_manifest(
-        metadata_dir=metadata_dir,
-        collection="books",
+    artifacts.write_source(
         manifest=IndexManifest(
             collection="books",
             collection_path=str(collection_path(index_dir, "books")),

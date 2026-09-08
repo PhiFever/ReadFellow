@@ -10,7 +10,6 @@ from typing import Any, Literal
 from .analysis import (
     ANALYSIS_RESPONSE_SCHEMA,
     ChapterGroup,
-    analysis_path,
     analysis_staleness_reason,
     build_chapter_prompt,
     chapter_body,
@@ -22,17 +21,15 @@ from .analysis import (
     merge_chapter,
     parse_chapter_analysis,
     processed_chapter_keys,
-    read_analysis,
     update_analysis_metadata,
-    write_analysis,
 )
+from .artifacts import ArtifactStore, ImportResult, StoredRun, open_artifacts
 from .chunking import CHUNKER_VERSION, chunk_document, sha256_file
 from .config import DerivationConfig, ReadFellowConfig
 from .derivation import (
     JsonGenerator,
     derivation_status,
     generate_with_retry,
-    load_or_reset,
 )
 from .graph import (
     GRAPH_RESPONSE_SCHEMA,
@@ -41,14 +38,11 @@ from .graph import (
     build_extraction_prompt,
     empty_graph,
     graph_diagnostics,
-    graph_path,
     graph_staleness_reason,
     merge_extraction,
     parse_graph_extraction,
     processed_chunk_ids,
-    read_graph,
     update_graph_metadata,
-    write_graph,
 )
 from .graph import (
     query_graph as query_knowledge_graph,
@@ -62,7 +56,6 @@ from .models import (
     EvidenceMatch,
     GraphQueryResult,
     IndexManifest,
-    KnowledgeGraph,
     ProgressFilter,
 )
 from .ollama import OllamaEmbedder, OllamaGenerator
@@ -71,9 +64,6 @@ from .store import (
     ChunkStore,
     ZvecChunkStore,
     collection_path,
-    read_chunks,
-    read_manifest,
-    write_manifest,
 )
 
 
@@ -162,7 +152,8 @@ class GraphBuildEvent:
 @dataclass(frozen=True)
 class GraphBuildResult:
     collection: str
-    graph_path: Path
+    run_id: int
+    processed_chunk_count: int
     status: str
     selected_chunk_count: int
     entity_count: int
@@ -174,6 +165,9 @@ class GraphBuildResult:
 class GraphSearchResult:
     progress: ProgressFilter
     evidence: list[Evidence]
+    run_id: int
+    processed: int
+    selected: int
 
 
 @dataclass(frozen=True)
@@ -220,7 +214,7 @@ class IndexReport:
 
 @dataclass(frozen=True)
 class DerivationReport:
-    path: Path
+    run_id: int | None
     exists: bool
     processed: int
     total: int
@@ -269,7 +263,9 @@ class AnalysisBuildEvent:
 @dataclass(frozen=True)
 class AnalysisBuildResult:
     collection: str
-    analysis_path: Path
+    run_id: int
+    processed_chapter_count: int
+    selected_chapter_count: int
     status: str
     progress: ProgressFilter
     chapters: list[ChapterAnalysis]
@@ -284,7 +280,9 @@ def index_document(
     options: IndexDocumentOptions | None = None,
     on_progress: Callable[[IndexProgressEvent], None] | None = None,
     store: ChunkStore | None = None,
+    artifacts: ArtifactStore | None = None,
 ) -> IndexDocumentResult:
+    artifacts = artifacts or open_artifacts(config)
     options = options or IndexDocumentOptions()
     chunk_chars = options.chunk_chars or config.indexing.chunk_chars
     overlap_chars = options.overlap_chars or config.indexing.overlap_chars
@@ -333,12 +331,7 @@ def index_document(
         overlap_chars=overlap_chars,
         chunker_version=CHUNKER_VERSION,
     )
-    write_manifest(
-        metadata_dir=config.paths.metadata_dir,
-        collection=collection,
-        manifest=manifest,
-        chunks=chunks,
-    )
+    artifacts.write_source(manifest, chunks)
 
     start = time.monotonic()
     inserted = 0
@@ -386,10 +379,10 @@ def semantic_search(
     top_k: int | None = None,
     progress: ProgressLimit | None = None,
     store: ChunkStore | None = None,
+    artifacts: ArtifactStore | None = None,
 ) -> SearchResult:
-    manifest = read_manifest(
-        metadata_dir=config.paths.metadata_dir, collection=collection
-    )
+    artifacts = artifacts or open_artifacts(config)
+    _, manifest, _ = artifacts.read_source(collection)
     store = store or _open_store(config, collection)
     progress_filter = progress_filter_from_limit(progress, manifest=manifest)
     embedder = OllamaEmbedder(
@@ -416,10 +409,10 @@ def fts_search(
     top_k: int | None = None,
     progress: ProgressLimit | None = None,
     store: ChunkStore | None = None,
+    artifacts: ArtifactStore | None = None,
 ) -> SearchResult:
-    manifest = read_manifest(
-        metadata_dir=config.paths.metadata_dir, collection=collection
-    )
+    artifacts = artifacts or open_artifacts(config)
+    _, manifest, _ = artifacts.read_source(collection)
     store = store or _open_store(config, collection)
     progress_filter = progress_filter_from_limit(progress, manifest=manifest)
     return SearchResult(
@@ -439,10 +432,10 @@ def fetch_chunk(
     *,
     progress: ProgressLimit | None = None,
     store: ChunkStore | None = None,
+    artifacts: ArtifactStore | None = None,
 ) -> FetchChunkResult:
-    manifest = read_manifest(
-        metadata_dir=config.paths.metadata_dir, collection=collection
-    )
+    artifacts = artifacts or open_artifacts(config)
+    _, manifest, _ = artifacts.read_source(collection)
     store = store or _open_store(config, collection)
     progress_filter = progress_filter_from_limit(progress, manifest=manifest)
     evidence = store.fetch(chunk_id)
@@ -473,16 +466,17 @@ def build_graph(
     options: GraphBuildOptions | None = None,
     on_progress: Callable[[GraphBuildEvent], None] | None = None,
     generator: JsonGenerator | None = None,
+    artifacts: ArtifactStore | None = None,
 ) -> GraphBuildResult:
+    artifacts = artifacts or open_artifacts(config)
     options = options or GraphBuildOptions()
-    manifest, all_chunks, progress_filter = _load_indexed_source(
-        config, collection, progress
+    source_id, manifest, all_chunks, progress_filter = _load_indexed_source(
+        config, collection, progress, artifacts
     )
     chunks = [chunk for chunk in all_chunks if progress_filter.allows(chunk)]
     if options.limit:
         chunks = chunks[: options.limit]
 
-    path = graph_path(config.paths.metadata_dir, collection)
     llm_model, extraction_settings = _generation_plan(
         config,
         config.graph,
@@ -490,15 +484,14 @@ def build_graph(
         num_predict=options.num_predict,
         retries=options.retries,
     )
-    graph, rebuilt = load_or_reset(
-        path,
+    run, rebuilt = artifacts.prepare(
+        source_id,
         empty_graph(
             collection=collection,
             manifest=manifest,
             llm_model=llm_model,
             extraction_settings=extraction_settings,
         ),
-        read=read_graph,
         stale=lambda stored: graph_staleness_reason(
             stored,
             all_chunks,
@@ -510,6 +503,7 @@ def build_graph(
         rebuild=options.rebuild,
     )
 
+    graph = run.document
     processed = processed_chunk_ids(graph)
     pending = [chunk for chunk in chunks if chunk.id not in processed]
     update_graph_metadata(
@@ -526,11 +520,12 @@ def build_graph(
         GraphBuildEvent(stage="selected", progress=progress_filter),
     )
 
+    artifacts.save(run)
     if not pending:
-        write_graph(path, graph)
         return GraphBuildResult(
             collection=collection,
-            graph_path=path,
+            run_id=run.id,
+            processed_chunk_count=graph.processed_chunk_count,
             status=derivation_status(selected=len(chunks), pending=0, rebuilt=rebuilt),
             selected_chunk_count=len(chunks),
             entity_count=graph.entity_count,
@@ -607,7 +602,7 @@ def build_graph(
             progress=progress_filter,
             selected_chunk_count=len(chunks),
         )
-        write_graph(path, graph)
+        artifacts.save(run)
         _emit(
             on_progress,
             GraphBuildEvent(
@@ -624,7 +619,8 @@ def build_graph(
 
     return GraphBuildResult(
         collection=collection,
-        graph_path=path,
+        run_id=run.id,
+        processed_chunk_count=graph.processed_chunk_count,
         status=derivation_status(
             selected=len(chunks), pending=len(pending), rebuilt=rebuilt
         ),
@@ -643,10 +639,12 @@ def build_analysis(
     options: AnalysisBuildOptions | None = None,
     on_progress: Callable[[AnalysisBuildEvent], None] | None = None,
     generator: JsonGenerator | None = None,
+    artifacts: ArtifactStore | None = None,
 ) -> AnalysisBuildResult:
+    artifacts = artifacts or open_artifacts(config)
     options = options or AnalysisBuildOptions()
-    manifest, all_chunks, progress_filter = _load_indexed_source(
-        config, collection, progress
+    source_id, manifest, all_chunks, progress_filter = _load_indexed_source(
+        config, collection, progress, artifacts
     )
 
     groups = group_chapters(all_chunks)
@@ -656,7 +654,6 @@ def build_analysis(
         if all(progress_filter.allows(chunk) for chunk in group.chunks)
     ]
 
-    path = analysis_path(config.paths.metadata_dir, collection)
     llm_model, settings = _generation_plan(
         config,
         config.analysis,
@@ -665,15 +662,14 @@ def build_analysis(
         retries=options.retries,
     )
 
-    document, rebuilt = load_or_reset(
-        path,
+    run, rebuilt = artifacts.prepare(
+        source_id,
         empty_analysis(
             collection=collection,
             manifest=manifest,
             llm_model=llm_model,
             settings=settings,
         ),
-        read=read_analysis,
         stale=lambda stored: analysis_staleness_reason(
             stored,
             groups,
@@ -685,6 +681,17 @@ def build_analysis(
         rebuild=options.rebuild,
     )
 
+    document = run.document
+    update_analysis_metadata(
+        document,
+        collection=collection,
+        manifest=manifest,
+        llm_model=llm_model,
+        settings=settings,
+        progress=progress_filter,
+        selected_chapter_count=len(selected),
+    )
+    artifacts.save(run)
     processed = processed_chapter_keys(document)
     budget = chapter_char_budget(
         num_ctx=config.ollama.num_ctx, num_predict=settings.num_predict
@@ -762,7 +769,7 @@ def build_analysis(
             progress=progress_filter,
             selected_chapter_count=len(selected),
         )
-        write_analysis(path, document)
+        artifacts.save(run)
         _emit(
             on_progress,
             AnalysisBuildEvent(
@@ -786,7 +793,7 @@ def build_analysis(
         progress=progress_filter,
         selected_chapter_count=len(selected),
     )
-    write_analysis(path, document)
+    artifacts.save(run)
 
     chunks_by_id = {chunk.id: chunk for chunk in all_chunks}
     chapters = [
@@ -799,7 +806,9 @@ def build_analysis(
     ]
     return AnalysisBuildResult(
         collection=collection,
-        analysis_path=path,
+        run_id=run.id,
+        processed_chapter_count=document.processed_chapter_count,
+        selected_chapter_count=document.selected_chapter_count,
         status=derivation_status(
             selected=len(selected), pending=len(pending), rebuilt=rebuilt
         ),
@@ -815,13 +824,21 @@ def query_graph(
     collection: str,
     *,
     progress: ProgressLimit | None = None,
+    artifacts: ArtifactStore | None = None,
 ) -> GraphSearchResult:
-    graph, all_chunks, progress_filter = _load_graph(config, collection, progress)
+    artifacts = artifacts or open_artifacts(config)
+    run, all_chunks, progress_filter = _load_graph(
+        config, collection, progress, artifacts
+    )
+    graph = run.document
     graph_result = query_knowledge_graph(graph, query, progress=progress_filter)
     chunks = [chunk for chunk in all_chunks if progress_filter.allows(chunk)]
     return GraphSearchResult(
         progress=progress_filter,
         evidence=_graph_evidence(graph_result, chunks, query=query),
+        run_id=run.id,
+        processed=graph.processed_chunk_count,
+        selected=graph.selected_chunk_count,
     )
 
 
@@ -830,6 +847,7 @@ def collection_status(
     collection: str,
     *,
     store: ChunkStore | None = None,
+    artifacts: ArtifactStore | None = None,
 ) -> CollectionStatus:
     """What the collection holds and what a rebuild would do to it, changing nothing.
 
@@ -839,23 +857,23 @@ def collection_status(
     model and settings, because "would graph-index resume or start over" is the
     thing worth knowing before spending another eight hours.
     """
-    manifest = read_manifest(
-        metadata_dir=config.paths.metadata_dir, collection=collection
-    )
-    chunks = read_chunks(metadata_dir=config.paths.metadata_dir, collection=collection)
+    artifacts = artifacts or open_artifacts(config)
+    _, manifest, chunks = artifacts.read_source(collection)
     try:
         _validate_chunk_metadata_source(manifest, chunks)
         source_error = None
     except (RuntimeError, FileNotFoundError) as exc:
         source_error = str(exc)
 
-    graph_file = graph_path(config.paths.metadata_dir, collection)
-    graph, graph_error = _read_derivation(graph_file, read_graph)
+    graph_run, graph_error = _read_derivation(
+        lambda: artifacts.latest(collection, "graph")
+    )
+    graph = graph_run.document if graph_run else None
     graph_model, graph_settings = _generation_plan(
         config, config.graph, llm_model=None, num_predict=None, retries=None
     )
     graph_report = DerivationReport(
-        path=graph_file,
+        run_id=graph_run.id if graph_run else None,
         exists=graph is not None,
         processed=graph.processed_chunk_count if graph else 0,
         total=len(chunks),
@@ -875,13 +893,15 @@ def collection_status(
     )
 
     groups = complete_chapters(group_chapters(chunks))
-    analysis_file = analysis_path(config.paths.metadata_dir, collection)
-    analysis, analysis_error = _read_derivation(analysis_file, read_analysis)
+    analysis_run, analysis_error = _read_derivation(
+        lambda: artifacts.latest(collection, "analysis")
+    )
+    analysis = analysis_run.document if analysis_run else None
     analysis_model, analysis_settings = _generation_plan(
         config, config.analysis, llm_model=None, num_predict=None, retries=None
     )
     analysis_report = DerivationReport(
-        path=analysis_file,
+        run_id=analysis_run.id if analysis_run else None,
         exists=analysis is not None,
         processed=analysis.processed_chapter_count if analysis else 0,
         total=len(groups),
@@ -937,14 +957,11 @@ def _index_report(
 
 
 def _read_derivation(
-    path: Path,
-    read: Callable[[Path], Any],
-) -> tuple[Any, str | None]:
+    read: Callable[[], StoredRun | None],
+) -> tuple[StoredRun | None, str | None]:
     """The stored document, or why it cannot be reported on."""
-    if not path.is_file():
-        return None, None
     try:
-        return read(path), None
+        return read(), None
     except (ValueError, OSError) as exc:
         return None, str(exc)
 
@@ -953,15 +970,17 @@ def _load_graph(
     config: ReadFellowConfig,
     collection: str,
     progress: ProgressLimit | None,
-) -> tuple[KnowledgeGraph, list[Chunk], ProgressFilter]:
-    manifest, all_chunks, progress_filter = _load_indexed_source(
-        config, collection, progress
+    artifacts: ArtifactStore,
+) -> tuple[StoredRun, list[Chunk], ProgressFilter]:
+    source_id, manifest, all_chunks, progress_filter = _load_indexed_source(
+        config, collection, progress, artifacts
     )
-    path = graph_path(config.paths.metadata_dir, collection)
-    if not path.is_file():
-        raise FileNotFoundError(f"graph index not found: {path}; run graph-index first")
-
-    graph = read_graph(path)
+    run = artifacts.latest(collection, "graph")
+    if run is None:
+        raise FileNotFoundError(
+            f"graph index not found: {collection}; run graph-index first"
+        )
+    graph = run.document
     stale_reason = graph_staleness_reason(
         graph,
         all_chunks,
@@ -972,7 +991,7 @@ def _load_graph(
         raise RuntimeError(
             f"graph index is stale ({stale_reason}); run graph-index to rebuild it"
         )
-    return graph, all_chunks, progress_filter
+    return run, all_chunks, progress_filter
 
 
 def hybrid_search(
@@ -983,16 +1002,30 @@ def hybrid_search(
     top_k: int | None = None,
     progress: ProgressLimit | None = None,
     store: ChunkStore | None = None,
+    artifacts: ArtifactStore | None = None,
 ) -> HybridSearchResult:
+    artifacts = artifacts or open_artifacts(config)
     limit = top_k or config.search.top_k
     fan_out = limit * FAN_OUT_MULTIPLIER
     store = store or _open_store(config, collection)
 
     vector_result = semantic_search(
-        config, query, collection, top_k=fan_out, progress=progress, store=store
+        config,
+        query,
+        collection,
+        top_k=fan_out,
+        progress=progress,
+        store=store,
+        artifacts=artifacts,
     )
     fts_result = fts_search(
-        config, query, collection, top_k=fan_out, progress=progress, store=store
+        config,
+        query,
+        collection,
+        top_k=fan_out,
+        progress=progress,
+        store=store,
+        artifacts=artifacts,
     )
 
     channels: list[tuple[ChannelMode, list[Evidence]]] = [
@@ -1000,7 +1033,11 @@ def hybrid_search(
         ("fts", fts_result.evidence),
     ]
     evidence, annotation = _annotate_with_graph(
-        _fuse_channels(channels)[:limit], config, collection, progress=progress
+        _fuse_channels(channels)[:limit],
+        config,
+        collection,
+        progress=progress,
+        artifacts=artifacts,
     )
     return HybridSearchResult(
         progress=vector_result.progress,
@@ -1018,6 +1055,7 @@ def _annotate_with_graph(
     collection: str,
     *,
     progress: ProgressLimit | None,
+    artifacts: ArtifactStore,
 ) -> tuple[list[Evidence], GraphAnnotationStatus]:
     """The same results, carrying whatever the graph recorded about them.
 
@@ -1026,7 +1064,8 @@ def _annotate_with_graph(
     themselves.
     """
     try:
-        graph, _, progress_filter = _load_graph(config, collection, progress)
+        run, _, progress_filter = _load_graph(config, collection, progress, artifacts)
+        graph = run.document
     except (FileNotFoundError, RuntimeError) as exc:
         return evidence, GraphAnnotationStatus(annotated=0, skipped_reason=str(exc))
 
@@ -1066,18 +1105,21 @@ def _load_indexed_source(
     config: ReadFellowConfig,
     collection: str,
     progress: ProgressLimit | None,
-) -> tuple[IndexManifest, list[Chunk], ProgressFilter]:
+    artifacts: ArtifactStore,
+) -> tuple[int, IndexManifest, list[Chunk], ProgressFilter]:
     """The manifest, chunks and progress filter a derivation reads the corpus through.
 
     The chunks are checked against the source file here, so no path that reaches
     the stored chunks can skip that check.
     """
-    manifest = read_manifest(
-        metadata_dir=config.paths.metadata_dir, collection=collection
-    )
-    chunks = read_chunks(metadata_dir=config.paths.metadata_dir, collection=collection)
+    source_id, manifest, chunks = artifacts.read_source(collection)
     _validate_chunk_metadata_source(manifest, chunks)
-    return manifest, chunks, progress_filter_from_limit(progress, manifest=manifest)
+    return (
+        source_id,
+        manifest,
+        chunks,
+        progress_filter_from_limit(progress, manifest=manifest),
+    )
 
 
 def _generation_plan(
@@ -1243,3 +1285,19 @@ def _emit(
 ) -> None:
     if callback is not None:
         callback(event)
+
+
+def initialize_database(
+    config: ReadFellowConfig, *, artifacts: ArtifactStore | None = None
+) -> None:
+    (artifacts or open_artifacts(config)).initialize()
+
+
+def import_json(
+    config: ReadFellowConfig, collection: str, *, artifacts: ArtifactStore | None = None
+) -> ImportResult:
+    from .legacy_import import import_collection
+
+    return import_collection(
+        artifacts or open_artifacts(config), config.paths.metadata_dir, collection
+    )

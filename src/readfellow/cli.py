@@ -21,6 +21,8 @@ from .app import (
     fts_search,
     hybrid_search,
     index_document,
+    initialize_database,
+    import_json,
     semantic_search,
 )
 from .app import (
@@ -60,6 +62,16 @@ def build_parser(config: ReadFellowConfig) -> argparse.ArgumentParser:
     parser.add_argument("--keep-alive", default=config.ollama.keep_alive)
 
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    subparsers.add_parser("db-init", help="create the MySQL artifact tables")
+    importer = subparsers.add_parser(
+        "import-json", help="import one legacy collection into MySQL once"
+    )
+    importer.add_argument(
+        "--collection",
+        type=valid_collection_name,
+        default=config.indexing.default_collection,
+    )
 
     index = subparsers.add_parser("index", help="chunk and index a UTF-8 text document")
     index.add_argument("source", type=Path)
@@ -129,7 +141,7 @@ def build_parser(config: ReadFellowConfig) -> argparse.ArgumentParser:
 
     graph_index = subparsers.add_parser(
         "graph-index",
-        help="extract a local JSON knowledge graph from stored chunks",
+        help="extract a versioned knowledge graph into MySQL",
     )
     graph_index.add_argument(
         "--collection",
@@ -160,7 +172,7 @@ def build_parser(config: ReadFellowConfig) -> argparse.ArgumentParser:
 
     graph_query = subparsers.add_parser(
         "graph-query",
-        help="query the local JSON knowledge graph",
+        help="query the latest knowledge graph in MySQL",
     )
     graph_query.add_argument("query")
     graph_query.add_argument(
@@ -332,6 +344,9 @@ def command_graph_index(args: argparse.Namespace, config: ReadFellowConfig) -> i
         ),
         on_progress=print_graph_progress,
     )
+    print(
+        f"run_id={result.run_id}, processed={result.processed_chunk_count}/{result.selected_chunk_count} chunks"
+    )
     if result.status == "empty":
         print(f"done: no chunks selected for collection={result.collection}")
         return 0
@@ -348,7 +363,7 @@ def command_graph_index(args: argparse.Namespace, config: ReadFellowConfig) -> i
         else ""
     )
     print(
-        f"done: collection={result.collection}, graph={result.graph_path}, "
+        f"done: collection={result.collection}, run_id={result.run_id}, "
         f"entities={result.entity_count}, relations={result.relation_count}{failed}"
     )
     return 0
@@ -360,6 +375,9 @@ def command_graph_query(args: argparse.Namespace, config: ReadFellowConfig) -> i
         args.query,
         args.collection,
         progress=progress_limit_from_args(args),
+    )
+    print(
+        f"run_id={result.run_id}, processed={result.processed}/{result.selected} chunks"
     )
     print_progress(result.progress)
     print_evidence(result.evidence)
@@ -381,7 +399,7 @@ def command_analyze(args: argparse.Namespace, config: ReadFellowConfig) -> int:
     )
     print_chapter_analyses(result.chapters)
     print(
-        f"\ndone: collection={result.collection}, analysis={result.analysis_path}, "
+        f"\ndone: collection={result.collection}, run_id={result.run_id}, processed={result.processed_chapter_count}/{result.selected_chapter_count} chapters, "
         f"status={result.status}"
     )
     return 0
@@ -438,12 +456,14 @@ def print_derivation_status(command: str, unit: str, report: DerivationReport) -
         return
 
     print(
-        f"{label} {report.processed}/{report.total} {unit}"
+        f"{label} run_id={report.run_id}, {report.processed}/{report.total} {unit}"
         f"{_rejected_suffix(report.rejected_count, report.unanchored_count)}"
     )
     if report.stale_reason is not None:
         print(f"  ⚠ stale: {report.stale_reason}")
-        print(f"  → {command} would discard all {report.processed} and start over")
+        print(
+            f"  → {command} would create a new version; the {report.processed} historical units remain"
+        )
     elif report.processed < report.total:
         remaining = report.total - report.processed
         print(f"  → {command} would resume on the remaining {remaining} {unit}")
@@ -694,6 +714,18 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     config = apply_global_overrides(config, args)
     try:
+        if args.command == "db-init":
+            initialize_database(config)
+            print("database tables initialized")
+            return 0
+        if args.command == "import-json":
+            result = import_json(config, args.collection)
+            print(
+                f"{'already imported' if result.skipped else 'imported'}: collection={args.collection}, "
+                f"source_version_id={result.source_version_id}, graph_run_id={result.graph_run_id}, "
+                f"analysis_run_id={result.analysis_run_id}"
+            )
+            return 0
         if args.command == "index":
             return command_index(args, config)
         if args.command == "search":

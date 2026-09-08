@@ -178,12 +178,9 @@ class ZvecChunkStore:
         rebuild: bool,
     ) -> ZvecChunkStore:
         path = collection_path(index_dir, collection)
-        meta = metadata_path(metadata_dir, collection)
         if rebuild:
             if path.exists():
                 shutil.rmtree(path)
-            if meta.exists():
-                shutil.rmtree(meta)
 
         index_dir.mkdir(parents=True, exist_ok=True)
         metadata_dir.mkdir(parents=True, exist_ok=True)

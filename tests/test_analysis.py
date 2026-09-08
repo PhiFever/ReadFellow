@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from readfellow.artifacts import open_artifacts
+from artifact_helpers import replace_run
 
-from readfellow.analysis import read_analysis, write_analysis
 from readfellow.app import AnalysisBuildOptions, ProgressLimit, build_analysis
 from readfellow.chunking import CHUNKER_VERSION, chunk_document
 from readfellow.config import PathConfig, ReadFellowConfig
 from readfellow.models import IndexManifest
-from readfellow.store import write_manifest
 
 TWO_CHAPTERS = (
     "第一章 开始\n\n向山帮助了尤基。\n\n尤基修好了机器。\n\n"
@@ -68,9 +68,7 @@ def build_collection(tmp_path: Path) -> ReadFellowConfig:
             metadata_dir=tmp_path / "metadata",
         )
     )
-    write_manifest(
-        metadata_dir=config.paths.metadata_dir,
-        collection="books",
+    open_artifacts(config).write_source(
         manifest=IndexManifest(
             collection="books",
             collection_path="indexes/books",
@@ -173,11 +171,10 @@ def test_analysis_rebuilds_when_prompt_version_or_chunk_hash_changes(
         options=AnalysisBuildOptions(retries=0),
         generator=DeterministicGenerator([FIRST_CHAPTER_PAYLOAD]),
     )
-    path = config.paths.metadata_dir / "books" / "analysis.json"
 
-    document = read_analysis(path)
+    document = open_artifacts(config).latest("books", "analysis").document
     document.prompt_version = "chapter-analysis-v0"
-    write_analysis(path, document)
+    replace_run(config, "analysis", document)
     rebuilt = build_analysis(
         config,
         "books",
@@ -187,10 +184,10 @@ def test_analysis_rebuilds_when_prompt_version_or_chunk_hash_changes(
     )
     assert rebuilt.status == "rebuilt"
 
-    document = read_analysis(path)
+    document = open_artifacts(config).latest("books", "analysis").document
     first_chunk_id = document.chapters[0].chunk_ids[0]
     document.chunk_text_hashes[first_chunk_id] = "changed"
-    write_analysis(path, document)
+    replace_run(config, "analysis", document)
     rebuilt_again = build_analysis(
         config,
         "books",
@@ -215,7 +212,7 @@ def test_analysis_suppresses_summary_when_progress_cuts_a_chapter(
         ),
     )
 
-    stored = read_analysis(config.paths.metadata_dir / "books" / "analysis.json")
+    stored = open_artifacts(config).latest("books", "analysis").document
     assert len(stored.chapters) == 2
 
     # Line 9 is the middle of chapter two: chapter one stays whole, chapter two

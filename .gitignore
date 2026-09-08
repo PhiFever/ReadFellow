@@ -17,3 +17,6 @@ metadata/
 logs/
 
 corpus/samples
+
+# Local database credentials
+.env

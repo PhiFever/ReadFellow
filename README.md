@@ -18,6 +18,15 @@ ReadFellow 是一个本地优先的 CLI 工作流：把长文档（主要是中�
 uv sync
 ```
 
+**MySQL** 保存图谱、章节分析和切块元数据。先在 `.env` 设置 `MYSQL_URI`（已有数据库的 SQLAlchemy URL），再初始化表；已有 JSON 结果可一次性导入：
+
+```sh
+uv run readfellow db-init
+uv run readfellow import-json --collection sample
+```
+
+连接方式、历史版本和 DataGrip SQL 示例见 [MySQL 存储与查询](docs/mysql-storage.md)。
+
 **Ollama** 必须运行在 `config.yaml` 配置的端点上，并已拉取两个模型：
 
 ```sh
@@ -71,7 +80,7 @@ uv run readfellow fetch bdd935754e17_000001 --collection smoke
 |---|---|---|
 | `--config` | `config.yaml` | 换一份配置文件 |
 | `--index-dir` | `paths.index_dir` | zvec 数据目录 |
-| `--metadata-dir` | `paths.metadata_dir` | manifest / chunks / graph / analysis 目录 |
+| `--metadata-dir` | `paths.metadata_dir` | 一次性导入的旧 JSON / JSONL 目录 |
 | `--ollama-url` | `ollama.base_url` | Ollama 端点 |
 | `--model` | `ollama.embedding_model` | **embedding** 模型（生成模型是各子命令的 `--llm-model`） |
 | `--keep-alive` | `ollama.keep_alive` | 模型驻留时间 |
@@ -96,7 +105,7 @@ uv run readfellow index <文档.txt> --collection sample --rebuild
 | `--rebuild` | off | 重建集合，换模型 / 换切块参数时必须加 |
 | `--no-optimize` | off | 跳过 `zvec.optimize()`，**仅用于测写入速度** |
 
-流程：切块 → 用首个 chunk 探测 embedding 维度 → 先写 `manifest.json` + `chunks.jsonl` → 分批比对 `text_hash` 决定 insert/update/skip（只对真要写的 chunk 调 embedding）→ `optimize()`。
+流程：切块 → 用首个 chunk 探测 embedding 维度 → 先将 manifest 和 chunks 写入 MySQL 源数据版本 → 分批比对 `text_hash` 决定 insert/update/skip（只对真要写的 chunk 调 embedding）→ `optimize()`。
 
 > **`--no-optimize` 不要用于正式索引**：不 optimize 时持久化的中文 FTS 在集合重开后可能查不到。
 
@@ -144,7 +153,7 @@ uv run readfellow graph-index --collection sample --limit 20
 uv run readfellow graph-query "向山" --collection sample
 ```
 
-`graph-index` 读 `chunks.jsonl`，对每个 chunk 调一次生成模型抽取实体/关系，写入 `metadata/<collection>/graph.json`。
+`graph-index` 从 MySQL 读取 chunks，对每个 chunk 调一次生成模型抽取实体/关系，写入当前运行版本。`--rebuild` 创建新 `run_id` 并保留历史；CLI 默认查询最新版本，即使其尚未完成，也不回退旧版。
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
@@ -154,9 +163,9 @@ uv run readfellow graph-query "向山" --collection sample
 | `--retries` | `graph.retries` (2) | 每 chunk 失败重试次数 |
 | `--rebuild` | off | 整图重建 |
 
-**每个 chunk 抽完立即落盘**，中断安全；重跑靠 `processed_chunk_ids` 断点续建，不会重做已完成的部分。
+**每个 chunk 抽完立即提交数据库事务**，中断安全；重跑靠 `processed_chunk_ids` 断点续建，不会重做已完成的部分。
 
-`graph-query` 按实体名、别名或关系关键词查询；图谱只给出 chunk id 与上下文，**原文仍从 `chunks.jsonl` 取**。
+`graph-query` 按实体名、别名或关系关键词查询；图谱只给出 chunk id 与上下文，**原文仍从对应版本的 chunks 取**。
 
 ### 3.6 `analyze` — 章节级分析
 
@@ -166,14 +175,14 @@ uv run readfellow graph-query "向山" --collection sample
 uv run readfellow analyze --collection sample --max-chapter 50
 ```
 
-按检测到的章节分组，对每个**完整章节**调一次生成模型，产出梗概、人物、事件，写入 `metadata/<collection>/analysis.json`。参数与 `graph-index` 同（除 `--limit`，`analyze` 用 `--max-chapter` 分批）。
+按检测到的章节分组，对每个**完整章节**调一次生成模型，产出梗概、人物、事件，写入 MySQL 中独立的章节分析运行版本。参数与 `graph-index` 同（除 `--limit`，`analyze` 用 `--max-chapter` 分批）。
 
 两条规则：
 
 - **最后一组永不分析**。它可能被 `index --limit` 截断，无法与完整章节区分。
 - **超出 `num_ctx` 预算的章节被跳过**并打印原因。预算 = `(num_ctx − num_predict − 600) × 1.5` 字符；当前配置为 17532 字符。示例小说 1207 章中仅 2 章超标（0.2%）。
 
-**每章分析完立即落盘**，中断安全，重跑按 `(章序号, 章标题)` 续建。
+**每章分析完立即提交数据库事务**，中断安全，重跑按 `(章序号, 章标题)` 续建。
 
 ### 3.7 `status` — 集合体检
 
@@ -240,11 +249,12 @@ uv run readfellow graph-query "向山"     --collection sample --max-chapter 10
 
 ```
 indexes/<collection>/                 # zvec 数据
-metadata/<collection>/
-  ├── manifest.json                   # 集合、源文档、模型、维度、chunk 数、切块参数
-  ├── chunks.jsonl                    # 全部 chunk 原文与出处（证据的最终来源）
-  ├── graph.json                      # graph-index 产物
-  └── analysis.json                   # analyze 产物
+metadata/<collection>/                # 一次性导入后保留的旧文件备份
+MySQL:
+  source_versions / chunks           # manifest 与原文切块版本
+  runs                               # 图谱、章节分析的运行历史
+  entities / relations / ...         # 可用 SQL 联查的实体、关系与证据
+  chapters / characters / events     # 章节分析
 ```
 
 `indexes/`、`metadata/`、`corpus/` 均不纳入版本控制。
@@ -267,7 +277,7 @@ metadata/<collection>/
 - **unanchored** —— 模型给的 evidence 不是所属 chunk 原文的精确子串（多为把代词换成人名这类改写）。放宽匹配等于伪造出处，所以按设计丢弃。这是唯一一个"模型没读好"的信号，实测 **3.9%**（2307 chunk 全量）。显著高于此值才值得查模型或 prompt。
 - **unreadable** —— 条目根本读不出形状：关系谓词不在 `RELATION_TYPES` 白名单内、实体没有名字、字段缺失。其中**绝大部分是白名单拒绝**（全量实测 20.7%），拒掉的是 `怀疑`／`担心`／`回答` 这类叙事长尾谓词。这是封闭谓词表的**设计成本，不是缺陷**：调采样参数、改 prompt 都不会让它下降。
 
-两者相加就是 `rejected=N`，落盘在 `graph.json` / `analysis.json` 的 `rejected_count`，其中 unanchored 那部分单独落在 `unanchored_count`。**总数偏高本身不说明问题，要看拆开后的 unanchored。**
+两者相加就是 `rejected=N`，保存在 MySQL 运行及抽取记录的 `rejected_count`，其中 unanchored 那部分单独落在 `unanchored_count`。**总数偏高本身不说明问题，要看拆开后的 unanchored。**
 
 这意味着图谱与分析是**真实但不完整**的子集：留下的每一条都能回落到原文精确子串，但模型引错的、以及词表不收的那部分不会出现。
 
@@ -277,7 +287,7 @@ metadata/<collection>/
 
 embedding 中途失败会留下 metadata 完整而 collection 不完整的状态。用 `--rebuild` 重跑可恢复。**`status` 的 `index:` 行能检出它**（zvec 报的 doc 数少于 manifest 承诺的 chunk 数），但写入本身仍不是两阶段发布。
 
-派生物那边已经不再有这个问题：`graph.json` / `analysis.json` 走临时文件 + `os.replace`，跑着 `graph-index` 的时候读它拿到的要么是上一版要么是新版，不会是半个文件。
+派生物使用 MySQL 事务：每个单元的实体、关系或章节结果与处理记录一起提交，读取时不会看到只写了一半的单元。
 
 ### 6.3 换模型 / 换切块参数必须 `--rebuild`
 
@@ -292,7 +302,7 @@ embedding 中途失败会留下 metadata 完整而 collection 不完整的状态
 |---|---|
 | `error loading config: ...` | `config.yaml` 语法错误，或 `--config` 指向的文件不存在 |
 | Ollama 返回 `503` / 连接被拒 | `ollama serve` 没起来，或 `--ollama-url` 端点不对 |
-| `run index --rebuild`（chunker 版本不符） | `chunks.jsonl` 由旧版切块器产出，重新索引 |
+| `run index --rebuild`（chunker 版本不符） | 数据库中的 chunks 由旧版切块器产出，重新索引 |
 | `chunk metadata is stale (source path changed)` | 源文档被移动或改名，重新索引 |
 | 源文件 hash 不符 | 源文档被修改过。源文档不可变是第一不变量，必须重新索引 |
 | `fts` 查不到内容但 `search` 正常 | 索引时用了 `--no-optimize`，重新索引且不要跳过 optimize |

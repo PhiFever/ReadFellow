@@ -10,7 +10,6 @@ from typing import Any, Protocol, TypeVar
 
 from pydantic import BaseModel
 
-Document = TypeVar("Document", bound=BaseModel)
 Parsed = TypeVar("Parsed")
 
 
@@ -46,29 +45,6 @@ def generate_with_retry(
                 raise RuntimeError(f"{label}: {exc}") from exc
             on_retry(attempt + 1, exc)
     raise RuntimeError(f"{label}: no attempt was made")
-
-
-def load_or_reset(
-    path: Path,
-    empty: Document,
-    *,
-    read: Callable[[Path], Document],
-    stale: Callable[[Document], str | None],
-    rebuild: bool,
-) -> tuple[Document, bool]:
-    """The stored document when it is still trustworthy, else `empty`.
-
-    The flag says whether an existing document was discarded, which is what
-    separates a rebuilt run from a first build.
-    """
-    if not path.exists():
-        return empty, False
-    if rebuild:
-        return empty, True
-    stored = read(path)
-    if stale(stored) is not None:
-        return empty, True
-    return stored, False
 
 
 def write_json_document(path: Path, document: BaseModel) -> None:

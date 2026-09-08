@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import yaml
-from pydantic import ConfigDict
+from pydantic import ConfigDict, SecretStr
 
 from .models import ReadFellowModel
 
@@ -54,6 +54,7 @@ class DerivationConfig(ReadFellowModel):
 class ReadFellowConfig(ReadFellowModel):
     model_config = ConfigDict(extra="forbid")
 
+    database_url: SecretStr | None = None
     paths: PathConfig = PathConfig()
     ollama: OllamaConfig = OllamaConfig()
     indexing: IndexingConfig = IndexingConfig()

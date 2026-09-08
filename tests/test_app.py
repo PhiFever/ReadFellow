@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from readfellow.artifacts import open_artifacts
+from artifact_helpers import replace_run
 from typing import Any
 
 import pytest
@@ -29,14 +31,11 @@ from readfellow.chunking import (
 from readfellow.config import OllamaConfig, PathConfig, ReadFellowConfig, SearchConfig
 from readfellow.graph import (
     empty_graph,
-    graph_path,
     merge_extraction,
     parse_graph_extraction,
-    read_graph,
-    write_graph,
 )
 from readfellow.models import Chunk, Evidence, IndexManifest, ProgressFilter
-from readfellow.store import StoreStats, UpsertOutcome, write_manifest
+from readfellow.store import StoreStats, UpsertOutcome
 
 
 def manifest_for(source: Path) -> IndexManifest:
@@ -162,12 +161,7 @@ def test_graph_build_records_versioned_source_fingerprints(
             metadata_dir=tmp_path / "metadata",
         )
     )
-    write_manifest(
-        metadata_dir=config.paths.metadata_dir,
-        collection="books",
-        manifest=manifest_for(source),
-        chunks=chunks,
-    )
+    open_artifacts(config).write_source(manifest=manifest_for(source), chunks=chunks)
     generator = DeterministicGenerator(
         [
             {
@@ -201,7 +195,7 @@ def test_graph_build_records_versioned_source_fingerprints(
     assert result.status == "built"
     assert len(generator.prompts) == 1
     assert "prompt_version: graph-extraction-v1" in generator.prompts[0]
-    graph = read_graph(result.graph_path)
+    graph = open_artifacts(config).read_run(result.run_id).document
     assert graph.prompt_version == "graph-extraction-v1"
     assert graph.model_dump(mode="json")["source_chunk_hashes"] == {
         chunks[0].id: {
@@ -249,7 +243,7 @@ def test_graph_build_records_versioned_source_fingerprints(
     assert fail_if_called.prompts == []
 
     graph.prompt_version = "legacy"
-    write_graph(result.graph_path, graph)
+    replace_run(config, "graph", graph)
     refreshed = DeterministicGenerator(
         [
             {
@@ -292,12 +286,7 @@ def test_graph_build_drops_evidence_that_is_not_source_grounded(
             metadata_dir=tmp_path / "metadata",
         )
     )
-    write_manifest(
-        metadata_dir=config.paths.metadata_dir,
-        collection="books",
-        manifest=manifest_for(source),
-        chunks=chunks,
-    )
+    open_artifacts(config).write_source(manifest=manifest_for(source), chunks=chunks)
     generator = DeterministicGenerator(
         [
             {
@@ -327,7 +316,7 @@ def test_graph_build_drops_evidence_that_is_not_source_grounded(
         generator=generator,
     )
 
-    graph = read_graph(result.graph_path)
+    graph = open_artifacts(config).read_run(result.run_id).document
     assert len(generator.prompts) == 1
     assert [relation.evidence for relation in graph.relations] == ["向山帮助了尤基"]
     assert graph.rejected_count == 1
@@ -352,12 +341,7 @@ def test_graph_build_survives_a_chunk_it_cannot_parse(tmp_path: Path) -> None:
             metadata_dir=tmp_path / "metadata",
         )
     )
-    write_manifest(
-        metadata_dir=config.paths.metadata_dir,
-        collection="books",
-        manifest=manifest_for(source),
-        chunks=chunks,
-    )
+    open_artifacts(config).write_source(manifest=manifest_for(source), chunks=chunks)
     answer: dict[str, object] = {"entities": [{"name": "向山", "type": "人物"}]}
     generator = DeterministicGenerator(['{"entities": [{"name":', *[answer] * 9])
 
@@ -370,7 +354,7 @@ def test_graph_build_survives_a_chunk_it_cannot_parse(tmp_path: Path) -> None:
 
     assert result.failed_chunk_count == 1
     assert len(generator.prompts) == len(chunks)
-    graph = read_graph(result.graph_path)
+    graph = open_artifacts(config).read_run(result.run_id).document
     assert [record.chunk_id for record in graph.extractions] == [
         chunk.id for chunk in chunks[1:]
     ]
@@ -384,7 +368,9 @@ def test_graph_build_survives_a_chunk_it_cannot_parse(tmp_path: Path) -> None:
     )
 
     assert retry.failed_chunk_count == 0
-    assert len(read_graph(retry.graph_path).extractions) == len(chunks)
+    assert len(
+        open_artifacts(config).read_run(retry.run_id).document.extractions
+    ) == len(chunks)
 
 
 def test_changed_chunk_metadata_invalidates_queries_and_rebuilds_graph(
@@ -404,11 +390,8 @@ def test_changed_chunk_metadata_invalidates_queries_and_rebuilds_graph(
             metadata_dir=tmp_path / "metadata",
         )
     )
-    write_manifest(
-        metadata_dir=config.paths.metadata_dir,
-        collection="books",
-        manifest=manifest_for(source),
-        chunks=first_chunks,
+    open_artifacts(config).write_source(
+        manifest=manifest_for(source), chunks=first_chunks
     )
     build_graph(
         config,
@@ -440,12 +423,7 @@ def test_changed_chunk_metadata_invalidates_queries_and_rebuilds_graph(
         target_chars=100,
         overlap_chars=0,
     )[0].model_copy(update={"id": first_chunks[0].id})
-    write_manifest(
-        metadata_dir=config.paths.metadata_dir,
-        collection="books",
-        manifest=manifest_for(source),
-        chunks=[changed],
-    )
+    open_artifacts(config).write_source(manifest=manifest_for(source), chunks=[changed])
 
     with pytest.raises(RuntimeError, match="graph index is stale"):
         query_graph(config, "向山", "books")
@@ -470,7 +448,7 @@ def test_changed_chunk_metadata_invalidates_queries_and_rebuilds_graph(
         ),
     )
 
-    graph = read_graph(result.graph_path)
+    graph = open_artifacts(config).read_run(result.run_id).document
     assert result.status == "rebuilt"
     assert [entity.name for entity in graph.entities] == ["尤基"]
     assert graph.extractions[0].source_hash == changed.source_hash
@@ -528,7 +506,7 @@ def test_semantic_search_is_configured_application_workflow(
         ]
     )
 
-    monkeypatch.setattr(app, "read_manifest", lambda **_: manifest_for(source))
+    open_artifacts(config).write_source(manifest_for(source), [])
     monkeypatch.setattr(app, "OllamaEmbedder", FakeEmbedder)
 
     result = semantic_search(
@@ -641,7 +619,7 @@ def test_fts_search_returns_source_grounded_evidence(
         ]
     )
 
-    monkeypatch.setattr(app, "read_manifest", lambda **_: manifest_for(source))
+    open_artifacts(config).write_source(manifest_for(source), [])
 
     result = fts_search(config, "关键词", "books", top_k=4, store=store)
 
@@ -678,7 +656,7 @@ def test_fetch_chunk_does_not_expose_text_outside_progress(
         retrieval_mode="fetch",
     )
 
-    monkeypatch.setattr(app, "read_manifest", lambda **_: manifest_for(source))
+    open_artifacts(config).write_source(manifest_for(source), [])
 
     result = fetch_chunk(
         config,
@@ -733,12 +711,7 @@ def test_graph_query_returns_original_chunk_as_evidence(tmp_path: Path) -> None:
             "byte_end": original.byte_end + 1 + len(unrelated_text.encode("utf-8")),
         }
     )
-    write_manifest(
-        metadata_dir=config.paths.metadata_dir,
-        collection="books",
-        manifest=manifest,
-        chunks=[original, unrelated],
-    )
+    open_artifacts(config).write_source(manifest=manifest, chunks=[original, unrelated])
     graph = empty_graph(collection="books", manifest=manifest)
     extraction = parse_graph_extraction(
         {
@@ -766,7 +739,7 @@ def test_graph_query_returns_original_chunk_as_evidence(tmp_path: Path) -> None:
         ),
         unrelated,
     )
-    write_graph(graph_path(config.paths.metadata_dir, "books"), graph)
+    replace_run(config, "graph", graph)
 
     result = query_graph(config, "帮助", "books")
 
@@ -825,12 +798,7 @@ def test_graph_query_does_not_match_alias_learned_after_progress(
         byte_end=late_start + len(late_text.encode("utf-8")),
         chapter="第二章 之后",
     )
-    write_manifest(
-        metadata_dir=config.paths.metadata_dir,
-        collection="books",
-        manifest=manifest,
-        chunks=[early, late],
-    )
+    open_artifacts(config).write_source(manifest=manifest, chunks=[early, late])
     graph = empty_graph(collection="books", manifest=manifest)
     merge_extraction(
         graph,
@@ -851,7 +819,7 @@ def test_graph_query_does_not_match_alias_learned_after_progress(
         ),
         late,
     )
-    write_graph(graph_path(config.paths.metadata_dir, "books"), graph)
+    replace_run(config, "graph", graph)
 
     result = query_graph(
         config,
@@ -879,12 +847,7 @@ def hybrid_workspace(tmp_path: Path) -> tuple[ReadFellowConfig, Path, list[Chunk
         target_chars=100,
         overlap_chars=0,
     )
-    write_manifest(
-        metadata_dir=config.paths.metadata_dir,
-        collection="books",
-        manifest=manifest_for(source),
-        chunks=chunks,
-    )
+    open_artifacts(config).write_source(manifest=manifest_for(source), chunks=chunks)
     return config, source, chunks
 
 
@@ -1090,11 +1053,8 @@ def test_hybrid_skips_the_graph_annotation_and_reports_why(
             target_chars=100,
             overlap_chars=0,
         )[0].model_copy(update={"id": chunks[0].id})
-        write_manifest(
-            metadata_dir=config.paths.metadata_dir,
-            collection="books",
-            manifest=manifest_for(source),
-            chunks=[changed],
+        open_artifacts(config).write_source(
+            manifest=manifest_for(source), chunks=[changed]
         )
 
     store = stub_channels(
@@ -1140,10 +1100,9 @@ def test_status_reports_a_stale_graph_and_a_short_index_without_repairing_either
             ]
         ),
     )
-    path = graph_path(config.paths.metadata_dir, "books")
-    stored = read_graph(path)
+    stored = open_artifacts(config).latest("books", "graph").document
     stored.prompt_version = "legacy"
-    write_graph(path, stored)
+    replace_run(config, "graph", stored)
 
     # An empty store against a manifest promising one chunk is the shape an
     # index killed between writing metadata and writing embeddings leaves behind.
@@ -1157,7 +1116,10 @@ def test_status_reports_a_stale_graph_and_a_short_index_without_repairing_either
     assert status.diagnostics.declared_entity_count == 1
     assert status.analysis.exists is False
     # Reporting a stale derivative must not be a way of rebuilding it.
-    assert read_graph(path).prompt_version == "legacy"
+    assert (
+        open_artifacts(config).latest("books", "graph").document.prompt_version
+        == "legacy"
+    )
 
 
 def test_hybrid_fails_when_the_embedding_service_is_down(
