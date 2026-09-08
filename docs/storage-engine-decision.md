@@ -1,3 +1,5 @@
+push
+
 # 存储引擎:为什么现在不换 sqlite 或 chromadb
 
 2026-07-27 的讨论存档。起因是 `graph-index` 跑完之后没有任何办法验证结果,顺带问出「是否值得引入 sqlite 获得更好的事务和文件迁移能力」。
@@ -30,22 +32,22 @@ write_text   0.006s
 
 `write_graph` 在 `app.py` 的 per-chunk 循环体内,每个 chunk 后整文件重写。
 
-| | 值 |
-|---|---|
-| 单次写盘(7.7 MB) | 0.103 s |
-| 单次写盘(外推 35 MB / 2307 chunks) | ≈ 0.47 s |
-| 全程均值 × 2307 次 | ≈ 530 s ≈ **9 分钟** |
-| 全量 run 总耗时 | ≈ 8 小时 |
-| **写盘占比** | **≈ 1.8%** |
-| 累计落盘 Σn×15KB | ≈ 40 GB(随 chunk 数二次增长) |
+|                                    | 值                            |
+| ---------------------------------- | ----------------------------- |
+| 单次写盘(7.7 MB)                   | 0.103 s                       |
+| 单次写盘(外推 35 MB / 2307 chunks) | ≈ 0.47 s                     |
+| 全程均值 × 2307 次                | ≈ 530 s ≈**9 分钟**   |
+| 全量 run 总耗时                    | ≈ 8 小时                     |
+| **写盘占比**                 | **≈ 1.8%**             |
+| 累计落盘 Σn×15KB                 | ≈ 40 GB(随 chunk 数二次增长) |
 
 ### 载入成本
 
-| | 时间 | RSS 增量 |
-|---|---|---|
-| `graph.json` 7.72 MB @ 515 chunks | 0.083 s | +55 MB |
-| 外推全量(×4.5) | ≈ 0.37 s | ≈ +250 MB |
-| `chunks.jsonl` 13.1 MB / 2307 chunks | 0.159 s | +14 MB |
+|                                        | 时间      | RSS 增量   |
+| -------------------------------------- | --------- | ---------- |
+| `graph.json` 7.72 MB @ 515 chunks    | 0.083 s   | +55 MB     |
+| 外推全量(×4.5)                        | ≈ 0.37 s | ≈ +250 MB |
+| `chunks.jsonl` 13.1 MB / 2307 chunks | 0.159 s   | +14 MB     |
 
 全量下 `hybrid` / `graph-query` 每次调用约付 0.5 s 反序列化 + 270 MB RSS。还不痛。
 
@@ -53,16 +55,16 @@ write_text   0.006s
 
 八项全过:
 
-| # | 能力 | 结果 |
-|---|---|---|
-| 1 | `CollectionSchema(vectors=None)` 无向量 collection | OK |
-| 2 | `upsert` | OK |
-| 3 | `query(queries=None, filter=...)` 纯过滤扫描 | OK |
-| 4 | 重开后 filter 扫描 | OK |
-| 5 | `add_column(FieldSchema, expression="1")` 在线加列 + 回填 | 5 行回填成功 |
-| 6 | `update` 单行(不重写全表) | OK |
-| 7 | `stats` | `{"doc_count":5, ...}` |
-| 8 | `LIKE '%子串%'` | OK |
+| # | 能力                                                        | 结果                     |
+| - | ----------------------------------------------------------- | ------------------------ |
+| 1 | `CollectionSchema(vectors=None)` 无向量 collection        | OK                       |
+| 2 | `upsert`                                                  | OK                       |
+| 3 | `query(queries=None, filter=...)` 纯过滤扫描              | OK                       |
+| 4 | 重开后 filter 扫描                                          | OK                       |
+| 5 | `add_column(FieldSchema, expression="1")` 在线加列 + 回填 | 5 行回填成功             |
+| 6 | `update` 单行(不重写全表)                                 | OK                       |
+| 7 | `stats`                                                   | `{"doc_count":5, ...}` |
+| 8 | `LIKE '%子串%'`                                           | OK                       |
 
 补充事实:
 
@@ -95,10 +97,10 @@ write_text   0.006s
 
 **1. 内置 `ChromaBm25EmbeddingFunction` 的分词器是 `text.lower().split()`**(`chromadb/utils/embedding_functions/schemas/bm25_tokenizer.py`:去标点后按空白切,再过 English Snowball stemmer,缺 `snowballstemmer` 时直接抛错):
 
-| 输入 | 字符数 | BM25 term 数 |
-|---|---|---|
-| `向山抬起头，看着远处的星舰缓缓降落。基因税是这个时代最沉重的枷锁。` | 33 | **3** |
-| `The starship descended slowly over the ridge with heavy gene taxes.` | 67 | 7 |
+| 输入                                                                    | 字符数 | BM25 term 数 |
+| ----------------------------------------------------------------------- | ------ | ------------ |
+| `向山抬起头，看着远处的星舰缓缓降落。基因税是这个时代最沉重的枷锁。`  | 33     | **3**  |
+| `The starship descended slowly over the ridge with heavy gene taxes.` | 67     | 7            |
 
 中文只按标点切成 3 段,每段整体是一个 token。查「基因税」永远匹配不到 term `基因税是这个时代最沉重的枷锁`。BM25 在中文上直接失效。
 
@@ -134,22 +136,22 @@ scores[item.chunk_id] += 1.0 / (RRF_K + rank)
 
 实测文件数:
 
-| 路径 | 文件数 | 目录数 | 大小 | 文件大小中位数 |
-|---|---|---|---|---|
-| `indexes/sample` | 37 | 6 | 85 MB | **72 B** |
-| `metadata/sample` | 3 | 1 | 21 MB | — |
-| 全部(5 个 collection) | **154** | — | 123 MB | — |
+| 路径                  | 文件数        | 目录数 | 大小   | 文件大小中位数 |
+| --------------------- | ------------- | ------ | ------ | -------------- |
+| `indexes/sample`    | 37            | 6      | 85 MB  | **72 B** |
+| `metadata/sample`   | 3             | 1      | 21 MB  | —             |
+| 全部(5 个 collection) | **154** | —     | 123 MB | —             |
 
 关键事实:**碎文件几乎全部来自 zvec 自身**,不来自我们写的 JSON。`indexes/sample` 里是 RocksDB 的簿记文件(`idmap.0/` 下的 `CURRENT` / `IDENTITY` / `LOCK` / `LOG` / `MANIFEST-*` / `OPTIONS-*` / `*.sst` / `*.log`)、proxima 向量索引(`embedding.index.2.proxima`)、RocksDB FTS(`fts.1.rocksdb`)、`scalar.0.ipc`。中位文件大小 72 字节,最大 39.6 MB。`metadata/` 那边一共只有 3 个文件。
 
 因此三条路的性质完全不同:
 
-| 路径 | 对碎文件的作用 | 成本 |
-|---|---|---|
-| 打包导出命令(`export` / `import` 打成单个 tar) | **解决搬运**,不动引擎 | ≈ 30 行 |
-| 图谱搬进 zvec | **加重**——再多一个 collection 目录 | 400–600 行 |
-| 全部搬进单文件 sqlite | 真正解决 | 要**换掉 zvec 本身**(放弃 proxima ANN + jieba FTS),是换核心依赖的项目 |
-| 换成 chromadb | **解决搬运**(实测 200 doc 只落 5 个文件) | 同样是换掉 zvec 本身,代价见「chromadb 评估」 |
+| 路径                                               | 对碎文件的作用                                 | 成本                                                                        |
+| -------------------------------------------------- | ---------------------------------------------- | --------------------------------------------------------------------------- |
+| 打包导出命令(`export` / `import` 打成单个 tar) | **解决搬运**,不动引擎                    | ≈ 30 行                                                                    |
+| 图谱搬进 zvec                                      | **加重**——再多一个 collection 目录     | 400–600 行                                                                 |
+| 全部搬进单文件 sqlite                              | 真正解决                                       | 要**换掉 zvec 本身**(放弃 proxima ANN + jieba FTS),是换核心依赖的项目 |
+| 换成 chromadb                                      | **解决搬运**(实测 200 doc 只落 5 个文件) | 同样是换掉 zvec 本身,代价见「chromadb 评估」                                |
 
 也就是说,如果痛点确实是「复制导出」,那么代价最低的解法是打包命令,而不是换存储引擎;而如果目标是「一个 collection 就是一个文件」,那要付的是替换 zvec 的代价,不是加一层 sqlite。这条留待下次讨论。
 
@@ -167,12 +169,12 @@ scores[item.chunk_id] += 1.0 / (RRF_K + rank)
 `graph.py` 里三个 read-side 常量(不落盘、不进失效指纹,可以随便调):`MIN_DECLARED_ENTITY_SHARE = 0.35` / `MAX_DROPPED_ITEM_SHARE = 0.20` / `MAX_SILENT_CHUNK_SHARE = 0.05`。依据是五个 collection 的实测:
 
 | collection | 已处理 chunk | 已声明实体占比 | 丢弃条目占比 | 零产出 chunk |
-|---|---|---|---|---|
-| sample | 584 | 48.5% | 6.9% | 0 |
-| smoke | 20 | 56.6% | 7.8% | 0 |
-| evalp | 7 | 58.5% | 9.0% | 0 |
-| toy | 3 | 77.8% | 0.0% | 0 |
-| ch5 | 1 | — | — | 1/1 |
+| ---------- | ------------ | -------------- | ------------ | ------------ |
+| sample     | 584          | 48.5%          | 6.9%         | 0            |
+| smoke      | 20           | 56.6%          | 7.8%         | 0            |
+| evalp      | 7            | 58.5%          | 9.0%         | 0            |
+| toy        | 3            | 77.8%          | 0.0%         | 0            |
+| ch5        | 1            | —             | —           | 1/1          |
 
 已声明占比随 run 变长而**下降**(关系端点桩的累积快于声明),所以阈值卡的是下限而不是区间。丢弃率 6.9%–9.0% 与 README §6.1 记的「约 7%」一致。五个里唯一被标出来的 `ch5` 确实是一个什么都没产出的废 run——阈值在真实数据上既没漏报也没误报。
 
