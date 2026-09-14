@@ -72,3 +72,23 @@ def test_chunk_document_never_straddles_a_chapter_boundary(tmp_path: Path) -> No
     for chunk in chunks:
         assert ("第一章" in chunk.text) != ("第二章" in chunk.text)
     assert "壹" not in chunks[1].text
+
+
+def test_separator_headings_and_repeated_titles(tmp_path: Path) -> None:
+    source = tmp_path / "novel.txt"
+    source.write_text(
+        "第一章 雨夜\n\n开门。\n\n第一章  雨夜\n\n"
+        "第三卷写完了，说几句\n\n------------\n\n------\n\n"
+        "001\n\n走过小桥。\n------------\n"
+        "007第七章 灯火\n回到家中。\n",
+        encoding="utf-8",
+    )
+    chunks = chunk_document(
+        source, source_path=str(source), target_chars=1000, overlap_chars=0
+    )
+    assert [chunk.chapter for chunk in chunks] == [
+        "第一章 雨夜",
+        "001",
+        "007第七章 灯火",
+    ]
+    assert "第三卷写完了，说几句" in chunks[0].text

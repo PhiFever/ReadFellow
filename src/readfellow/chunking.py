@@ -2,19 +2,40 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 
 from .models import Chunk, TextUnit
 
 CHAPTER_RE = re.compile(
-    r"^\s*(第[0-9零〇一二两三四五六七八九十百千万]+[章节卷回部篇].*|"
+    r"^\s*(第[0-9零〇一二两三四五六七八九十百千万]+[章节回部篇].*|"
     r"(序章|楔子|引子|尾声|后记|番外).*)\s*$"
 )
 
+SEPARATOR_RE = re.compile(r"-{6,}")
+
+
+def iter_headings(lines: Iterable[str]) -> Iterator[tuple[int, str]]:
+    current = ""
+    after_separator = False
+    for line_number, line in enumerate(lines, start=1):
+        title = line.strip()
+        if SEPARATOR_RE.fullmatch(title):
+            after_separator = True
+            continue
+        if not title:
+            continue
+        candidate = after_separator or CHAPTER_RE.match(title)
+        after_separator = False
+        normalized = " ".join(title.split())
+        if candidate and normalized != current:
+            yield line_number, title
+            current = normalized
+
+
 # Bumped whenever chunk_document changes how it splits, so downstream artifacts
 # can refuse metadata produced by an older chunker.
-CHUNKER_VERSION = 2
+CHUNKER_VERSION = 3
 
 
 def sha256_text(text: str) -> str:
@@ -42,23 +63,13 @@ def read_text_units(path: Path) -> list[TextUnit]:
     pending_chapter = ""
     current_chapter = ""
 
+    lines = text.splitlines(keepends=True)
+    headings = dict(iter_headings(lines))
     byte_offset = 0
-    for line_number, line in enumerate(text.splitlines(keepends=True), start=1):
+    for line_number, line in enumerate(lines, start=1):
         encoded_len = len(line.encode("utf-8"))
         stripped = line.strip()
-        match = CHAPTER_RE.match(stripped)
-        if match:
-            current_chapter = stripped
-
-        if stripped:
-            if not pending:
-                pending_line_start = line_number
-                pending_byte_start = byte_offset
-                pending_chapter = current_chapter
-            pending.append(line)
-            pending_line_end = line_number
-            pending_byte_end = byte_offset + encoded_len
-        elif pending:
+        if pending and (not stripped or line_number in headings):
             units.append(
                 TextUnit(
                     text="".join(pending),
@@ -70,6 +81,17 @@ def read_text_units(path: Path) -> list[TextUnit]:
                 )
             )
             pending = []
+
+        if line_number in headings:
+            current_chapter = headings[line_number]
+        if stripped:
+            if not pending:
+                pending_line_start = line_number
+                pending_byte_start = byte_offset
+                pending_chapter = current_chapter
+            pending.append(line)
+            pending_line_end = line_number
+            pending_byte_end = byte_offset + encoded_len
 
         byte_offset += encoded_len
 

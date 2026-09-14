@@ -174,13 +174,14 @@ uv run readfellow graph-query "向山" --collection sample
 > ⚠️ 全量运行当前存在已知阻塞，见 [§6 已知问题](#6-已知问题)。
 
 ```sh
-uv run readfellow analyze --collection sample --max-chapter 50
+uv run readfellow analyze --collection sample --max-chapter 1:50
 ```
 
 按检测到的章节分组，对每个**完整章节**调一次生成模型，产出梗概、人物、事件，写入 MySQL 中独立的章节分析运行版本。参数与 `graph-index` 同（除 `--limit`，`analyze` 用 `--max-chapter` 分批）。
 
-两条规则：
+三条规则：
 
+- **前置内容不分析**。第一个匹配章节标题规则的组之前，书名等内容不生成笔记；中间的无号节照常分析。
 - **最后一组永不分析**。它可能被 `index --limit` 截断，无法与完整章节区分。
 - **超出 `num_ctx` 预算的章节被跳过**并打印原因。预算 = `(num_ctx − num_predict − 600) × 1.5` 字符；`num_ctx` 取所选后端的配置；`analysis` 默认走 openai（`num_ctx: 65536`），预算为 91260 字符。
 
@@ -230,15 +231,15 @@ analyze:     not built (4 chapters eligible)
 
 | 参数 | 语义 |
 |---|---|
-| `--max-chapter N` | 只用完整落在第 N 章及之前的 chunk（**排除**跨入第 N+1 章的 chunk） |
+| `--max-chapter N` 或 `V:N` | 按书内章号定位，可以加卷号（如 `2:50`）。卷号由章号回到「第一章」推出。撞号时报错，并列出每个候选对应的 `--max-line`。只用结束行在下一节标题之前的 chunk；下一节不一定有章号，比如作者的话 |
 | `--max-line N` | 只用结束行号 ≤ N 的 chunk |
 | `--max-chunk-index N` | 只用 `chunk_index` ≤ N 的 chunk |
 
 ```sh
-uv run readfellow search "他的真实身份"  --collection sample --max-chapter 50
-uv run readfellow hybrid "武神"          --collection sample --max-chapter 50
-uv run readfellow fetch  <chunk-id>      --collection sample --max-chapter 50
-uv run readfellow graph-query "向山"     --collection sample --max-chapter 10
+uv run readfellow search "他的真实身份"  --collection sample --max-chapter 1:50
+uv run readfellow hybrid "武神"          --collection sample --max-chapter 1:50
+uv run readfellow fetch  <chunk-id>      --collection sample --max-chapter 1:50
+uv run readfellow graph-query "向山"     --collection sample --max-chapter 1:10
 ```
 
 进度限制在两条路径上生效：整体传给 zvec（转成过滤表达式），以及进程内逐 chunk 判定（graph、fetch 走这条）。

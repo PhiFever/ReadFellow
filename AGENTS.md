@@ -27,10 +27,10 @@ uv run readfellow hybrid "问题" --collection sample --top-k 5      # 向量+FT
 uv run readfellow fetch <chunk-id> --collection sample             # 取回单个 chunk 原文
 uv run readfellow graph-index --collection sample --limit 20       # LLM 抽取实体/关系到 MySQL 当前运行版本
 uv run readfellow graph-query "向山" --collection sample           # 按实体/别名/关系关键词查图谱
-uv run readfellow analyze --collection sample --max-chapter 50     # LLM 章节级分析到 MySQL 当前运行版本
+uv run readfellow analyze --collection sample --max-chapter 1:50   # LLM 章节级分析到 MySQL 当前运行版本
 uv run readfellow status --collection sample                       # 集合体检：存量 + 重跑会续建还是重来 + 抽取质量
 
-# 所有检索命令都支持进度限制：--max-chapter N / --max-line N / --max-chunk-index N
+# 所有检索命令都支持进度限制：--max-chapter V:N（卷:书内章号；省略卷号时须唯一）/ --max-line N / --max-chunk-index N
 ```
 
 元数据及派生物使用 MySQL（SQLAlchemy Core），连接读取 `MYSQL_URI` 环境变量或 `.env`；`database_url` 配置可显式覆盖。离线测试注入 SQL 存储或使用临时 SQLite；`uv run pytest tests/test_artifacts.py --mysql -q` 在随机 MySQL 测试库验收，结束后删掉测试库。
@@ -49,7 +49,7 @@ uvx ruff format . && uvx ruff check .          # 两者当前都保持 clean
 
 - **`cli.py`** — 薄 adapter。只做 argparse、进度打印、Evidence 格式化。所有默认值都从 `ReadFellowConfig` 取（`build_parser(config)`），全局 flag 通过 `apply_global_overrides` 覆盖成一份 effective config。新增命令时不要在这里写编排逻辑。
 - **`app.py`** — 可复用的应用 workflow，是 CLI 之外（未来 MCP / library）唯一该调用的入口：`index_document`、`semantic_search`、`fts_search`、`fetch_chunk`、`build_graph`、`query_graph`、`collection_status`。签名统一为 `(config, ..., collection, *, progress: ProgressLimit, options: ...Options, on_progress: Callable[[Event], None])`；进度用 frozen dataclass 事件回调外传，**不在这一层 print**。所有外部依赖都是可注入的可选参数：检索/索引收 `store: ChunkStore`，派生管线收 `generator: JsonGenerator`，不传就现场构造真实实现。
-- **`chunking.py`** — 先按空行切成 `TextUnit`（保留行号、字节偏移、当前章节标题），再按 `target_chars` 装窗 + 尾部 overlap 拼成 `Chunk`。章节靠 `CHAPTER_RE`（`第X章/节/卷/回` + 序章/楔子/番外等）识别。
+- **`chunking.py`** — 先按空行切成 `TextUnit`（保留行号、字节偏移、当前章节标题），再按 `target_chars` 装窗 + 尾部 overlap 拼成 `Chunk`。章节统一由 `iter_headings` 识别：分隔线后的首个非空行，或匹配 `CHAPTER_RE`（`第X章/节/回/部/篇` + 序章/楔子/番外等）的行；与当前标题仅空白不同的重复行不另分章。
 - **`store.py`** — 唯一接触 zvec 的地方（这是事实，不是愿望：`app.py` 里没有 `import zvec`，也没有任何 `coll.*` 调用）。对外只有 `ChunkStore` Protocol 6 个方法：`upsert` / `commit` / `search_vector` / `search_fts` / `fetch` / `stats`（`StoreStats`：`doc_count` + `index_completeness`，只给 `status` 用来对账 manifest）。`ZvecChunkStore` 是生产 adapter（schema 定义、collection 打开/重建、`Doc` 转换、批内 text_hash 比对与 insert/update 拆分都在它里面），测试里的 `InMemoryChunkStore` 是第二个 adapter。`Doc` / `Status` / `CollectionOption` 一律不跨 seam：检索结果直接以 `Evidence` 返回。旧 manifest / chunks JSON 读写工具仍在这里，仅供导入与迁移测试；日常元数据读写走 `ArtifactStore`。
 - **`artifacts.py` / `artifact_schema.py`** — MySQL 元数据与派生物的唯一持久化入口：版本化 source/chunks、图谱/分析 runs、关系表及事务。应用工作流统一支持 `artifacts: ArtifactStore | None` 注入，默认经 `open_artifacts(config)` 构造。`prepare` 按领域失效回调决定续建或新建 run，`save` 在单元事务内仅更新变化的记录。`legacy_import.py` 只供一次性导入，核对来源并保持旧版本信息。
 - **`ollama.py`** — 纯 `urllib` 调 `/api/embed` 与 `/api/generate`，无第三方 SDK。生成走**约束解码**：`format` 传的是 JSON schema（`graph.GRAPH_RESPONSE_SCHEMA` / `analysis.ANALYSIS_RESPONSE_SCHEMA`）而不是 `"json"`，因为后者只保证能解析，裸字符串在数组里也是合法 JSON。采样参数全部来自 `DerivationSettings`（Qwen3 官方 non-thinking 推荐值，temperature 0.7，**不是贪心解码**——贪心会让 retry 逐字节重放同一个坏结果）。embedding 默认 L2 归一化。`parse_generate_response` 同时兼容单体 JSON 和逐行流式响应。
@@ -58,7 +58,7 @@ uvx ruff format . && uvx ruff check .          # 两者当前都保持 clean
 - **`analysis.py`** — 章节级分析，与 `graph.py` 结构对称（prompt / 解析 / 合并 / 失效判定 / 进度过滤），generator 同样由 `app.build_analysis` 注入。
 - **`extraction.py`** — `graph.py` 与 `analysis.py` 共用的抽取工具，只依赖 `models`：LLM JSON 读取（`parse_json_object`、`get_any`、`as_list`、`normalize_text`）、证据锚定（`locate_evidence`/`resolve_evidence`，宽松匹配后回读原文）、`Chunk | ChunkContext | Mapping` 归一（`chunk_context`、`int_value`）。**新的领域词汇不要往这里放**——只有第二个派生管线也要用的通用件才进来。
 - **`derivation.py`** — graph 与 analysis 两条派生管线共用的骨架：`JsonGenerator` Protocol、`generate_with_retry`（生成+解析算一次尝试）、`write_json_document`（旧文件格式的迁移测试工具）、`derivation_status`（`empty`/`up_to_date`/`built`/`rebuilt`）。领域细节（prompt、解析、合并、各自的 staleness 检查）留在 `graph.py`/`analysis.py`。
-- **`progress.py`** — 由章节/行号算出 `ProgressFilter`：既给 zvec 用的 `expression` 字符串，也给进程内用的 `allows()`。
+- **`progress.py`** — 由「卷:书内章号」或行号算出 `ProgressFilter`：既给 zvec 用的 `expression` 字符串，也给进程内用的 `allows()`。卷号由章号回到 1 推出；章号撞号时报错，并列出每个候选对应的 `--max-line`。
 - **`models.py`** — 所有 Pydantic 模型集中于此，默认 `extra="forbid"`，值对象多为 `frozen=True`。新增字段先改这里，不要在别处塞裸 dict。
 
 产物布局：`indexes/<collection>/` 保存当前 zvec 索引；MySQL 保存元数据和全部派生运行历史；`metadata/<collection>/` 只保留旧 JSON 备份及一次性导入输入。`index --rebuild` 不删除备份。

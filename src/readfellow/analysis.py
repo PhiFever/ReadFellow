@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .chunking import CHAPTER_RE
 from .derivation import sum_or_unknown, write_json_document
 from .extraction import (
     EvidenceNotFound,
@@ -131,12 +132,18 @@ def group_chapters(chunks: Sequence[Chunk]) -> list[ChapterGroup]:
 
 
 def complete_chapters(groups: Sequence[ChapterGroup]) -> list[ChapterGroup]:
-    """Chapters proven finished, i.e. a later chapter exists in the index.
+    """Chapters to analyze: everything except front matter and the last group.
 
-    The last group may have been cut short by `index --limit`, so it can never be
-    told apart from a complete chapter and is never analyzed.
+    Groups before the first CHAPTER_RE title are front matter, such as a book-title
+    line, and get no chapter notes. The last group may have been cut short by
+    `index --limit`, so it can never be told apart from a complete chapter and is
+    never analyzed.
     """
-    return list(groups[:-1])
+    start = next(
+        (index for index, group in enumerate(groups) if CHAPTER_RE.match(group.title)),
+        0,
+    )
+    return list(groups[start:-1])
 
 
 def chapter_char_budget(*, num_ctx: int, num_predict: int) -> int:

@@ -227,8 +227,8 @@ def build_parser(config: ReadFellowConfig) -> argparse.ArgumentParser:
 def add_progress_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--max-chapter",
-        type=int,
-        help="only use chunks fully contained at or before the Nth detected chapter",
+        type=str,
+        help="only use chunks up to this in-book chapter: N, or VOLUME:N such as 2:50",
     )
     parser.add_argument(
         "--max-line",

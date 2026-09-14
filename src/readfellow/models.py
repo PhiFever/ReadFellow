@@ -147,6 +147,8 @@ class ChapterBoundary(ReadFellowModel):
     index: int
     title: str
     line_start: int
+    volume: int
+    number: int | None
 
 
 class ProgressFields(ReadFellowModel):

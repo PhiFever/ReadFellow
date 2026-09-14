@@ -93,7 +93,7 @@ done: collection=sample, chunks=2307, inserted=2307, skipped=0
 uv run readfellow search "尤基的父亲" --collection sample --top-k 3
 uv run readfellow fts    "回收站镇"   --collection sample --top-k 3
 uv run readfellow hybrid "基因税"     --collection sample --top-k 3
-uv run readfellow fetch  <上面返回的 chunk-id> --collection sample --max-chapter 1
+uv run readfellow fetch  <上面返回的 chunk-id> --collection sample --max-chapter 1:1
 ```
 
 最后一条应对越界 chunk 返回 `outside_progress` 且**不打印原文**——这是防剧透不变量的直接验收点。
@@ -101,8 +101,8 @@ uv run readfellow fetch  <上面返回的 chunk-id> --collection sample --max-ch
 ### 阶段 2 · 派生管线
 
 ```sh
-uv run readfellow analyze     --collection sample --max-chapter 50
-uv run readfellow graph-index --collection sample --max-chapter 50
+uv run readfellow analyze     --collection sample --max-chapter 1:50
+uv run readfellow graph-index --collection sample --max-chapter 1:50
 ```
 
 两者都逐单元落盘、支持断点续建，可以分批推进、随时 Ctrl-C 后重跑。

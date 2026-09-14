@@ -5,7 +5,12 @@ from pathlib import Path
 from readfellow.artifacts import open_artifacts
 from artifact_helpers import replace_run
 
-from readfellow.analysis import analysis_staleness_reason, empty_analysis
+from readfellow.analysis import (
+    analysis_staleness_reason,
+    complete_chapters,
+    empty_analysis,
+    group_chapters,
+)
 from readfellow.app import AnalysisBuildOptions, ProgressLimit, build_analysis
 from readfellow.chunking import CHUNKER_VERSION, chunk_document
 from readfellow.config import DerivationConfig, PathConfig, ReadFellowConfig
@@ -103,7 +108,7 @@ def test_analysis_drops_evidence_not_found_verbatim_in_chapter(
     result = build_analysis(
         config,
         "books",
-        progress=ProgressLimit(max_chapter=1),
+        progress=ProgressLimit(max_chapter="1"),
         options=AnalysisBuildOptions(retries=1),
         generator=generator,
     )
@@ -122,7 +127,7 @@ def test_analysis_resumes_and_only_analyzes_new_chapters(tmp_path: Path) -> None
     first_result = build_analysis(
         config,
         "books",
-        progress=ProgressLimit(max_chapter=1),
+        progress=ProgressLimit(max_chapter="1"),
         options=AnalysisBuildOptions(retries=0),
         generator=first,
     )
@@ -138,7 +143,7 @@ def test_analysis_resumes_and_only_analyzes_new_chapters(tmp_path: Path) -> None
     second_result = build_analysis(
         config,
         "books",
-        progress=ProgressLimit(max_chapter=2),
+        progress=ProgressLimit(max_chapter="2"),
         options=AnalysisBuildOptions(retries=0),
         generator=second,
     )
@@ -153,7 +158,7 @@ def test_analysis_resumes_and_only_analyzes_new_chapters(tmp_path: Path) -> None
     third_result = build_analysis(
         config,
         "books",
-        progress=ProgressLimit(max_chapter=2),
+        progress=ProgressLimit(max_chapter="2"),
         options=AnalysisBuildOptions(retries=0),
         generator=third,
     )
@@ -168,7 +173,7 @@ def test_analysis_rebuilds_when_prompt_version_or_chunk_hash_changes(
     build_analysis(
         config,
         "books",
-        progress=ProgressLimit(max_chapter=1),
+        progress=ProgressLimit(max_chapter="1"),
         options=AnalysisBuildOptions(retries=0),
         generator=DeterministicGenerator([FIRST_CHAPTER_PAYLOAD]),
     )
@@ -179,7 +184,7 @@ def test_analysis_rebuilds_when_prompt_version_or_chunk_hash_changes(
     rebuilt = build_analysis(
         config,
         "books",
-        progress=ProgressLimit(max_chapter=1),
+        progress=ProgressLimit(max_chapter="1"),
         options=AnalysisBuildOptions(retries=0),
         generator=DeterministicGenerator([FIRST_CHAPTER_PAYLOAD]),
     )
@@ -192,7 +197,7 @@ def test_analysis_rebuilds_when_prompt_version_or_chunk_hash_changes(
     rebuilt_again = build_analysis(
         config,
         "books",
-        progress=ProgressLimit(max_chapter=1),
+        progress=ProgressLimit(max_chapter="1"),
         options=AnalysisBuildOptions(retries=0),
         generator=DeterministicGenerator([FIRST_CHAPTER_PAYLOAD]),
     )
@@ -206,7 +211,7 @@ def test_analysis_suppresses_summary_when_progress_cuts_a_chapter(
     build_analysis(
         config,
         "books",
-        progress=ProgressLimit(max_chapter=2),
+        progress=ProgressLimit(max_chapter="2"),
         options=AnalysisBuildOptions(retries=0),
         generator=DeterministicGenerator(
             [FIRST_CHAPTER_PAYLOAD, SECOND_CHAPTER_PAYLOAD]
@@ -266,10 +271,35 @@ def test_analysis_persists_cloud_model_and_endpoint(tmp_path: Path) -> None:
     build_analysis(
         config,
         "books",
-        progress=ProgressLimit(max_chapter=1),
+        progress=ProgressLimit(max_chapter="1"),
         generator=DeterministicGenerator([FIRST_CHAPTER_PAYLOAD]),
     )
 
     document = open_artifacts(config).latest("books", "analysis").document
     assert document.llm_model == config.openai.generation_model
     assert document.llm_endpoint == config.openai.base_url
+
+
+def test_complete_chapters_excludes_front_matter(tmp_path: Path) -> None:
+    source = tmp_path / "novel.txt"
+    source.write_text(
+        "\n------------\n\n山间行记\n\n------------\n\n"
+        "第一章 出门\n\n踏上山路。\n\n------------\n\n"
+        "001\n\n桥边歇脚。\n\n第二章 归家\n\n点起灯。\n",
+        encoding="utf-8",
+    )
+    chunks = chunk_document(
+        source, source_path=str(source), target_chars=1000, overlap_chars=0
+    )
+    groups = group_chapters(chunks)
+    assert [group.title for group in groups] == [
+        "",
+        "山间行记",
+        "第一章 出门",
+        "001",
+        "第二章 归家",
+    ]
+    assert [group.title for group in complete_chapters(groups)] == [
+        "第一章 出门",
+        "001",
+    ]

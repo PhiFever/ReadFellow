@@ -76,7 +76,7 @@ ChannelMode = Literal["vector", "fts"]
 
 @dataclass(frozen=True)
 class ProgressLimit:
-    max_chapter: int | None = None
+    max_chapter: str | None = None
     max_line: int | None = None
     max_chunk_index: int | None = None
 

@@ -17,7 +17,7 @@ Run project Python commands through `uv`.
 uv run readfellow search "query text" --collection sample --top-k 5
 uv run readfellow fts "keyword" --collection sample --top-k 5
 uv run readfellow fetch <chunk-id> --collection sample
-uv run readfellow search "query text" --collection sample --max-chapter 50
+uv run readfellow search "query text" --collection sample --max-chapter 1:50
 uv run readfellow index corpus/samples/<document>.txt --collection sample --rebuild
 uv run pytest
 ```
@@ -42,7 +42,8 @@ Defaults:
 
 If the user says they have read only up to a point, apply the same progress limit to every retrieval and fetch command.
 
-- Use `--max-chapter N` when the user says they read through chapter N.
+- Use `--max-chapter VOLUME:N` when the user says they read through chapter N of a volume. In-book chapter numbers restart every volume; plain `N` works only when that number is unique in the book.
+- If `--max-chapter` reports the number as ambiguous (the author numbered two chapters the same), confirm the chapter title with the user and use the `--max-line` value listed for that candidate. If the chapter is not found, ask the user for the chapter title instead of guessing a nearby number.
 - Use `--max-line N` when the user gives a line boundary.
 - Use `--max-chunk-index N` only for low-level debugging or exact tool handoff.
 - Do not run an unbounded search, FTS query, or fetch after a progress limit is known.
@@ -52,12 +53,12 @@ If the user says they have read only up to a point, apply the same progress limi
 Example:
 
 ```sh
-uv run readfellow search "尤基的新爸爸是谁" --collection sample --max-chapter 50
-uv run readfellow fts "新爸爸" --collection sample --max-chapter 50
-uv run readfellow fetch bdd935754e17_000000 --collection sample --max-chapter 50
+uv run readfellow search "尤基的新爸爸是谁" --collection sample --max-chapter 1:50
+uv run readfellow fts "新爸爸" --collection sample --max-chapter 1:50
+uv run readfellow fetch bdd935754e17_000000 --collection sample --max-chapter 1:50
 ```
 
-`--max-chapter N` means the Nth detected chapter heading in source order. The CLI excludes chunks whose ending line crosses into chapter N+1, so boundary-crossing chunks are not used.
+`--max-chapter V:N` means the chapter titled 第N章 in volume V; volumes are inferred from chapter numbers restarting at 1. The limit ends just before the next detected section title, which may be an unnumbered section such as an author's note, and chunks whose ending line crosses it are not used.
 
 ## Indexing Notes
 

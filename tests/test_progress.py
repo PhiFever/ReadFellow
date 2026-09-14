@@ -5,7 +5,11 @@ from pathlib import Path
 import pytest
 
 from readfellow.models import IndexManifest
-from readfellow.progress import build_progress_filter, chapter_boundaries
+from readfellow.progress import (
+    build_progress_filter,
+    chapter_boundaries,
+    line_limit_for_chapter,
+)
 
 
 def manifest_for(source: Path) -> IndexManifest:
@@ -38,11 +42,11 @@ def test_chapter_boundaries_and_progress_filter(tmp_path: Path) -> None:
 
     progress = build_progress_filter(
         manifest=manifest_for(source),
-        max_chapter=2,
+        max_chapter="2",
     )
 
     assert progress.expression == "line_end <= 6"
-    assert "第二章 继续" in progress.description
+    assert progress.description == "through volume 1 chapter 2: 第二章 继续"
     assert progress.allows({"line_end": 6, "chunk_index": 10})
     assert not progress.allows({"line_end": 7, "chunk_index": 10})
 
@@ -53,7 +57,7 @@ def test_progress_filter_combines_line_and_chunk_limits(tmp_path: Path) -> None:
 
     progress = build_progress_filter(
         manifest=manifest_for(source),
-        max_chapter=2,
+        max_chapter="2",
         max_line=3,
         max_chunk_index=4,
     )
@@ -68,5 +72,42 @@ def test_progress_rejects_unknown_chapter(tmp_path: Path) -> None:
     source = tmp_path / "novel.txt"
     source.write_text("第一章 开始\n一\n", encoding="utf-8")
 
-    with pytest.raises(ValueError, match="exceeds detected chapter count"):
-        build_progress_filter(manifest=manifest_for(source), max_chapter=2)
+    with pytest.raises(ValueError, match="not found"):
+        build_progress_filter(manifest=manifest_for(source), max_chapter="2")
+
+
+@pytest.fixture
+def two_volumes(tmp_path: Path) -> Path:
+    source = tmp_path / "novel.txt"
+    source.write_text(
+        "第一章 山路\n甲\n第二章 石桥\n乙\n"
+        "第一章 小镇\n丙\n第二章 客栈\n丁\n"
+        "------------\n作者的话\n戊\n",
+        encoding="utf-8",
+    )
+    return source
+
+
+def test_volume_chapter_limit(two_volumes: Path) -> None:
+    limit, chapter = line_limit_for_chapter(two_volumes, "2:2")
+    assert (limit, chapter.volume, chapter.number, chapter.line_start) == (9, 2, 2, 7)
+
+
+def test_chapter_reference_is_ambiguous(two_volumes: Path) -> None:
+    with pytest.raises(ValueError, match="ambiguous") as exc:
+        line_limit_for_chapter(two_volumes, "2")
+    lines = str(exc.value).splitlines()
+    assert len(lines) == 3
+    assert all(
+        value in lines[1]
+        for value in ("volume 1", "line_start=3", "第二章 石桥", "--max-line 4")
+    )
+    assert all(
+        value in lines[2]
+        for value in ("volume 2", "line_start=7", "第二章 客栈", "--max-line 9")
+    )
+
+
+def test_volume_chapter_not_found(two_volumes: Path) -> None:
+    with pytest.raises(ValueError, match="volume 2.*chapter 3.*not found"):
+        line_limit_for_chapter(two_volumes, "2:3")
