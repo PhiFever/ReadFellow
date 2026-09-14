@@ -7,6 +7,10 @@ ollama:
   generation_model: qwen3:8b
   keep_alive: 30m
   num_ctx: 16384
+openai:
+  base_url: https://api.b.ai/v1
+  generation_model: qwen3.8-flash
+  num_ctx: 65536
 indexing:
   default_collection: sample
   chunk_chars: 2400
@@ -18,5 +22,6 @@ graph:
   num_predict: 4096
   retries: 2
 analysis:
+  backend: openai
   num_predict: 4096
   retries: 2

@@ -276,6 +276,7 @@ class KnowledgeGraph(ReadFellowModel):
     collection: str = ""
     source_path: str = ""
     llm_model: str = ""
+    llm_endpoint: str = ""
     extraction_settings: DerivationSettings = DerivationSettings()
     source_chunk_hashes: dict[str, GraphChunkFingerprint] = Field(default_factory=dict)
     created_at: str = Field(default_factory=utc_now_iso)
@@ -331,6 +332,7 @@ class AnalysisDocument(ReadFellowModel):
     collection: str = ""
     source_path: str = ""
     llm_model: str = ""
+    llm_endpoint: str = ""
     settings: DerivationSettings = DerivationSettings()
     chunk_text_hashes: dict[str, str] = Field(default_factory=dict)
     created_at: str = Field(default_factory=utc_now_iso)

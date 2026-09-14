@@ -154,7 +154,9 @@ def build_parser(config: ReadFellowConfig) -> argparse.ArgumentParser:
         default=0,
         help="extract only the first N eligible chunks",
     )
-    graph_index.add_argument("--llm-model", default=config.ollama.generation_model)
+    graph_index.add_argument(
+        "--llm-model", default=config.generation_model(config.graph)
+    )
     graph_index.add_argument(
         "--num-predict",
         type=int,
@@ -191,7 +193,9 @@ def build_parser(config: ReadFellowConfig) -> argparse.ArgumentParser:
         type=valid_collection_name,
         default=config.indexing.default_collection,
     )
-    analyze.add_argument("--llm-model", default=config.ollama.generation_model)
+    analyze.add_argument(
+        "--llm-model", default=config.generation_model(config.analysis)
+    )
     analyze.add_argument(
         "--num-predict",
         type=int,

@@ -7,6 +7,7 @@ from readfellow.config import (
     DerivationConfig,
     IndexingConfig,
     OllamaConfig,
+    OpenAIConfig,
     PathConfig,
     ReadFellowConfig,
     SearchConfig,
@@ -32,6 +33,8 @@ def test_cli_defaults_come_from_config() -> None:
         ),
         search=SearchConfig(top_k=9),
         graph=DerivationConfig(num_predict=512, retries=4),
+        analysis=DerivationConfig(backend="openai"),
+        openai=OpenAIConfig(generation_model="cloud-test"),
     )
     parser = build_parser(config)
 
@@ -55,3 +58,4 @@ def test_cli_defaults_come_from_config() -> None:
     assert graph_args.llm_model == "generate-test"
     assert graph_args.num_predict == 512
     assert graph_args.retries == 4
+    assert parser.parse_args(["analyze"]).llm_model == "cloud-test"

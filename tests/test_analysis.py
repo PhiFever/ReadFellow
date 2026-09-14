@@ -5,9 +5,10 @@ from pathlib import Path
 from readfellow.artifacts import open_artifacts
 from artifact_helpers import replace_run
 
+from readfellow.analysis import analysis_staleness_reason, empty_analysis
 from readfellow.app import AnalysisBuildOptions, ProgressLimit, build_analysis
 from readfellow.chunking import CHUNKER_VERSION, chunk_document
-from readfellow.config import PathConfig, ReadFellowConfig
+from readfellow.config import DerivationConfig, PathConfig, ReadFellowConfig
 from readfellow.models import IndexManifest
 
 TWO_CHAPTERS = (
@@ -242,3 +243,33 @@ def test_analysis_suppresses_summary_when_progress_cuts_a_chapter(
     assert [chapter.chapter_title for chapter in early.chapters] == ["第一章 开始"]
     assert early.chapters[0].summary == ""
     assert [event.description for event in early.chapters[0].events] == ["向山施以援手"]
+
+
+def test_analysis_staleness_when_endpoint_changes() -> None:
+    document = empty_analysis(collection="books", llm_endpoint="https://old.example/v1")
+
+    assert (
+        analysis_staleness_reason(
+            document,
+            [],
+            collection="books",
+            source_path="",
+            llm_endpoint="https://new.example/v1",
+        )
+        == "analysis generator endpoint changed"
+    )
+
+
+def test_analysis_persists_cloud_model_and_endpoint(tmp_path: Path) -> None:
+    config = build_collection(tmp_path)
+    config.analysis = DerivationConfig(backend="openai")
+    build_analysis(
+        config,
+        "books",
+        progress=ProgressLimit(max_chapter=1),
+        generator=DeterministicGenerator([FIRST_CHAPTER_PAYLOAD]),
+    )
+
+    document = open_artifacts(config).latest("books", "analysis").document
+    assert document.llm_model == config.openai.generation_model
+    assert document.llm_endpoint == config.openai.base_url

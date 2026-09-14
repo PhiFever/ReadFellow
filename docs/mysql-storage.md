@@ -23,7 +23,7 @@ uv run readfellow import-json --collection sample
 | 表 | 用途 |
 |---|---|
 | `source_versions`、`chunks` | manifest 与按源数据版本保存的原文切块 |
-| `runs` | 每个集合的图谱/章节分析运行历史、参数、版本和进度 |
+| `runs` | 每个集合的图谱/章节分析运行历史、参数、版本和进度；生成接口地址 `llm_endpoint` 等不单列的字段在 `extra` JSON 中 |
 | `entities`、`entity_values` | 实体名称、别名和类型；`kind` 区分别名与类型 |
 | `entity_mentions`、`entity_evidence` | 实体的提及位置和原文证据 |
 | `relations` | 有向关系、两端实体、证据和 chunk 引用 |

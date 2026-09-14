@@ -557,13 +557,12 @@ class ArtifactStore:
 
 def open_artifacts(config: ReadFellowConfig) -> ArtifactStore:
     """Resolve credentials only when opening storage; never print the URI."""
-    import os
-    from dotenv import dotenv_values
+    from .config import read_secret
 
     uri = (
         config.database_url.get_secret_value()
         if config.database_url
-        else os.environ.get("MYSQL_URI") or dotenv_values(".env").get("MYSQL_URI")
+        else read_secret("MYSQL_URI")
     )
     if not uri:
         raise RuntimeError("set MYSQL_URI in the environment or .env, then run db-init")

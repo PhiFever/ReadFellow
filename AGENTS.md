@@ -14,7 +14,7 @@ ReadFellow 是一个本地优先的 CLI 工作流：把长文档（主要是中�
 
 ## 常用命令
 
-Python 相关一律走 `uv`（见 `~/.claude/CLAUDE.md`）。除 `fts` / `fetch` / `graph-query` 外都需要本地 Ollama 在 `config.yaml` 配置的端点上运行（`index` / `search` / `hybrid` 要 embedding 模型，`graph-index` / `analyze` 要生成模型）；测试不需要。
+Python 相关一律走 `uv`（见 `~/.claude/CLAUDE.md`）。`index` / `search` / `hybrid` 要本地 Ollama 的 embedding 模型，`graph-index` 要本地生成模型，端点由 `config.yaml` 配置；`analyze` 默认走云端，需要 `LLM_API_KEY`（环境变量或 `.env`）。测试不需要模型服务。
 
 ```sh
 uv run readfellow db-init                                            # MYSQL_URI 指定的数据库中建表
@@ -45,7 +45,7 @@ uvx ruff format . && uvx ruff check .          # 两者当前都保持 clean
 
 ## 架构
 
-分层：CLI 只调用 app 工作流；app 编排领域逻辑并注入存储。`store` 封装 zvec，`artifacts` / `artifact_schema` 封装 SQLAlchemy；graph、analysis、extraction 不依赖 SQLAlchemy。
+分层：CLI 只调用 app 工作流；app 编排领域逻辑并注入存储。`store` 封装 zvec，`artifacts` / `artifact_schema` 封装 SQLAlchemy；graph、analysis、extraction 不依赖 SQLAlchemy。`ollama` / `openai_compat` 封装模型接口，`openai` SDK 只在 `openai_compat.py` 里 import。
 
 - **`cli.py`** — 薄 adapter。只做 argparse、进度打印、Evidence 格式化。所有默认值都从 `ReadFellowConfig` 取（`build_parser(config)`），全局 flag 通过 `apply_global_overrides` 覆盖成一份 effective config。新增命令时不要在这里写编排逻辑。
 - **`app.py`** — 可复用的应用 workflow，是 CLI 之外（未来 MCP / library）唯一该调用的入口：`index_document`、`semantic_search`、`fts_search`、`fetch_chunk`、`build_graph`、`query_graph`、`collection_status`。签名统一为 `(config, ..., collection, *, progress: ProgressLimit, options: ...Options, on_progress: Callable[[Event], None])`；进度用 frozen dataclass 事件回调外传，**不在这一层 print**。所有外部依赖都是可注入的可选参数：检索/索引收 `store: ChunkStore`，派生管线收 `generator: JsonGenerator`，不传就现场构造真实实现。
@@ -53,6 +53,7 @@ uvx ruff format . && uvx ruff check .          # 两者当前都保持 clean
 - **`store.py`** — 唯一接触 zvec 的地方（这是事实，不是愿望：`app.py` 里没有 `import zvec`，也没有任何 `coll.*` 调用）。对外只有 `ChunkStore` Protocol 6 个方法：`upsert` / `commit` / `search_vector` / `search_fts` / `fetch` / `stats`（`StoreStats`：`doc_count` + `index_completeness`，只给 `status` 用来对账 manifest）。`ZvecChunkStore` 是生产 adapter（schema 定义、collection 打开/重建、`Doc` 转换、批内 text_hash 比对与 insert/update 拆分都在它里面），测试里的 `InMemoryChunkStore` 是第二个 adapter。`Doc` / `Status` / `CollectionOption` 一律不跨 seam：检索结果直接以 `Evidence` 返回。旧 manifest / chunks JSON 读写工具仍在这里，仅供导入与迁移测试；日常元数据读写走 `ArtifactStore`。
 - **`artifacts.py` / `artifact_schema.py`** — MySQL 元数据与派生物的唯一持久化入口：版本化 source/chunks、图谱/分析 runs、关系表及事务。应用工作流统一支持 `artifacts: ArtifactStore | None` 注入，默认经 `open_artifacts(config)` 构造。`prepare` 按领域失效回调决定续建或新建 run，`save` 在单元事务内仅更新变化的记录。`legacy_import.py` 只供一次性导入，核对来源并保持旧版本信息。
 - **`ollama.py`** — 纯 `urllib` 调 `/api/embed` 与 `/api/generate`，无第三方 SDK。生成走**约束解码**：`format` 传的是 JSON schema（`graph.GRAPH_RESPONSE_SCHEMA` / `analysis.ANALYSIS_RESPONSE_SCHEMA`）而不是 `"json"`，因为后者只保证能解析，裸字符串在数组里也是合法 JSON。采样参数全部来自 `DerivationSettings`（Qwen3 官方 non-thinking 推荐值，temperature 0.7，**不是贪心解码**——贪心会让 retry 逐字节重放同一个坏结果）。embedding 默认 L2 归一化。`parse_generate_response` 同时兼容单体 JSON 和逐行流式响应。
+- **`openai_compat.py`** — OpenAI 兼容生成接口，使用 `json_schema` + `strict` 约束输出；写死关闭思考，并逐次校验响应里没有思考内容。429 由 SDK 按 `retry-after` 重试；key 优先从环境变量读取，其次从当前目录的 `.env` 读取。
 - **`graph.py`** — 只剩图谱领域：prompt、实体/关系的归一化（`ENTITY_TYPES`/`RELATION_TYPES` 白名单）、合并、失效判定、查询、`graph_diagnostics`。**不接触网络**，generator 由 `app.build_graph` 注入（`derivation.JsonGenerator` Protocol：`generate_json(prompt) -> str`）。
 - **`analysis.py`** — 章节级分析，与 `graph.py` 结构对称（prompt / 解析 / 合并 / 失效判定 / 进度过滤），generator 同样由 `app.build_analysis` 注入。
 - **`extraction.py`** — `graph.py` 与 `analysis.py` 共用的抽取工具，只依赖 `models`：LLM JSON 读取（`parse_json_object`、`get_any`、`as_list`、`normalize_text`）、证据锚定（`locate_evidence`/`resolve_evidence`，宽松匹配后回读原文）、`Chunk | ChunkContext | Mapping` 归一（`chunk_context`、`int_value`）。**新的领域词汇不要往这里放**——只有第二个派生管线也要用的通用件才进来。
@@ -83,6 +84,7 @@ uvx ruff format . && uvx ruff check .          # 两者当前都保持 clean
 - **丢弃按成因分两类计数，只有 `unanchored_count` 是质量信号**。`extraction.Rejections` 把 `collect_items` 的损失拆成 `unanchored`（抛 `EvidenceNotFound`，引文不在 chunk 里）与 `unreadable`（`parse` 返回 `None`：谓词超出 `RELATION_TYPES`、实体没名字、字段缺失）；`rejected_count` 是两者之和，`unanchored_count` 单独落盘。2026-07-28 全量实测（2307 chunk）总丢弃 26.7% = **白名单拒绝 20.7% + 证据锚定失败 3.9%**，后者比加固时的 7.8% 还低。白名单拒绝掉的是 `怀疑`/`担心`/`回答`/`使用` 这类叙事长尾谓词，是封闭谓词表的**设计成本，不是缺陷**（9094a72 已统计过：词表外 156 个谓词、146 个只出现一次，没有可扩充的目标）——所以只有 `MAX_UNANCHORED_ITEM_SHARE` 有阈值，总数不设阈值。**不要再去调采样参数降这个数**：实测 `presence_penalty` 1.5→0.0 对丢弃率无影响（40 chunk 配对，29.3% vs 28.9%，sign test p=0.63）。
 - **`unanchored_count` 是 `int | None`，`None` 表示"没测过"而不是 0**。拆分之前写的单元没有这个字段，读出来是 `None`；`derivation.sum_or_unknown` 保证只要有一个单元是 `None`，整份派生物的合计就是 `None`（旧图谱续建会同时含两种单元），`status` 于是显示 `cause not recorded` 并跳过告警。不要给它补默认值 0——那等于伪造一次没做过的测量。**这个字段刻意没有 bump `GRAPH_SCHEMA_VERSION`**：按 `docs/storage-engine-decision.md` 第 3 条，带默认值的可选字段旧文件直接能载入，只有语义改动（prompt 变了、抽取结果该不一样）才值得那 7 小时重建。抽取行为一个字节都没变，只是多记了个计数器。
 - **改 prompt 必须 bump `GRAPH_PROMPT_VERSION`**（改图谱结构则 bump `GRAPH_SCHEMA_VERSION`）。`graph_staleness_reason` 会比对 schema/prompt 版本、生成模型、extraction settings、每个已处理 chunk 的 source/text hash 与位置；stale 时 `graph-index` 整图重建、`graph-query` 直接报错。仅新增 chunk 时是断点续建（`processed_chunk_ids`）。
+- **失效指纹含生成接口地址 `llm_endpoint`**：云端记 base_url，Ollama 记空串；已有 run 读回也是空串，所以本地图谱不会因此失效。字段存在 `runs.extra` JSON 里、不单列，因为 `db-init` 不升级已有表，加列会让已有库读 `runs` 时报 unknown column。
 - **`_validate_chunk_metadata_source`** 在 graph 路径上先校验数据库 chunks 的 source path 与源文件当前 hash，源文件被改过就要求重新 index。它被 `app._load_indexed_source` 包住——凡是应用层要读 chunks 原文的派生入口都走这个函数。**唯一例外是 `collection_status`**：它自己通过 `ArtifactStore.read_source` 读取 + 显式调 `_validate_chunk_metadata_source` 并把异常 catch 成 `source_error` 字段，因为 status 的职责就是把失效**报出来**而不是 fail closed。新增入口一律走 `_load_indexed_source`，不要照抄这个例外。
 - **`config.graph` 与 `config.analysis` 是同一个 `DerivationConfig` 类的两个实例**，`KnowledgeGraph.extraction_settings` 与 `AnalysisDocument.settings` 也都是 `DerivationSettings`。但这两个**落盘字段名不能动**——改了会让已有 `graph.json`/`analysis.json` 被判 stale 而全量重建。
 - **`status` 是唯一"报告失效而不 fail closed"的入口**（`app.collection_status`）。它做三件别处不做的事：失效判定用**配置里当前的模型与参数**（回答"重跑会续建还是从头来"，而不只是"现在坏没坏"）；`ChunkStore.stats()` 的 doc 数与 manifest 对账（这是检出"索引不是原子发布"的唯一手段）；`graph.graph_diagnostics` 的比值带实测参考值（`MIN_DECLARED_ENTITY_SHARE` / `MAX_UNANCHORED_ITEM_SHARE` / `MAX_SILENT_CHUNK_SHARE`，2026-07-28 赛博英雄传 + qwen3:8b 全量）。**丢弃总数没有阈值，只有 unanchored 那部分有**。**参考值是提示不是判死**，换书换模型必然漂移；它们是 read-side 常量，不落盘、不进失效指纹，可以随便调。
@@ -97,7 +99,7 @@ uvx ruff format . && uvx ruff check .          # 两者当前都保持 clean
 
 ## 相关文档
 
-- `docs/spec/narrative-index-plan.md`（中文）— 2026-09-14 按「剧情段高光 + 人物塑造」重定需求后的执行计划：`analyze` 升级为原子笔记、人物身份两遍归并、剧情段索引、评估集先行、图谱冻结、GLM 云端派生；章节识别（Q5）待测量。**动 `analyze`、章节识别、图谱或检索排序前先读它的「不重新讨论的事」；实施从它的「执行顺序」第 0 步开始。**
+- `docs/spec/narrative-index-plan.md`（中文）— 2026-09-14 按「剧情段高光 + 人物塑造」重定需求后的执行计划：`analyze` 升级为原子笔记、人物身份两遍归并、剧情段索引、评估集先行、图谱冻结、云端派生（b.ai `qwen3.8-flash`，关思考）；章节识别（Q5）已定为「修识别 + A」。**动 `analyze`、章节识别、图谱或检索排序前先读它的「不重新讨论的事」；实施从它的「执行顺序」第 0 步开始。**
 - `docs/spec/derivation-hardening-plan.md`（中文）— 2026-07-27 排查出的三个根因（思考模式默认开 / 单条 quote 失败杀死整个 run / 宽松匹配字符类漏 `【】…`）与三项改动，均已实施并在 20 chunk 上验收。**动 `graph-index` / `analyze` 前先读它的「不重新讨论的事」。**
 - `docs/mvp-runbook.md`（中文）— 全量跑通示例小说的执行步骤 + 2026-07-27 实测吞吐基线。
 - `README.md`（中文）— 面向使用者的命令手册：全局参数、8 个子命令、进度限制、故障排查表。

@@ -4,7 +4,7 @@ SET @person = '向山';
 SET @run = (SELECT MAX(id) FROM runs WHERE collection = @collection AND kind = 'graph');
 
 -- 可把 @run 改成下表中的历史 id。不同 kind 各自选择最新版本。
-SELECT id AS run_id, kind, source_version_id, llm_model, prompt_version,
+SELECT id AS run_id, kind, source_version_id, llm_model, extra->>'$.llm_endpoint' AS llm_endpoint, prompt_version,
        created_at, updated_at, processed_count, selected_count, settings
 FROM runs WHERE collection = @collection ORDER BY id DESC;
 

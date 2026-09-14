@@ -59,6 +59,7 @@ from .models import (
     ProgressFilter,
 )
 from .ollama import OllamaEmbedder, OllamaGenerator
+from .openai_compat import OpenAICompatGenerator
 from .progress import build_progress_filter, source_from_manifest
 from .store import (
     ChunkStore,
@@ -477,7 +478,7 @@ def build_graph(
     if options.limit:
         chunks = chunks[: options.limit]
 
-    llm_model, extraction_settings = _generation_plan(
+    llm_model, llm_endpoint, extraction_settings = _generation_plan(
         config,
         config.graph,
         llm_model=options.llm_model,
@@ -490,6 +491,7 @@ def build_graph(
             collection=collection,
             manifest=manifest,
             llm_model=llm_model,
+            llm_endpoint=llm_endpoint,
             extraction_settings=extraction_settings,
         ),
         stale=lambda stored: graph_staleness_reason(
@@ -498,6 +500,7 @@ def build_graph(
             collection=collection,
             source_path=manifest.source_path,
             llm_model=llm_model,
+            llm_endpoint=llm_endpoint,
             extraction_settings=extraction_settings,
         ),
         rebuild=options.rebuild,
@@ -511,6 +514,7 @@ def build_graph(
         collection=collection,
         manifest=manifest,
         llm_model=llm_model,
+        llm_endpoint=llm_endpoint,
         extraction_settings=extraction_settings,
         progress=progress_filter,
         selected_chunk_count=len(chunks),
@@ -533,11 +537,8 @@ def build_graph(
         )
 
     if generator is None:
-        generator = OllamaGenerator(
-            base_url=config.ollama.base_url,
-            model=llm_model,
-            keep_alive=config.ollama.keep_alive,
-            settings=extraction_settings,
+        generator = _default_generator(
+            config, config.graph, llm_model=llm_model, settings=extraction_settings
         )
 
     failed_chunk_count = 0
@@ -598,6 +599,7 @@ def build_graph(
             collection=collection,
             manifest=manifest,
             llm_model=llm_model,
+            llm_endpoint=llm_endpoint,
             extraction_settings=extraction_settings,
             progress=progress_filter,
             selected_chunk_count=len(chunks),
@@ -654,7 +656,7 @@ def build_analysis(
         if all(progress_filter.allows(chunk) for chunk in group.chunks)
     ]
 
-    llm_model, settings = _generation_plan(
+    llm_model, llm_endpoint, settings = _generation_plan(
         config,
         config.analysis,
         llm_model=options.llm_model,
@@ -668,6 +670,7 @@ def build_analysis(
             collection=collection,
             manifest=manifest,
             llm_model=llm_model,
+            llm_endpoint=llm_endpoint,
             settings=settings,
         ),
         stale=lambda stored: analysis_staleness_reason(
@@ -676,6 +679,7 @@ def build_analysis(
             collection=collection,
             source_path=manifest.source_path,
             llm_model=llm_model,
+            llm_endpoint=llm_endpoint,
             settings=settings,
         ),
         rebuild=options.rebuild,
@@ -687,6 +691,7 @@ def build_analysis(
         collection=collection,
         manifest=manifest,
         llm_model=llm_model,
+        llm_endpoint=llm_endpoint,
         settings=settings,
         progress=progress_filter,
         selected_chapter_count=len(selected),
@@ -694,7 +699,7 @@ def build_analysis(
     artifacts.save(run)
     processed = processed_chapter_keys(document)
     budget = chapter_char_budget(
-        num_ctx=config.ollama.num_ctx, num_predict=settings.num_predict
+        num_ctx=settings.num_ctx, num_predict=settings.num_predict
     )
     pending: list[ChapterGroup] = []
     skipped: list[tuple[str, str]] = []
@@ -722,11 +727,8 @@ def build_analysis(
         )
 
     if generator is None:
-        generator = OllamaGenerator(
-            base_url=config.ollama.base_url,
-            model=llm_model,
-            keep_alive=config.ollama.keep_alive,
-            settings=settings,
+        generator = _default_generator(
+            config, config.analysis, llm_model=llm_model, settings=settings
         )
 
     for index, group in enumerate(pending, start=1):
@@ -765,6 +767,7 @@ def build_analysis(
             collection=collection,
             manifest=manifest,
             llm_model=llm_model,
+            llm_endpoint=llm_endpoint,
             settings=settings,
             progress=progress_filter,
             selected_chapter_count=len(selected),
@@ -789,6 +792,7 @@ def build_analysis(
         collection=collection,
         manifest=manifest,
         llm_model=llm_model,
+        llm_endpoint=llm_endpoint,
         settings=settings,
         progress=progress_filter,
         selected_chapter_count=len(selected),
@@ -869,7 +873,7 @@ def collection_status(
         lambda: artifacts.latest(collection, "graph")
     )
     graph = graph_run.document if graph_run else None
-    graph_model, graph_settings = _generation_plan(
+    graph_model, graph_endpoint, graph_settings = _generation_plan(
         config, config.graph, llm_model=None, num_predict=None, retries=None
     )
     graph_report = DerivationReport(
@@ -885,6 +889,7 @@ def collection_status(
             collection=collection,
             source_path=manifest.source_path,
             llm_model=graph_model,
+            llm_endpoint=graph_endpoint,
             extraction_settings=graph_settings,
         )
         if graph
@@ -897,7 +902,7 @@ def collection_status(
         lambda: artifacts.latest(collection, "analysis")
     )
     analysis = analysis_run.document if analysis_run else None
-    analysis_model, analysis_settings = _generation_plan(
+    analysis_model, analysis_endpoint, analysis_settings = _generation_plan(
         config, config.analysis, llm_model=None, num_predict=None, retries=None
     )
     analysis_report = DerivationReport(
@@ -913,6 +918,7 @@ def collection_status(
             collection=collection,
             source_path=manifest.source_path,
             llm_model=analysis_model,
+            llm_endpoint=analysis_endpoint,
             settings=analysis_settings,
         )
         if analysis
@@ -1122,6 +1128,25 @@ def _load_indexed_source(
     )
 
 
+def _default_generator(
+    config: ReadFellowConfig,
+    derivation: DerivationConfig,
+    *,
+    llm_model: str,
+    settings: DerivationSettings,
+) -> JsonGenerator:
+    if derivation.backend == "openai":
+        return OpenAICompatGenerator(
+            base_url=config.openai.base_url, model=llm_model, settings=settings
+        )
+    return OllamaGenerator(
+        base_url=config.ollama.base_url,
+        model=llm_model,
+        keep_alive=config.ollama.keep_alive,
+        settings=settings,
+    )
+
+
 def _generation_plan(
     config: ReadFellowConfig,
     derivation: DerivationConfig,
@@ -1129,14 +1154,19 @@ def _generation_plan(
     llm_model: str | None,
     num_predict: int | None,
     retries: int | None,
-) -> tuple[str, DerivationSettings]:
+) -> tuple[str, str, DerivationSettings]:
     """The model and settings one build runs with, after per-run overrides."""
     num_predict = derivation.num_predict if num_predict is None else num_predict
     retries = derivation.retries if retries is None else retries
-    return llm_model or config.ollama.generation_model, DerivationSettings(
-        num_predict=num_predict,
-        num_ctx=config.ollama.num_ctx,
-        retries=retries,
+    backend = config.openai if derivation.backend == "openai" else config.ollama
+    return (
+        llm_model or config.generation_model(derivation),
+        config.openai.base_url if derivation.backend == "openai" else "",
+        DerivationSettings(
+            num_predict=num_predict,
+            num_ctx=backend.num_ctx,
+            retries=retries,
+        ),
     )
 
 

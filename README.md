@@ -32,8 +32,10 @@ uv run readfellow import-json --collection sample
 ```sh
 ollama serve                        # 另开一个终端
 ollama pull qwen3-embedding:8b      # embedding，4096 维
-ollama pull qwen3:8b                # 生成，供 graph-index / analyze 使用
+ollama pull qwen3:8b                # 生成，供 graph-index 使用
 ```
+
+`analyze` 按 `config.yaml` 默认走云端（`analysis.backend: openai`，b.ai `qwen3.8-flash`），需要 `LLM_API_KEY`，和 `MYSQL_URI` 一样优先从环境变量读取，其次从当前目录的 `.env` 读取。`graph-index` 仍用本地 Ollama。
 
 自检（返回模型列表即正常；连不上会是 `503`）：
 
@@ -41,7 +43,7 @@ ollama pull qwen3:8b                # 生成，供 graph-index / analyze 使用
 curl -s http://127.0.0.1:11434/api/tags
 ```
 
-只做 `index` / `search` / `fts` / `hybrid` / `fetch` 时只需要 embedding 模型；`graph-index` 和 `analyze` 才需要生成模型。**跑测试不需要 Ollama**（全离线）。
+只做 `index` / `search` / `fts` / `hybrid` / `fetch` 时只需要 embedding 模型；`graph-index` 才需要本地生成模型。**跑测试不需要 Ollama**（全离线）。
 
 ---
 
@@ -158,7 +160,7 @@ uv run readfellow graph-query "向山" --collection sample
 | 参数 | 默认 | 说明 |
 |---|---|---|
 | `--limit` | 0 | 只抽取前 N 个符合条件的 chunk |
-| `--llm-model` | `ollama.generation_model` | 生成模型 |
+| `--llm-model` | 对应派生 `backend` 所指的 `generation_model` | 生成模型 |
 | `--num-predict` | `graph.num_predict` (4096) | 每 chunk 最大生成 token |
 | `--retries` | `graph.retries` (2) | 每 chunk 失败重试次数 |
 | `--rebuild` | off | 整图重建 |
@@ -180,7 +182,7 @@ uv run readfellow analyze --collection sample --max-chapter 50
 两条规则：
 
 - **最后一组永不分析**。它可能被 `index --limit` 截断，无法与完整章节区分。
-- **超出 `num_ctx` 预算的章节被跳过**并打印原因。预算 = `(num_ctx − num_predict − 600) × 1.5` 字符；当前配置为 17532 字符。示例小说 1207 章中仅 2 章超标（0.2%）。
+- **超出 `num_ctx` 预算的章节被跳过**并打印原因。预算 = `(num_ctx − num_predict − 600) × 1.5` 字符；`num_ctx` 取所选后端的配置；`analysis` 默认走 openai（`num_ctx: 65536`），预算为 91260 字符。
 
 **每章分析完立即提交数据库事务**，中断安全，重跑按 `(章序号, 章标题)` 续建。
 
