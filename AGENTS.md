@@ -97,6 +97,7 @@ uvx ruff format . && uvx ruff check .          # 两者当前都保持 clean
 
 ## 相关文档
 
+- `docs/spec/narrative-index-plan.md`（中文）— 2026-09-14 按「剧情段高光 + 人物塑造」重定需求后的执行计划：`analyze` 升级为原子笔记、人物身份两遍归并、剧情段索引、评估集先行、图谱冻结、GLM 云端派生；章节识别（Q5）待测量。**动 `analyze`、章节识别、图谱或检索排序前先读它的「不重新讨论的事」；实施从它的「执行顺序」第 0 步开始。**
 - `docs/spec/derivation-hardening-plan.md`（中文）— 2026-07-27 排查出的三个根因（思考模式默认开 / 单条 quote 失败杀死整个 run / 宽松匹配字符类漏 `【】…`）与三项改动，均已实施并在 20 chunk 上验收。**动 `graph-index` / `analyze` 前先读它的「不重新讨论的事」。**
 - `docs/mvp-runbook.md`（中文）— 全量跑通示例小说的执行步骤 + 2026-07-27 实测吞吐基线。
 - `README.md`（中文）— 面向使用者的命令手册：全局参数、8 个子命令、进度限制、故障排查表。
