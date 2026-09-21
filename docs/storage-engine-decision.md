@@ -12,6 +12,8 @@ push
 
 1. **要搬只能搬 zvec,不能上 sqlite。** sqlite 在这里能给的能力 zvec 全给,而且已经在依赖树里。引入 sqlite = 仓库里两个存储引擎。八项探针实测见下。
 2. **写放大不是理由。** 每 chunk 整文件重写累计约 40 GB 看着吓人,换算成时间是 8 小时 run 里的 9 分钟(1.8%)。其余 98% 在等 Ollama。
+
+   > **2026-09-21 注**:这条结论对**当时的 JSON 落盘**仍然成立,但它的两个前提都已变化,**不要直接沿用这个百分比**。(a) 落盘已迁进 MySQL,`artifacts.save()` 多了 sha256 指纹、行级 diff 和 SQL 往返,同一份 300-chunk 图谱上单次 439 ms → 668 ms,且**文档零变化时仍要 650 ms**。(b)「98% 在等 Ollama」正在失效,`analyze` 已切云端。另外本节只量了写盘,进程内的 `merge_extraction` 同样是二次的,两者合计实测规模翻倍耗时 ×3.93。详见 `docs/architecture-archive.md` 的「2026-09-21 架构评审」问题 1。**这条「不重新讨论」只管「要不要为写放大引入 sqlite」(答案仍是不要);不管「派生管线的规模成本」,那条是未决项。**
 3. **「迁移能力」归错了地方。** 8 小时重建的触发器是 `graph.py` 里的一行 policy(`if graph.schema_version != GRAPH_SCHEMA_VERSION`),不是格式限制。给模型加一个带默认值的可选字段,旧 `graph.json` 直接能载入,根本不需要 bump。而真正必须 bump 的是**语义**改动(prompt 变了 → 抽取结果就该不一样),那个**没有任何存储引擎能迁移**——新字段的值只有 LLM 能给。
 4. **撕裂读用 `os.replace` 解决,不需要引擎。** 三行:临时文件 + 原子 rename。
 5. **chromadb 不是备选,拦路的不是 MCP 而是中文 BM25。** chroma 内置 BM25 的分词器按空白切词,中文整句成一个 token;`$contains` 无序无分,喂不了 rank-based RRF。实测见「chromadb 评估」。

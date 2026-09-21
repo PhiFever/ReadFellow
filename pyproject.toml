@@ -31,3 +31,7 @@ packages = ["src/readfellow"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
+# 全量 `uv run pytest` 只跑 tests/。tmp/ 下是架构评审的复现脚本，其中
+# test_spoiler.py 故意是红的（问题修好前它就该红），显式指定路径仍可运行：
+#   uv run pytest tmp/test_spoiler.py
+testpaths = ["tests"]

@@ -81,6 +81,8 @@ Ollama 和 zvec 访问已经被拆到单独模块，但应用工作流仍直接�
 
 推荐方向：把 progress filtering 放进共享检索接口中，而不是作为每个命令可选的粘合逻辑。
 
+> **2026-09-21 补充**：这条说的是「忘了应用 filter」。还存在**第二种**失效模式——filter 应用了，但它的边界算错了：`--max-chapter` 按**当前**源文件解析行号，chunk 的行号却是索引时那份文件的，源文件一改两边就不在同一个坐标系上。上面的推荐方向解决不了它（无论 filter 放哪，`--max-chapter` 都得读源文件算行号）。已复现，见「2026-09-21 架构评审」的问题 2。
+
 ### 文档输入层过窄
 
 当前 reader 假设输入是 UTF-8 文本，并使用中文小说风格章节标题。这足够支撑最初实验，但长文档阅读最终需要文档 reader 层。
@@ -189,7 +191,9 @@ Ollama 和 zvec 访问已经被拆到单独模块，但应用工作流仍直接�
 
 ## 图谱索引成本说明
 
-当前 `graph-index` 成本大致与 chunk 数量线性相关。它会对每个 chunk 调用一次本地生成模型。
+> **2026-09-21 修正**：本节原写「成本大致与 chunk 数量线性相关」，这条只对 **LLM 调用**成立。进程内的合并与落盘是**二次**的，实测规模翻倍耗时 ×3.93。下面的耗时表和外推公式都建立在线性假设上，在大 N 时系统性低估——沿用前先读「2026-09-21 架构评审」的问题 1。
+
+`graph-index` 对每个 chunk 调用一次生成模型，这部分与 chunk 数线性相关。但每个 chunk 处理完还要合并进全量图谱并整份落盘，那部分随已处理量线性爬升，合起来是二次。chunk 数小时看不出来，全书规模下会成为主导项。
 
 默认 chunk 设置：
 
@@ -214,14 +218,14 @@ Ollama 和 zvec 访问已经被拆到单独模块，但应用工作流仍直接�
 
 ```sh
 time uv run readfellow graph-index --collection sample --llm-model qwen3:8b --limit 20 --rebuild
-wc -l metadata/sample/chunks.jsonl
+uv run readfellow status --collection sample   # chunk 数从这里读，chunks.jsonl 已迁进 MySQL
 ```
 
-然后估算：
+~~然后估算：`estimated_total_time = measured_20_chunk_time / 20 * total_chunk_count`~~
 
-```text
-estimated_total_time = measured_20_chunk_time / 20 * total_chunk_count
-```
+**这个外推公式不能用。** 它假设每 chunk 成本恒定，而实际成本随已处理量线性爬升。合成负载实测（300 chunk，不含 LLM 调用）：按前 20 chunk 外推低估 6.4 倍；外推到全书 2307 chunk 时，线性算法给出 2.7 分钟，按实测阶数是 134.6 分钟。
+
+`--limit 20` 这个测法本身也是问题的一部分：20 chunk 恰好是二次项最不显眼的地方，`docs/` 里历次实测（20 / 40 chunk）都落在这个区间里。要估全书，至少测两个规模点（如 150 与 300）看耗时比是接近 2 还是接近 4，再据此外推。
 
 ## zvec MCP 集成
 
@@ -509,3 +513,144 @@ CLI 应只负责解析参数、调用这些模块并格式化输出。
 - **没为 `os.replace` 写并发测试**。真正验证需要造并发，成本远超收益。
 
 **验证**：`uv run pytest` 46 passed（净 +2，另有 1 条断言加进既有的真 zvec 用例）、ruff clean。五个真实 collection 上跑过 `status`：`sample` 报 584/2307 可续建、`smoke` 全绿、`ch5` 同时命中 stale 与「零产出 chunk」告警、`toy` 命中源文件缺失。
+
+## 2026-09-21 架构评审：规模、源文件漂移与并发
+
+第二轮完整架构评审（读完全部 6344 行 src 与 2774 行 docs，配 5 组实测）。与 2026-07-26 那轮不同，这轮的结论不是「哪里该更深」——**分层本身是成立的**：CLI→app→domain 的 seam 干净、注入到位、`grep zvec src/readfellow/app.py` 仍为空。
+
+问题出在别处：**没有任何一层对「规模」负责，而所有性能结论都是在小 N 下测的。** 每层都做了局部正确的选择（文档整份可读、全量重算保证一致、每单元落盘保证可续建），叠起来是二次。
+
+六个问题按严重性排列。**问题 2 是唯一违反核心不变量的，优先级最高。**
+
+### 问题 1 · 派生管线是 O(N²)，而文档断言它线性
+
+合成负载实测（SQLite 本地，**不含任何 LLM 调用**，树莓派 CPU）：
+
+```
+150 chunk 总耗时:    34.7s
+300 chunk 总耗时:   136.6s
+规模翻倍 -> 耗时 x3.93        (线性应 x2.0，二次应 x4.0)
+```
+
+单次耗时随已处理量线性爬升，总量即二次：
+
+| 已处理 chunk | `merge_extraction` | `artifacts.save` |
+| ---: | ---: | ---: |
+| 10 | 9.3 ms | 56 ms |
+| 100 | 40.6 ms | 280 ms |
+| 300 | 112.0 ms | 668 ms |
+
+五处 per-chunk 的全量操作叠出来的：
+
+- `graph.py:436` — `merge_extraction` 末尾调 `finalize_graph(graph)`，每个 chunk 把**全图**实体、关系、extractions 重排一遍
+- `graph.py:420` — 每条新关系 `_has_same_values(graph.relations, ...)` 线性扫全部已有关系
+- `graph.py:391` — 每个 chunk `_build_alias_index(graph)` 重建全量别名索引
+- `graph.py:858` — `_mark_extracted` 线性扫 extractions
+- `artifacts.py:343` — `save` 每 chunk 一次，`_rows()` 把整个文档重新 `model_dump` + sha256 算 position，再与快照做行级 diff
+
+**根因在数据结构，不在这五个点。** 派生管线的核心是「一份在内存里不断长大的文档，每步改完整份落盘」。N 小时优雅，N 大时必然二次。真正的修法是让 chunk 级抽取成为 append-only 的事实，实体/关系的合并视图在读时或增量构建——优化这五处只能降常数。
+
+**已被这条污染的结论**：
+
+- 本文档「图谱索引成本说明」的线性断言与外推公式（已在该节就地修正）。
+- `docs/storage-engine-decision.md` 的「写盘只占全量 run 总耗时 1.8%」。该表末行其实已经写了「累计落盘随 chunk 数二次增长」，且时间换算做了均值修正，**对 JSON 落盘是对的**；但它测的是 `model_dump + json.dumps + write_text = 0.103s`，而迁进 MySQL 后 `save()` 多了 sha256 指纹、行级 diff 和 SQL 往返，成本结构已换，那次迁移没有重测这个比例。同一份 300-chunk 图谱（252 实体 / 3000 关系）上对比：
+
+  | 落盘方式 | 单次耗时 |
+  | --- | ---: |
+  | 旧 `write_json_document`（整份 2.8 MB） | 439 ms |
+  | 新 `artifacts.save`（循环中的正常增量） | 668 ms |
+  | 新 `artifacts.save`（**文档一个字节没变**） | 650 ms |
+
+  最后一行是关键：零变化也要 650 ms，说明成本几乎全在「全量重算 rows + diff」的固定开销上，与实际写入量无关。「只更新变化的记录」省掉的是 SQL 写入，没省掉计算变化本身。
+- 「其余 98% 在等 Ollama」这个前提正在失效：`analyze` 已切到云端 flash（~20s/章，对比本地十几秒/chunk）。graph 一旦也切云端，CPU 侧就会从可忽略变成主导。
+
+### 问题 2 · 防剧透的边界用「现在的源文件」算，索引却是旧文件的
+
+**这条违反核心不变量 3，且已端到端复现**（真实 zvec + 真实 CLI）：
+
+```
+[编辑前] exit=0  第二章泄露=False
+[编辑后] exit=0  第二章泄露=True     ← 源文件头部插入 30 行，未重新 index
+```
+
+`--max-chapter` 经 `progress.py:81` 的 `chapter_boundaries(source)` 读**当前**源文件算行号，而 chunk 的 `line_end` 是索引时那份文件的。行号一漂移，`line_end <= max_line_end` 两边就不是同一个坐标系。
+
+放大它的是第二件事：`search` / `fts` / `fetch` / `hybrid` 这四条路径**都不校验 source hash**——`app.py:386`、`:416`、`:439` 只调 `artifacts.read_source()`，不调 `_validate_chunk_metadata_source`。只有 graph 路径（走 `_load_indexed_source`）和 `status` 会校验。同一个 `--max-chapter`，在 `graph-query` 下 fail closed，在 `search` 下照常出结果。
+
+两个旁证说明这是漏掉而非有意：
+
+- `tests/test_cli_evidence.py:139` 的注释写着「chunk metadata 从未匹配过源文件，**其他每个命令都会拒绝在此运行**」——可同一个测试里 `fts` 和 `fetch` 都 exit 0 并返回了内容。注释描述的是设计意图，不是代码行为。
+- `docs/spec/narrative-index-plan.md` 里手工核对过「删的只是尾部，前面行号没变，抽样 12 个 chunk 一致」。风险被识别到了，但它停在人工核对，没变成机制。
+
+注意这与「防剧透控制容易被新入口绕过」是**不同**的失效模式，那条的推荐方案解决不了它（已在该节交叉标注）。
+
+### 问题 3 · 纯运行时旋钮进了失效指纹
+
+```
+只改 --retries 2 -> 3          -> 整图重建 (graph extraction settings changed)
+只改 num_ctx 16384->32768      -> 整图重建 (graph extraction settings changed)
+```
+
+`retries` 是容错策略，`num_ctx` 是窗口大小，两者都不改变任何已抽取结果的语义，却和 `temperature`、`num_predict` 一起装在 `DerivationSettings` 里参与 `graph.py:251` 的指纹比对。命令行敲一次 `--retries 3`，下次不敲就触发一次全量重建。
+
+`DerivationSettings` 的注释说「每个塑造答案的旋钮都属于这里」——判据是对的，这两个字段不符合它，是被顺手装进同一个袋子的。
+
+### 问题 4 · 检索路径的加载量与结果规模无关
+
+300 chunk 的玩具图谱上实测：
+
+```
+read_source():     55.1 ms  -> 300 chunk 全文（0.5 M 字符）
+latest('graph'):  679.6 ms  -> 252 实体 / 3000 关系 / 4060 锚点
+```
+
+- 每次 `search`，`app.py:386` 把全书 chunk 正文从库里拉回来，然后 `_, manifest, _ =` **把 chunks 丢掉**——只为拿一个 manifest。
+- 每次 `hybrid`，`_annotate_with_graph` → `_load_graph` → `latest()` 把**整个图谱**读进内存，只为给 top-5 结果挂上最多 3 个实体名（`ANNOTATION_MAX_ENTITIES`）。真实 2307 chunk 的图谱按线性外推是 5–7 秒，还是 SQLite；MySQL 更慢。
+
+外加 `ArtifactStore._snapshots` 缓存这些行且**从不释放**，而 `_artifact_store` 是 `@lru_cache(maxsize=8)` 的进程级单例。CLI 是短命进程所以无感——但 `app.py` 的自我定位是「未来 MCP / library 唯一该调用的入口」，在那个形态下这是内存泄漏。
+
+### 问题 5 · 持久化层结构上假设单写者，而规格第 4 步计划并行
+
+`docs/spec/narrative-index-plan.md` 第 4 步是「`analyze` v2，**并行运行**」。两个 worker 按标准方式切分（单元不重叠、各有独立验收）实测：
+
+```
+graph:     A run_id=1, B run_id=1
+           B 失败: IntegrityError: UNIQUE constraint failed: entities.run_id, entities.position
+           库里最终只有 A 的 2 个 chunk
+
+analysis:  B 不报错，4 章全写进去了
+           但 runs.processed_count = 2   ← 被 B 的 document 覆盖
+```
+
+`prepare()` 的语义是「复用最新 run」，两个 worker 拿到同一个 `run_id` 却各自持有**独立的内存 document**，`save()` 又拿自己的快照做 diff。graph 侧撞 UNIQUE 直接炸；analysis 侧静默把完成度报错——后者更危险，`status` 和 `analyze` 的进度都会骗人。
+
+并行化不是加锁能解决的：当前模型里「run 的内容」等于「某个进程内存里那份文档」，两个进程就是两份真相。
+
+### 问题 6 · 测试的四个维度恰好避开了上面全部问题
+
+65 个测试全绿，**没有一个能发现以上任何一条**。因为整套测试是：单元 × 小规模 × 单进程 × 源文件不变。而上面每条都住在这四个维度之外：
+
+- O(N²) 在 20 chunk 下完全看不见——这也正是 `docs/` 里历次实测都用 20/40 chunk 的原因，样本点系统性地落在二次项显现之前。
+- 源文件漂移唯一接近的用例，自己的注释是错的（见问题 2）。
+- 并发一个用例都没有。
+
+`AGENTS.md`「不为健壮性过度加测试；优先补证据/进度/失效三类语义」这条约束本身是对的，但它没有涵盖**规模**和**并发**——而这两类恰恰是本项目（长文档、多小时 run、已计划并行化）的主场。
+
+### 为什么这六条会被一起漏掉
+
+不是疏忽，是三个假设同时过期而没有人重测：
+
+1. **「LLM 是瓶颈，进程内开销可忽略」** —— 在本地 ollama 下成立，云端化后不成立。问题 1、4 都从这里长出来。
+2. **「源文件不可变」** —— `AGENTS.md` 把它写成不变量 1，于是代码在多数路径上就当它真的成立。问题 2 是它第一次被真实违反（用户删了书末错章）。
+3. **「单进程」** —— 从来没被写成假设，所以也从来没被检验。问题 5。
+
+`docs/` 的自省质量很高（`module-deepening-plan` 连「B 阶段没做到 90 行」都诚实记了），但自省的对象一直是**代码结构**，没有覆盖**运行时前提**。
+
+### 统一做的时候，建议的入手顺序
+
+1. **`search`/`fts`/`fetch`/`hybrid` 统一走 `_load_indexed_source`**（问题 2 的止血）。最小改动，直接堵住剧透泄漏。代价是源文件动过就拒绝服务，这正是不变量 1 要求的 fail closed。`docs/spec/narrative-index-plan.md` 已有的「按当前源文件 `index --rebuild`」待办可一并了结。
+2. **把 `retries` / `num_ctx` 移出失效指纹**（问题 3）。几行改动，省掉一次误触发的全量重建。注意 `DerivationSettings` 是落盘字段，拆分方式要保证旧 run 读回时不被判 stale。
+3. **`finalize_graph` 从 `merge_extraction` 里拿出来，`save` 改成周期性**（问题 1 的降常数）。不动数据模型就能降一个量级；彻底修需要改 append-only，那是另一个量级的工程，且与问题 5 的并行化前提是同一件事——**建议一起设计**。
+4. **问题 4、6 跟着上面走**：问题 4 的 `read_source` 白读在第 1 条动检索路径时顺手修；问题 6 的补法是给测试加规模与并发两个维度，而不是加用例数量。
+
+复现方法都记在各条的实测块里，足以重建。本轮只读代码 + 临时脚本，**未改动 src 与 tests**。
