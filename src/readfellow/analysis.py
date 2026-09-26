@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .chunking import CHAPTER_RE
-from .derivation import sum_or_unknown, write_json_document
+from .derivation import settings_changed, sum_or_unknown, write_json_document
 from .extraction import (
     EvidenceNotFound,
     as_list,
@@ -345,7 +345,7 @@ def analysis_staleness_reason(
         return "analysis generator model changed"
     if llm_endpoint is not None and document.llm_endpoint != llm_endpoint:
         return "analysis generator endpoint changed"
-    if settings is not None and document.settings != settings:
+    if settings is not None and settings_changed(document.settings, settings):
         return "analysis settings changed"
 
     indexes = [chapter.chapter_index for chapter in document.chapters]

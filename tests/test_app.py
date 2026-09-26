@@ -231,11 +231,12 @@ def test_graph_build_records_versioned_source_fingerprints(
         "unanchored_count": 0,
     }
 
+    # A retry budget is how hard to try, not what to answer; it stales nothing.
     fail_if_called = DeterministicGenerator([])
     second = build_graph(
         config,
         "books",
-        options=GraphBuildOptions(retries=0),
+        options=GraphBuildOptions(retries=3),
         generator=fail_if_called,
     )
 

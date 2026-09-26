@@ -139,14 +139,16 @@ def test_analysis_resumes_and_only_analyzes_new_chapters(tmp_path: Path) -> None
         "第一章 开始"
     ]
 
+    # A different retry budget still resumes: it does not shape an answer.
     second = DeterministicGenerator([SECOND_CHAPTER_PAYLOAD])
     second_result = build_analysis(
         config,
         "books",
         progress=ProgressLimit(max_chapter="2"),
-        options=AnalysisBuildOptions(retries=0),
+        options=AnalysisBuildOptions(retries=2),
         generator=second,
     )
+    assert second_result.status == "built"
     assert len(second.prompts) == 1
     assert "第二章 之后" in second.prompts[0]
     assert [chapter.chapter_title for chapter in second_result.chapters] == [

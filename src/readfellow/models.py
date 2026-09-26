@@ -202,6 +202,9 @@ class DerivationSettings(ReadFellowModel):
     # identically on every retry. Sampling is what stops that, so temperature is
     # a stored setting rather than a constant, and every knob that shapes an
     # answer belongs here — a derived document is stale when any of them moves.
+    # `num_ctx` and `retries` are stored too, for reference only: they decide
+    # which units a build attempts and how often, not what an answer says, so
+    # `derivation.settings_changed` leaves them out.
     temperature: float = 0.7
     top_p: float = 0.8
     top_k: int = 20

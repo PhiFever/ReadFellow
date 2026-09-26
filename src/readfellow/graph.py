@@ -9,7 +9,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from .derivation import sum_or_unknown, write_json_document
+from .derivation import settings_changed, sum_or_unknown, write_json_document
 from .extraction import (
     as_list,
     chunk_context,
@@ -246,9 +246,8 @@ def graph_staleness_reason(
         return "graph generator model changed"
     if llm_endpoint is not None and graph.llm_endpoint != llm_endpoint:
         return "graph generator endpoint changed"
-    if (
-        extraction_settings is not None
-        and graph.extraction_settings != extraction_settings
+    if extraction_settings is not None and settings_changed(
+        graph.extraction_settings, extraction_settings
     ):
         return "graph extraction settings changed"
 

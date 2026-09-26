@@ -10,7 +10,13 @@ from typing import Any, Protocol, TypeVar
 
 from pydantic import BaseModel
 
+from .models import DerivationSettings
+
 Parsed = TypeVar("Parsed")
+
+# Stored with each run for reference, but they only decide how hard a build
+# tries and which units fit its budget, never what an answer says.
+RUNTIME_SETTINGS = frozenset({"retries", "num_ctx"})
 
 
 class JsonGenerator(Protocol):
@@ -79,6 +85,13 @@ def sum_or_unknown(values: Iterable[int | None]) -> int | None:
             return None
         total += value
     return total
+
+
+def settings_changed(stored: DerivationSettings, current: DerivationSettings) -> bool:
+    """Whether a knob that shapes an answer moved between two builds."""
+    return stored.model_dump(exclude=RUNTIME_SETTINGS) != current.model_dump(
+        exclude=RUNTIME_SETTINGS
+    )
 
 
 def derivation_status(*, selected: int, pending: int, rebuilt: bool) -> str:
