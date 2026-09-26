@@ -49,3 +49,28 @@ Linux 6.8 aarch64，SQLite 本地。**绝对值看硬件，有意义的是比值
 第 2 步不要只测 `--limit 20`——20 chunk 恰好是二次项最不显眼的地方，旧版文档的外推公式就是这么错的（详见 `docs/architecture-archive.md` 的「图谱索引成本说明」）。
 
 另外 `analysis.backend` 当前已是 `openai`（云端 flash），`graph` 仍是 `ollama`。如果要评估「graph 也切云端」的影响，CPU 占比要按云端的单次延迟重算，而不是本地的。
+
+## 2026-09-26 显卡机复测补充的脚本
+
+结果与修复方案见 `docs/spec/architecture-review-fix-plan.md`。下面这些脚本**需要本地 MySQL**（读 `.env` 的 `MYSQL_URI`）。它们对 `read-fellow` 库只读；凡是要写库的，都在同一实例里新建一次性库 `readfellow_bench_<hex>`，跑完删掉。脚本被 SIGKILL 打断时来不及删，事后用 `SHOW DATABASES LIKE 'readfellow_bench_%'` 查出残留，手动删除。
+
+```sh
+uv run python tmp/check_sample_drift.py         # 问题 2 · sample 的 chunk 行号与当前源文件是否还对得上（只读）
+uv run python tmp/bench_fullscale.py            # 问题 1/4 · 拷一份真实 sample 图谱（2307 chunk），测末端 merge/save 与整图读取（~1 分钟）
+uv run python tmp/bench_analysis_scale.py       # 问题 1 · analysis 复制到 1242 章，测每章 save（~2 分钟）
+uv run python tmp/proto_merge.py 300 7          # 问题 1 · 修法原型：第二个参数 K 是每几个 chunk 落盘一次，0 表示现行做法（SQLite）
+uv run python tmp/bench_real_graph.py 30 tmp/out/real.csv  # 问题 1 · 真 qwen3:8b 的逐 chunk 耗时，需要 Ollama；30 个 chunk 就够测 LLM 均值
+```
+
+`bench_real_graph.py` 测的是单个 chunk 的 LLM 延迟，这个数和规模无关，**不要跑几百个 chunk**。全书规模下的 CPU 开销用 `bench_fullscale.py` 测，不用调模型。
+
+本机（WSL2 + RTX 4070 Ti SUPER + 本地 MySQL）的结果：
+
+| 脚本 | 结果 |
+| --- | --- |
+| `bench_total.py` | 150 chunk 8.5 s / 300 chunk 23.9 s → ×2.83 |
+| `bench_real_graph.py` | LLM 平均 8.95 s/chunk（91 个 chunk） |
+| `bench_fullscale.py` | 末端每 chunk merge ≈ 90 ms、save ≈ 630 ms；`latest('graph')` 1.3 s；`read_source` 140 ms |
+| `bench_analysis_scale.py` | 1242 章时每章 save 155 ms |
+| `proto_merge.py` | 300 chunk：现行 25.1 s；增量索引 24.3 s；K=7 5.3 s |
+| `check_sample_drift.py` | 只有最后 4 个 chunk 落在当前文件末尾之外 |
