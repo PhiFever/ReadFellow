@@ -383,9 +383,8 @@ def semantic_search(
     artifacts: ArtifactStore | None = None,
 ) -> SearchResult:
     artifacts = artifacts or open_artifacts(config)
-    _, manifest, _ = artifacts.read_source(collection)
+    manifest, progress_filter = _load_manifest(collection, progress, artifacts)
     store = store or _open_store(config, collection)
-    progress_filter = progress_filter_from_limit(progress, manifest=manifest)
     embedder = OllamaEmbedder(
         base_url=config.ollama.base_url,
         model=manifest.model or config.ollama.embedding_model,
@@ -413,9 +412,8 @@ def fts_search(
     artifacts: ArtifactStore | None = None,
 ) -> SearchResult:
     artifacts = artifacts or open_artifacts(config)
-    _, manifest, _ = artifacts.read_source(collection)
+    manifest, progress_filter = _load_manifest(collection, progress, artifacts)
     store = store or _open_store(config, collection)
-    progress_filter = progress_filter_from_limit(progress, manifest=manifest)
     return SearchResult(
         progress=progress_filter,
         evidence=store.search_fts(
@@ -436,9 +434,8 @@ def fetch_chunk(
     artifacts: ArtifactStore | None = None,
 ) -> FetchChunkResult:
     artifacts = artifacts or open_artifacts(config)
-    _, manifest, _ = artifacts.read_source(collection)
+    manifest, progress_filter = _load_manifest(collection, progress, artifacts)
     store = store or _open_store(config, collection)
-    progress_filter = progress_filter_from_limit(progress, manifest=manifest)
     evidence = store.fetch(chunk_id)
     if evidence is None:
         return FetchChunkResult(
@@ -864,7 +861,7 @@ def collection_status(
     artifacts = artifacts or open_artifacts(config)
     _, manifest, chunks = artifacts.read_source(collection)
     try:
-        _validate_chunk_metadata_source(manifest, chunks)
+        _validate_chunk_metadata_source(manifest, _source_identities(chunks))
         source_error = None
     except (RuntimeError, FileNotFoundError) as exc:
         source_error = str(exc)
@@ -1119,13 +1116,32 @@ def _load_indexed_source(
     the stored chunks can skip that check.
     """
     source_id, manifest, chunks = artifacts.read_source(collection)
-    _validate_chunk_metadata_source(manifest, chunks)
+    _validate_chunk_metadata_source(manifest, _source_identities(chunks))
     return (
         source_id,
         manifest,
         chunks,
         progress_filter_from_limit(progress, manifest=manifest),
     )
+
+
+def _load_manifest(
+    collection: str,
+    progress: ProgressLimit | None,
+    artifacts: ArtifactStore,
+) -> tuple[IndexManifest, ProgressFilter]:
+    """The manifest and progress filter a search reads the index through.
+
+    The same source-file check as `_load_indexed_source`, without the chunk text:
+    stored line ranges only mean something while the source is unchanged.
+    """
+    _, manifest, identities = artifacts.read_manifest(collection)
+    _validate_chunk_metadata_source(manifest, identities)
+    return manifest, progress_filter_from_limit(progress, manifest=manifest)
+
+
+def _source_identities(chunks: list[Chunk]) -> set[tuple[str, str]]:
+    return {(chunk.source_path, chunk.source_hash) for chunk in chunks}
 
 
 def _default_generator(
@@ -1172,9 +1188,10 @@ def _generation_plan(
 
 def _validate_chunk_metadata_source(
     manifest: IndexManifest,
-    chunks: list[Chunk],
+    identities: set[tuple[str, str]],
 ) -> None:
-    if not chunks:
+    """Fail unless every chunk's (source_path, source_hash) matches the source file."""
+    if not identities:
         return
     if manifest.chunker_version != CHUNKER_VERSION:
         raise RuntimeError(
@@ -1182,7 +1199,7 @@ def _validate_chunk_metadata_source(
             f"{manifest.chunker_version} (current {CHUNKER_VERSION}); "
             "run index --rebuild"
         )
-    if any(chunk.source_path != manifest.source_path for chunk in chunks):
+    if any(path != manifest.source_path for path, _ in identities):
         raise RuntimeError(
             "chunk metadata is stale (source path changed); run index to rebuild it"
         )
@@ -1191,7 +1208,7 @@ def _validate_chunk_metadata_source(
     if not source.is_file():
         raise FileNotFoundError(f"source file for chunk metadata not found: {source}")
     current_hash = sha256_file(source)
-    if any(chunk.source_hash != current_hash for chunk in chunks):
+    if any(source_hash != current_hash for _, source_hash in identities):
         raise RuntimeError(
             "chunk metadata is stale (source file hash changed); "
             "run index to rebuild it"

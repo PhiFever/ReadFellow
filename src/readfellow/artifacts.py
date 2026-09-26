@@ -87,24 +87,7 @@ class ArtifactStore:
 
     def read_source(self, collection: str) -> tuple[int, IndexManifest, list[Chunk]]:
         with self.engine.connect() as connection:
-            row = (
-                connection.execute(
-                    select(db.sources)
-                    .where(db.sources.c.collection == collection)
-                    .order_by(db.sources.c.id.desc())
-                    .limit(1)
-                )
-                .mappings()
-                .first()
-            )
-            if row is None:
-                raise FileNotFoundError(
-                    f"chunk metadata not found for {collection}; run index or import-json first"
-                )
-            values = dict(row)
-            source_id = values.pop("id")
-            values.pop("fingerprint")
-            values.update(values.pop("extra"))
+            source_id, manifest = self._read_manifest_row(connection, collection)
             chunks = [
                 Chunk.model_validate(
                     {k: v for k, v in item.items() if k != "source_version_id"}
@@ -115,7 +98,47 @@ class ArtifactStore:
                     .order_by(db.chunks.c.chunk_index)
                 ).mappings()
             ]
-            return source_id, IndexManifest.model_validate(values), chunks
+            return source_id, manifest, chunks
+
+    def read_manifest(
+        self, collection: str
+    ) -> tuple[int, IndexManifest, set[tuple[str, str]]]:
+        """The latest manifest and the distinct (source_path, source_hash) of its chunks.
+
+        Enough to check the chunks against the source file without reading their text.
+        """
+        with self.engine.connect() as connection:
+            source_id, manifest = self._read_manifest_row(connection, collection)
+            identities = {
+                (row.source_path, row.source_hash)
+                for row in connection.execute(
+                    select(db.chunks.c.source_path, db.chunks.c.source_hash)
+                    .where(db.chunks.c.source_version_id == source_id)
+                    .distinct()
+                )
+            }
+            return source_id, manifest, identities
+
+    def _read_manifest_row(self, connection, collection):
+        row = (
+            connection.execute(
+                select(db.sources)
+                .where(db.sources.c.collection == collection)
+                .order_by(db.sources.c.id.desc())
+                .limit(1)
+            )
+            .mappings()
+            .first()
+        )
+        if row is None:
+            raise FileNotFoundError(
+                f"chunk metadata not found for {collection}; run index or import-json first"
+            )
+        values = dict(row)
+        source_id = values.pop("id")
+        values.pop("fingerprint")
+        values.update(values.pop("extra"))
+        return source_id, IndexManifest.model_validate(values)
 
     def write_source(self, manifest: IndexManifest, chunks: list[Chunk]) -> int:
         with self.engine.begin() as connection:

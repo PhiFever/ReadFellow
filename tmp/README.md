@@ -2,7 +2,7 @@
 
 `docs/architecture-archive.md` 末尾「2026-09-21 架构评审」六个问题的复现代码。问题都还没修，这些脚本现在跑出来应该复现问题本身。
 
-**临时目录，问题修完即可删。** 其中 `test_spoiler.py` 是个例外——它是 pytest 用例，问题 2 修好后应该搬进 `tests/` 当回归用例（符合 AGENTS.md「已复现问题」这条测试约定）。
+**临时目录，问题修完即可删。** 问题 2 已修，原来的 `test_spoiler.py` 已搬进 `tests/test_cli_evidence.py`（`test_cli_fts_refuses_after_source_is_edited`）。
 
 ## 跑之前
 
@@ -13,7 +13,6 @@ uv run python tmp/bench_graph.py            # 问题 1 · 规模曲线（~3 分�
 uv run python tmp/bench_total.py            # 问题 1 · 阶数判定（~3 分钟 @ Pi）
 uv run python tmp/bench_save.py             # 问题 1 · JSON vs MySQL save
 uv run python tmp/bench_read.py             # 问题 3 + 4（需先跑 bench_graph.py）
-uv run pytest tmp/test_spoiler.py -q -s     # 问题 2 · 预期失败
 uv run python tmp/test_parallel.py          # 问题 5 · graph 并行
 uv run python tmp/test_parallel_analysis.py # 问题 5 · analysis 并行
 ```
