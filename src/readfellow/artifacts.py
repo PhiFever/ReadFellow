@@ -74,6 +74,8 @@ class ArtifactStore:
     def __init__(self, engine: Engine):
         self.engine = engine
         self._snapshots: dict[int, dict[str, list[dict]]] = {}
+        # The runs row as this store last read or wrote it, to catch a second writer.
+        self._run_rows: dict[int, dict] = {}
 
     @classmethod
     def open(cls, uri: str) -> ArtifactStore:
@@ -238,21 +240,23 @@ class ArtifactStore:
             # staleness check has established that every processed chunk matches.
             return StoredRun(previous.id, source_id, previous.document), False
         with self.engine.begin() as connection:
-            run_id = self._create_run(connection, source_id, empty)
+            run_id, run_row = self._create_run(connection, source_id, empty)
+        self._run_rows[run_id] = run_row
         return StoredRun(run_id, source_id, empty), reset
 
     def save(self, run: StoredRun) -> None:
         with self.engine.begin() as connection:
-            rows = self._save(connection, run)
+            rows, run_row = self._save(connection, run)
         self._snapshots[run.id] = rows
+        self._run_rows[run.id] = run_row
 
     def _create_run(self, connection, source_id, document):
         values = self._run_values(document)
         run_id = connection.execute(
             insert(db.runs).values(source_version_id=source_id, **values)
         ).inserted_primary_key[0]
-        self._save(connection, StoredRun(run_id, source_id, document))
-        return run_id
+        _, run_row = self._save(connection, StoredRun(run_id, source_id, document))
+        return run_id, run_row
 
     @staticmethod
     def _run_values(document):
@@ -383,9 +387,21 @@ class ArtifactStore:
     def _save(self, connection: Connection, run: StoredRun):
         # Lock one run while replacing its committed snapshot. The model call is
         # outside this transaction. Other runs and historical snapshots are untouched.
-        connection.execute(
-            select(db.runs.c.id).where(db.runs.c.id == run.id).with_for_update()
-        ).one()
+        current = dict(
+            connection.execute(
+                select(db.runs).where(db.runs.c.id == run.id).with_for_update()
+            )
+            .mappings()
+            .one()
+        )
+        # One writer per run: a document merged from a stale read would diff
+        # against rows it never saw, and silently keep or drop another writer's.
+        expected = self._run_rows.get(run.id)
+        if expected is not None and current != expected:
+            raise RuntimeError(
+                f"run {run.id} was written by another process since this one "
+                "read it; rerun to resume from what that process saved"
+            )
         rows = self._rows(run)
         old_rows = self._snapshots.get(run.id)
         if old_rows is None:
@@ -445,7 +461,12 @@ class ArtifactStore:
                 **self._run_values(run.document),
             )
         )
-        return rows
+        run_row = dict(
+            connection.execute(select(db.runs).where(db.runs.c.id == run.id))
+            .mappings()
+            .one()
+        )
+        return rows, run_row
 
     @staticmethod
     def _insert(connection, table, rows):
@@ -511,6 +532,7 @@ class ArtifactStore:
     def _read_run(self, connection, row):
         data = self._read_rows(connection, row["id"])
         self._snapshots[row["id"]] = data
+        self._run_rows[row["id"]] = dict(row)
         return self._assemble(row, data)
 
     @staticmethod
@@ -631,9 +653,13 @@ class ArtifactStore:
                     True,
                 )
             source_id = self._write_source(connection, manifest, chunks)
-            graph_id = self._create_run(connection, source_id, graph) if graph else None
+            graph_id = (
+                self._create_run(connection, source_id, graph)[0] if graph else None
+            )
             analysis_id = (
-                self._create_run(connection, source_id, analysis) if analysis else None
+                self._create_run(connection, source_id, analysis)[0]
+                if analysis
+                else None
             )
             connection.execute(
                 insert(db.imports).values(

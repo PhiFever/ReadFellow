@@ -16,8 +16,13 @@ from readfellow.artifacts import ArtifactStore
 from readfellow.chunking import CHUNKER_VERSION, chunk_document
 from readfellow.config import PathConfig, ReadFellowConfig
 from readfellow.graph import annotate_chunks, write_graph
-from readfellow.analysis import write_analysis
-from readfellow.models import IndexManifest
+from readfellow.analysis import (
+    ChapterGroup,
+    empty_analysis,
+    merge_chapter,
+    write_analysis,
+)
+from readfellow.models import ChapterAnalysis, IndexManifest
 from readfellow.progress import build_progress_filter
 from readfellow.store import write_manifest
 from test_app import DeterministicGenerator
@@ -385,3 +390,46 @@ def test_graph_slice_annotates_like_the_whole_graph(tmp_path, artifacts):
         expected = annotate_chunks(whole, wanted, progress=progress)
         assert expected
         assert annotate_chunks(part, wanted, progress=progress) == expected
+
+
+def test_a_second_writer_to_one_run_fails_instead_of_corrupting_it(tmp_path, artifacts):
+    _, manifest, chunks = workspace(tmp_path, artifacts)
+    source_id, _, _ = artifacts.read_source("books")
+    # Two stores stand for two processes that each resumed the latest run.
+    a, b = ArtifactStore(artifacts.engine), ArtifactStore(artifacts.engine)
+    runs = [
+        store.prepare(
+            source_id,
+            empty_analysis(collection="books", manifest=manifest),
+            stale=lambda _: None,
+            rebuild=False,
+        )[0]
+        for store in (a, b)
+    ]
+    assert runs[0].id == runs[1].id
+
+    def analyze(store, run, index, chunk):
+        merge_chapter(
+            run.document,
+            ChapterAnalysis(
+                chapter_index=index,
+                chapter_title=chunk.chapter,
+                source_path=chunk.source_path,
+                line_start=chunk.line_start,
+                line_end=chunk.line_end,
+                chunk_ids=[chunk.id],
+                summary="梗概",
+            ),
+            ChapterGroup(index=index, title=chunk.chapter, chunks=(chunk,)),
+        )
+        store.save(run)
+
+    analyze(a, runs[0], 1, chunks[0])
+    # Disjoint chapters collide on no key, so this used to succeed and leave
+    # two chapters behind a run that counted one.
+    with pytest.raises(RuntimeError, match="another process"):
+        analyze(b, runs[1], 2, chunks[1])
+
+    stored = ArtifactStore(artifacts.engine).latest("books", "analysis").document
+    assert [chapter.chapter_index for chapter in stored.chapters] == [1]
+    assert stored.processed_chapter_count == 1

@@ -2,7 +2,7 @@
 
 `docs/architecture-archive.md` 末尾「2026-09-21 架构评审」六个问题的复现代码。问题都还没修，这些脚本现在跑出来应该复现问题本身。
 
-**临时目录，问题修完即可删。** 问题 2 已修，原来的 `test_spoiler.py` 已搬进 `tests/test_cli_evidence.py`（`test_cli_fts_refuses_after_source_is_edited`）。
+**临时目录，问题修完即可删。** 问题 2 已修，原来的 `test_spoiler.py` 已搬进 `tests/test_cli_evidence.py`（`test_cli_fts_refuses_after_source_is_edited`）。问题 5 已修，两个 `test_parallel*.py` 已删，回归用例是 `tests/test_artifacts.py` 的 `test_a_second_writer_to_one_run_fails_instead_of_corrupting_it`；修复后两个脚本里的 worker B 都报 `run 1 was written by another process`。
 
 ## 跑之前
 
@@ -13,8 +13,6 @@ uv run python tmp/bench_graph.py            # 问题 1 · 规模曲线（~3 分�
 uv run python tmp/bench_total.py            # 问题 1 · 阶数判定（~3 分钟 @ Pi）
 uv run python tmp/bench_save.py             # 问题 1 · JSON vs MySQL save
 uv run python tmp/bench_read.py             # 问题 3 + 4（需先跑 bench_graph.py）
-uv run python tmp/test_parallel.py          # 问题 5 · graph 并行
-uv run python tmp/test_parallel_analysis.py # 问题 5 · analysis 并行
 ```
 
 `bench_total.py` / `bench_save.py` / `bench_read.py` 从 `bench_graph.py` 导入合成负载，所以四个 bench 脚本要放在同一目录里。
