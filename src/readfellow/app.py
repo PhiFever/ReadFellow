@@ -974,11 +974,18 @@ def _load_graph(
     collection: str,
     progress: ProgressLimit | None,
     artifacts: ArtifactStore,
+    *,
+    chunk_ids: list[str] | None = None,
 ) -> tuple[StoredRun, list[Chunk], ProgressFilter]:
+    """The checked graph run; with `chunk_ids`, only the slice annotating them."""
     source_id, manifest, all_chunks, progress_filter = _load_indexed_source(
         config, collection, progress, artifacts
     )
-    run = artifacts.latest(collection, "graph")
+    run = (
+        artifacts.latest(collection, "graph")
+        if chunk_ids is None
+        else artifacts.read_graph_slice(collection, chunk_ids)
+    )
     if run is None:
         raise FileNotFoundError(
             f"graph index not found: {collection}; run graph-index first"
@@ -1066,14 +1073,16 @@ def _annotate_with_graph(
     and nothing else — the two scored channels already stand on the chunks
     themselves.
     """
+    chunk_ids = [item.chunk_id for item in evidence]
     try:
-        run, _, progress_filter = _load_graph(config, collection, progress, artifacts)
-        graph = run.document
+        run, _, progress_filter = _load_graph(
+            config, collection, progress, artifacts, chunk_ids=chunk_ids
+        )
     except (FileNotFoundError, RuntimeError) as exc:
         return evidence, GraphAnnotationStatus(annotated=0, skipped_reason=str(exc))
 
     context_by_chunk = annotate_chunks(
-        graph, [item.chunk_id for item in evidence], progress=progress_filter
+        run.document, chunk_ids, progress=progress_filter
     )
     annotated = [
         item.model_copy(update={"graph_context": context_by_chunk.get(item.chunk_id)})

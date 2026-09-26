@@ -15,9 +15,10 @@ from readfellow.app import (
 from readfellow.artifacts import ArtifactStore
 from readfellow.chunking import CHUNKER_VERSION, chunk_document
 from readfellow.config import PathConfig, ReadFellowConfig
-from readfellow.graph import write_graph
+from readfellow.graph import annotate_chunks, write_graph
 from readfellow.analysis import write_analysis
 from readfellow.models import IndexManifest
+from readfellow.progress import build_progress_filter
 from readfellow.store import write_manifest
 from test_app import DeterministicGenerator
 
@@ -304,3 +305,83 @@ def test_legacy_import_is_lossless_idempotent_and_rejects_bad_provenance(
         import_json(config, "books", artifacts=artifacts)
     with artifacts.engine.connect() as connection:
         assert connection.scalar(select(func.count()).select_from(db.runs)) == count
+
+
+def test_graph_slice_annotates_like_the_whole_graph(tmp_path, artifacts):
+    source = tmp_path / "novel.txt"
+    source.write_text(
+        "第一章 开始\n\n甲帮助了乙。\n\n第二章 之后\n\n乙帮助了丙。\n\n"
+        "第三章 最后\n\n甲认识丙。\n",
+        encoding="utf-8",
+    )
+    chunks = chunk_document(
+        source, source_path=str(source), target_chars=22, overlap_chars=0
+    )
+    assert len(chunks) == 3
+    artifacts.write_source(
+        IndexManifest(
+            collection="books",
+            collection_path="indexes/books",
+            source_path=str(source),
+            model="test",
+            embedding_dimension=2,
+            chunk_count=len(chunks),
+            chunk_chars=22,
+            overlap_chars=0,
+            chunker_version=CHUNKER_VERSION,
+        ),
+        chunks,
+    )
+    config = ReadFellowConfig(paths=PathConfig(metadata_dir=tmp_path / "metadata"))
+
+    def relation(subject, object_, evidence):
+        return {
+            "subject": subject,
+            "relation": "帮助",
+            "object": object_,
+            "evidence": evidence,
+        }
+
+    # 乙 is only an endpoint in the first chunk and is declared in the second;
+    # 甲 and 丙 span two chunks each, so ranking needs their rows elsewhere.
+    build_graph(
+        config,
+        "books",
+        options=GraphBuildOptions(retries=0),
+        generator=DeterministicGenerator(
+            [
+                {
+                    "entities": [{"name": "甲", "type": "人物", "evidence": "甲"}],
+                    "relations": [relation("甲", "乙", "甲帮助了乙")],
+                },
+                {
+                    "entities": [
+                        {"name": "乙", "type": "人物", "evidence": "乙帮助了丙"},
+                        {"name": "丙", "type": "人物", "evidence": "丙"},
+                    ],
+                    "relations": [relation("乙", "丙", "乙帮助了丙")],
+                },
+                {
+                    "entities": [
+                        {"name": "甲", "type": "人物", "evidence": "甲认识丙"},
+                        {"name": "丙", "type": "人物", "evidence": "丙"},
+                    ],
+                    "relations": [relation("甲", "丙", "甲认识丙")],
+                },
+            ]
+        ),
+        artifacts=artifacts,
+    )
+    wanted = [chunks[0].id, chunks[2].id]
+    whole = artifacts.latest("books", "graph").document
+    part = artifacts.read_graph_slice("books", wanted).document
+
+    by_name = {entity.name: entity for entity in whole.entities}
+    assert [entity.name for entity in part.entities] == ["丙", "乙", "甲"]
+    assert all(entity == by_name[entity.name] for entity in part.entities)
+    assert part.relations == [r for r in whole.relations if r.chunk_id in wanted]
+    assert part.extractions == whole.extractions
+    for progress in (None, build_progress_filter(max_line=chunks[1].line_end)):
+        expected = annotate_chunks(whole, wanted, progress=progress)
+        assert expected
+        assert annotate_chunks(part, wanted, progress=progress) == expected

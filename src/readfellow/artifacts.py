@@ -8,7 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import TYPE_CHECKING, Literal
@@ -176,17 +176,40 @@ class ArtifactStore:
 
     def latest(self, collection: str, kind: Kind) -> StoredRun | None:
         with self.engine.connect() as connection:
-            row = (
-                connection.execute(
-                    select(db.runs)
-                    .where(db.runs.c.collection == collection, db.runs.c.kind == kind)
-                    .order_by(db.runs.c.id.desc())
-                    .limit(1)
-                )
-                .mappings()
-                .first()
-            )
+            row = self._latest_row(connection, collection, kind)
             return self._read_run(connection, row) if row else None
+
+    def read_graph_slice(
+        self, collection: str, chunk_ids: Collection[str]
+    ) -> StoredRun | None:
+        """The latest graph run, holding only what `graph.annotate_chunks` reads.
+
+        Entities keep all their values, mentions and evidence, because ranking
+        needs each entity's spread over the whole book. Run fields, extractions
+        and fingerprints stay complete for the staleness check. The result is
+        not the whole document, so it never becomes the baseline `save` diffs
+        against.
+        """
+        with self.engine.connect() as connection:
+            row = self._latest_row(connection, collection, "graph")
+            if row is None:
+                return None
+            return self._assemble(
+                row, self._read_slice_rows(connection, row, set(chunk_ids))
+            )
+
+    @staticmethod
+    def _latest_row(connection, collection, kind):
+        return (
+            connection.execute(
+                select(db.runs)
+                .where(db.runs.c.collection == collection, db.runs.c.kind == kind)
+                .order_by(db.runs.c.id.desc())
+                .limit(1)
+            )
+            .mappings()
+            .first()
+        )
 
     def read_run(self, run_id: int) -> StoredRun:
         with self.engine.connect() as connection:
@@ -443,7 +466,55 @@ class ArtifactStore:
             for table in db.run_tables
         }
 
+    @staticmethod
+    def _read_slice_rows(connection, row, chunk_ids):
+        run_id = row["id"]
+
+        def in_chunks(table):
+            # Every row of a run carries the run's source version, since `_save`
+            # rewrites them together; matching it lets the chunk index serve this.
+            return (
+                table.c.source_version_id == row["source_version_id"],
+                table.c.chunk_id.in_(chunk_ids),
+            )
+
+        def rows(table, *conditions):
+            return [
+                dict(r)
+                for r in connection.execute(
+                    select(table)
+                    .where(table.c.run_id == run_id, *conditions)
+                    .order_by(table.c.sort_order)
+                ).mappings()
+            ]
+
+        data = {table.name: [] for table in db.run_tables}
+        for table in (db.extractions, db.fingerprints):
+            data[table.name] = rows(table)
+        data["relations"] = rows(db.relations, *in_chunks(db.relations))
+        # Merging a relation mentions both endpoints in its chunk, so the
+        # entities anchored to these chunks include every relation endpoint.
+        positions = set()
+        for table in (db.entity_mentions, db.entity_evidence):
+            positions.update(
+                connection.scalars(
+                    select(table.c.entity_position)
+                    .where(table.c.run_id == run_id, *in_chunks(table))
+                    .distinct()
+                )
+            )
+        data["entities"] = rows(db.entities, db.entities.c.position.in_(positions))
+        for table in (db.entity_values, db.entity_mentions, db.entity_evidence):
+            data[table.name] = rows(table, table.c.entity_position.in_(positions))
+        return data
+
     def _read_run(self, connection, row):
+        data = self._read_rows(connection, row["id"])
+        self._snapshots[row["id"]] = data
+        return self._assemble(row, data)
+
+    @staticmethod
+    def _assemble(row, data):
         values = dict(row)
         run_id, source_id = values.pop("id"), values.pop("source_version_id")
         kind = values.pop("kind")
@@ -456,8 +527,6 @@ class ArtifactStore:
         values["processed_chunk_count" if graph else "processed_chapter_count"] = (
             values.pop("processed_count")
         )
-        data = self._read_rows(connection, run_id)
-        self._snapshots[run_id] = data
         grouped = {}
         for name, parent in (
             ("entity_values", "entity_position"),

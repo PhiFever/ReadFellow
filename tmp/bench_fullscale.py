@@ -115,6 +115,11 @@ try:
     timed("read_source (all chunk text)", lambda: store.read_source("sample"))
     fresh = ArtifactStore(store.engine)
     timed("latest('graph') (whole graph)", lambda: fresh.latest("sample", "graph"))
+    picked = [r.chunk_id for r in rng.sample(graph.extractions, 5)]
+    timed(
+        "read_graph_slice (5 chunks)", lambda: fresh.read_graph_slice("sample", picked)
+    )
+    timed("read_manifest (no chunk text)", lambda: fresh.read_manifest("sample"))
     store.close()
 finally:
     with admin.begin() as c:

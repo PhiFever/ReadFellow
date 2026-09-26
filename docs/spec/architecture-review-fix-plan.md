@@ -1,7 +1,7 @@
 # 2026-09-21 架构评审的修复方案
 
 日期：2026-09-26
-状态：**实施中**，已完成：问题 2。Codex 额度用完，由 Claude Code 直接实现，不走委派。
+状态：**实施中**，已完成：问题 2、问题 4。Codex 额度用完，由 Claude Code 直接实现，不走委派。
 来源：`docs/architecture-archive.md` 末尾「2026-09-21 架构评审」的六个问题
 
 本文先在有显卡的机器上复测六个问题，再按实测结果定修法。结论和评审原文有两处出入：问题 1 在本机的实际代价比原文估的小得多；问题 5 要的并行不需要改持久化模型。
@@ -156,6 +156,13 @@
 
 - 等价性测试：同一个图谱、同一组 chunk id、带进度限制和不带进度限制两种情况下，对切片和对整图调用 `annotate_chunks`，结果相等。
 - 耗时：`tmp/bench_fullscale.py` 加一项，在真实 sample 图谱的拷贝上测 `read_graph_slice`（取 5 个 chunk），目标比 `latest('graph')` 的 1.3 s 小一个数量级以上。
+
+**实施结果（2026-09-26）**：
+
+- 耗时从 1352 ms 降到 182 ms，快了 7.4 倍，**没达到一个数量级**。剩下的时间大多花在 pymysql 用纯 Python 解码行上，这些行切片都要用：失效判断要全部 2307 条 extractions 和 fingerprints；5 个 chunk 里出现的 70 个实体中，高频实体带着约 7200 条 mentions 和 evidence，排序要靠它们算跨度。再往下压，就得让 `annotate_chunks` 改收 SQL 算好的跨度计数，为了约 45 ms 不值得改领域接口。
+- 按 `chunk_id` 过滤的三条查询带上了 run 的 `source_version_id`，这样 MySQL 能走 `(source_version_id, chunk_id)` 外键索引，不用扫整个 run。前提是 run 的每一行都带着 run 行上的 `source_version_id`：`_save` 在同一个事务里重写这些行和 run 行，所以成立。这一项省了约 70 ms。
+- 原方案要单独读 relations 两端的实体。实际不需要：合并关系时两端都会在该 chunk 记一条 mention，按 mention 找到的实体已经包括所有端点。这条已经写进代码注释。
+- `_annotate_with_graph` 仍然走 `_load_indexed_source` 读全部 chunk（约 140 ms），没有换成只读 manifest，因为 `graph_staleness_reason` 要逐条比对 chunk 的 hash 和位置。标注这一段合计从约 1.5 s 降到约 0.33 s。
 
 **顺带发现、暂不处理**：`_chunk_spread` 统计的是全书范围的跨度，不受进度限制。它只影响排序，不输出任何内容，但排序本身用到了进度之外的信息。这个问题要单独评估，不在本次范围内。
 
