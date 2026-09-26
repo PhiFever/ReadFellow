@@ -1,4 +1,0 @@
-# 脚本产物，不进 git
-out/
-*.sqlite
-*.json

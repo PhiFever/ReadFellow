@@ -1,14 +1,14 @@
 # 2026-09-21 架构评审的修复方案
 
 日期：2026-09-26
-状态：**实施中**，已完成：问题 2、问题 4、问题 3、问题 5、问题 1。剩第 6 步重建索引，由用户执行。Codex 额度用完，由 Claude Code 直接实现，不走委派。
+状态：**已完成**。问题 2、4、3、5、1 按顺序修完，第 6 步重建索引也已完成（用户授权后由 Claude Code 执行）。Codex 额度用完，由 Claude Code 直接实现，不走委派。
 来源：`docs/architecture-archive.md` 末尾「2026-09-21 架构评审」的六个问题
 
 本文先在有显卡的机器上复测六个问题，再按实测结果定修法。结论和评审原文有两处出入：问题 1 在本机的实际代价比原文估的小得多；问题 5 要的并行不需要改持久化模型。
 
 ## 复测
 
-机器：WSL2，20 核，RTX 4070 Ti SUPER，本地 MySQL，Ollama `qwen3:8b`。本轮新增的测量脚本也放在 `tmp/`，用法见 `tmp/README.md`。所有写库的测量都在一次性库 `readfellow_bench_*` 里做，跑完即删，没碰 `read-fellow` 库和 `indexes/`。
+机器：WSL2，20 核，RTX 4070 Ti SUPER，本地 MySQL，Ollama `qwen3:8b`。本轮新增的测量脚本也放在 `tmp/`，用法见 `tmp/README.md`。`tmp/` 已在重建索引确认后删除，脚本要从 git 历史取（8a5285b 及更早的提交）。所有写库的测量都在一次性库 `readfellow_bench_*` 里做，跑完即删，没碰 `read-fellow` 库和 `indexes/`。
 
 ### `tmp/` 下七个脚本全部复现
 
@@ -68,6 +68,7 @@
 4. 问题 5：多写者检测。
 5. 问题 1：按耗时比例决定落盘时机。
 6. 交用户执行 `index --rebuild --collection sample`（约 12 分钟），然后用 `status` 确认 chunk metadata 不再 stale。这一步会改 `indexes/sample` 和生产库，由用户决定何时执行。
+   - **实施结果（2026-09-26）**：用户授权后执行。按当前源文件切出 2322 个 chunk（id 前缀 `578c6e1cf6b5`），全部写入，3.96 chunks/s，约 10 分钟。`status` 显示索引 2322/2322、embedding 100%，不再报源文件不一致；`fts`、`hybrid` 恢复正常。图谱 run 5 和分析 run 8 因 chunk 变了被判失效，`hybrid` 输出 `graph context: skipped` 且不挂标注，符合 fail closed。图谱是否重建另行决定。
 
 问题 6 的回归用例分散在各步里。
 

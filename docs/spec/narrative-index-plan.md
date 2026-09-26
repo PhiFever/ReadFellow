@@ -363,7 +363,7 @@
        - Codex 周额度已用 89%，2026-09-19 16:10 重置。单次运行的消耗要试跑后才知道。
      - 待办：
        - 读完第 2 题，再通读第 3–5 题。5 题都过 `verify_locate.py` 后，交用户审问法和场景。
-       - 按当前源文件 `index --rebuild`，清掉索引里残留的尾部原文。
+       - ~~按当前源文件 `index --rebuild`，清掉索引里残留的尾部原文。~~ 2026-09-26 已完成：得到 2322 个 chunk，id 前缀 `578c6e1cf6b5`，`status` 不再报 chunk metadata stale，`analyze` 的完整章节数是 1238。见 `docs/spec/architecture-review-fix-plan.md` 第 6 步。
        - 重新生成 `runs.json` 和任务卡，试跑 1 次：确认 agent 能连上 broker、审计和评分脚本可用，量出单次消耗，再和用户商量正式跑多少次。
        - 量旧系统基线，结果记在这里。
 4. **`analyze` v2，并行运行。**

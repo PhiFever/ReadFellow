@@ -31,5 +31,5 @@ packages = ["src/readfellow"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
-# 全量 `uv run pytest` 只跑 tests/。tmp/ 下是架构评审的复现脚本。
+# 全量 `uv run pytest` 只跑 tests/。
 testpaths = ["tests"]
