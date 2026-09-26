@@ -165,7 +165,7 @@ uv run readfellow graph-query "向山" --collection sample
 | `--retries` | `graph.retries` (2) | 每 chunk 失败重试次数 |
 | `--rebuild` | off | 整图重建 |
 
-**每个 chunk 抽完立即提交数据库事务**，中断安全；重跑靠 `processed_chunk_ids` 断点续建，不会重做已完成的部分。
+**抽完的 chunk 按耗时分批提交数据库事务**：距上次提交超过 30 秒（或上次提交耗时的 20 倍）就存一次，正常结束、出错或 Ctrl-C 时再存一次。进程被强杀时最多丢最近约 30 秒的抽取。重跑靠 `processed_chunk_ids` 断点续建，不会重做已提交的部分。
 
 `graph-query` 按实体名、别名或关系关键词查询；图谱只给出 chunk id 与上下文，**原文仍从对应版本的 chunks 取**。
 
@@ -185,7 +185,7 @@ uv run readfellow analyze --collection sample --max-chapter 1:50
 - **最后一组永不分析**。它可能被 `index --limit` 截断，无法与完整章节区分。
 - **超出 `num_ctx` 预算的章节被跳过**并打印原因。预算 = `(num_ctx − num_predict − 600) × 1.5` 字符；`num_ctx` 取所选后端的配置；`analysis` 默认走 openai（`num_ctx: 65536`），预算为 91260 字符。
 
-**每章分析完立即提交数据库事务**，中断安全，重跑按 `(章序号, 章标题)` 续建。
+**分析完的章节与 `graph-index` 一样按耗时分批提交**，正常结束、出错或 Ctrl-C 时补存一次，重跑按 `(章序号, 章标题)` 续建。
 
 ### 3.7 `status` — 集合体检
 

@@ -71,7 +71,7 @@ uvx ruff format . && uvx ruff check .          # 两者当前都保持 clean
 
 ## 关键约束与易踩坑
 
-- **运行历史**：图谱和分析各自按 `(collection, kind)` 查询最新创建的 `runs.id`，不因未完成、失败或失效回退旧版。重建创建新 run，续建沿用同一 run。关系联接必须包含 `run_id`；chunk 联接必须包含 `source_version_id`。历史切块不覆盖。同一个 run 只允许一个写者：`ArtifactStore` 记下自己上次读到或写入的 runs 行，`_save` 加锁后发现这一行被别的进程改过就报错回滚。要并行就在进程内并发 LLM 调用，由一个线程按顺序 merge 和 save。
+- **运行历史**：图谱和分析各自按 `(collection, kind)` 查询最新创建的 `runs.id`，不因未完成、失败或失效回退旧版。重建创建新 run，续建沿用同一 run。关系联接必须包含 `run_id`；chunk 联接必须包含 `source_version_id`。历史切块不覆盖。同一个 run 只允许一个写者：`ArtifactStore` 记下自己上次读到或写入的 runs 行，`_save` 加锁后发现这一行被别的进程改过就报错回滚。要并行就在进程内并发 LLM 调用，由一个线程按顺序 merge 和 save。`build_graph` / `build_analysis` 不逐单元 save，而是经 `app._Checkpoint` 按耗时落盘（`SAVE_INTERVAL_SECONDS`、`SAVE_COST_RATIO`），循环的 `finally` 里补存；merge 做到一半被打断时不补存，免得存下半合并的文档。
 - **迁移范围**：MySQL 直接读写，不双写或回退 JSON；zvec 保留向量和中文 FTS。修改 SQL 持久化或导入流程前，阅读 `docs/spec/mysql-artifact-storage.md`；DataGrip 表说明与查询示例见 `docs/mysql-storage.md`。
 
 - **chunk id = `source_hash[:12]_%06d`**。改 `chunk_chars`/`overlap_chars` 会让 id 与行范围全部漂移，必须 `--rebuild`，否则旧 doc 会残留在 collection 里。

@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import time
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -70,6 +71,12 @@ from .store import (
 
 RRF_K = 60
 FAN_OUT_MULTIPLIER = 10
+# A derivation saves its run once this long has passed since the last save, or
+# this many times the last save's duration if that is longer. Every save writes
+# the whole document, so saving per unit grows quadratically with the book;
+# spacing saves in time caps their share near 1/SAVE_COST_RATIO at any size.
+SAVE_INTERVAL_SECONDS = 30.0
+SAVE_COST_RATIO = 20
 
 ChannelMode = Literal["vector", "fts"]
 
@@ -539,82 +546,86 @@ def build_graph(
         )
 
     failed_chunk_count = 0
-    for index, chunk in enumerate(pending, start=1):
-        chunk_id = chunk.id
-        _emit(
-            on_progress,
-            GraphBuildEvent(
-                stage="extracting",
-                index=index,
-                total=len(pending),
-                chunk_id=chunk_id,
-            ),
-        )
-        try:
-            extraction = generate_with_retry(
-                generator,
-                build_extraction_prompt(chunk),
-                lambda raw: parse_graph_extraction(raw, chunk),
-                schema=GRAPH_RESPONSE_SCHEMA,
-                retries=extraction_settings.retries,
-                label=f"failed to extract graph for chunk {chunk_id}",
-                on_retry=lambda attempt, exc: _emit(
-                    on_progress,
-                    GraphBuildEvent(
-                        stage="retry",
-                        index=index,
-                        total=len(pending),
-                        chunk_id=chunk_id,
-                        attempt=attempt,
-                        retries=extraction_settings.retries,
-                        error=str(exc),
-                    ),
-                ),
-            )
-        except RuntimeError as exc:
-            # One chunk the model never answered usably costs that chunk. A book
-            # is thousands of them, and the run has already paid for every one
-            # before it. The chunk stays unprocessed rather than being recorded
-            # as empty, so a later run picks it up again — with sampling, a
-            # second run is a genuinely different attempt.
-            failed_chunk_count += 1
+    checkpoint = _Checkpoint(artifacts, run)
+    try:
+        for index, chunk in enumerate(pending, start=1):
+            chunk_id = chunk.id
             _emit(
                 on_progress,
                 GraphBuildEvent(
-                    stage="failed",
+                    stage="extracting",
                     index=index,
                     total=len(pending),
                     chunk_id=chunk_id,
-                    error=str(exc),
                 ),
             )
-            continue
+            try:
+                extraction = generate_with_retry(
+                    generator,
+                    build_extraction_prompt(chunk),
+                    lambda raw: parse_graph_extraction(raw, chunk),
+                    schema=GRAPH_RESPONSE_SCHEMA,
+                    retries=extraction_settings.retries,
+                    label=f"failed to extract graph for chunk {chunk_id}",
+                    on_retry=lambda attempt, exc: _emit(
+                        on_progress,
+                        GraphBuildEvent(
+                            stage="retry",
+                            index=index,
+                            total=len(pending),
+                            chunk_id=chunk_id,
+                            attempt=attempt,
+                            retries=extraction_settings.retries,
+                            error=str(exc),
+                        ),
+                    ),
+                )
+            except RuntimeError as exc:
+                # One chunk the model never answered usably costs that chunk. A book
+                # is thousands of them, and the run has already paid for every one
+                # before it. The chunk stays unprocessed rather than being recorded
+                # as empty, so a later run picks it up again — with sampling, a
+                # second run is a genuinely different attempt.
+                failed_chunk_count += 1
+                _emit(
+                    on_progress,
+                    GraphBuildEvent(
+                        stage="failed",
+                        index=index,
+                        total=len(pending),
+                        chunk_id=chunk_id,
+                        error=str(exc),
+                    ),
+                )
+                continue
 
-        merge_extraction(graph, extraction, chunk)
-        update_graph_metadata(
-            graph,
-            collection=collection,
-            manifest=manifest,
-            llm_model=llm_model,
-            llm_endpoint=llm_endpoint,
-            extraction_settings=extraction_settings,
-            progress=progress_filter,
-            selected_chunk_count=len(chunks),
-        )
-        artifacts.save(run)
-        _emit(
-            on_progress,
-            GraphBuildEvent(
-                stage="extracted",
-                index=index,
-                total=len(pending),
-                chunk_id=chunk_id,
-                entity_count=len(extraction.entities),
-                relation_count=len(extraction.relations),
-                rejected_count=extraction.rejected_count,
-                unanchored_count=extraction.unanchored_count,
-            ),
-        )
+            with checkpoint.unit():
+                merge_extraction(graph, extraction, chunk)
+                update_graph_metadata(
+                    graph,
+                    collection=collection,
+                    manifest=manifest,
+                    llm_model=llm_model,
+                    llm_endpoint=llm_endpoint,
+                    extraction_settings=extraction_settings,
+                    progress=progress_filter,
+                    selected_chunk_count=len(chunks),
+                )
+            _emit(
+                on_progress,
+                GraphBuildEvent(
+                    stage="extracted",
+                    index=index,
+                    total=len(pending),
+                    chunk_id=chunk_id,
+                    entity_count=len(extraction.entities),
+                    relation_count=len(extraction.relations),
+                    rejected_count=extraction.rejected_count,
+                    unanchored_count=extraction.unanchored_count,
+                ),
+            )
+    finally:
+        checkpoint.flush()
 
     return GraphBuildResult(
         collection=collection,
@@ -728,61 +739,65 @@ def build_analysis(
             config, config.analysis, llm_model=llm_model, settings=settings
         )
 
-    for index, group in enumerate(pending, start=1):
-        _emit(
-            on_progress,
-            AnalysisBuildEvent(
-                stage="analyzing",
-                index=index,
-                total=len(pending),
-                chapter_title=group.title,
-            ),
-        )
-        analysis = generate_with_retry(
-            generator,
-            build_chapter_prompt(group),
-            lambda raw: parse_chapter_analysis(raw, group),
-            schema=ANALYSIS_RESPONSE_SCHEMA,
-            retries=settings.retries,
-            label=f"failed to analyze chapter {group.title}",
-            on_retry=lambda attempt, exc: _emit(
+    checkpoint = _Checkpoint(artifacts, run)
+    try:
+        for index, group in enumerate(pending, start=1):
+            _emit(
                 on_progress,
                 AnalysisBuildEvent(
-                    stage="retry",
+                    stage="analyzing",
                     index=index,
                     total=len(pending),
                     chapter_title=group.title,
-                    attempt=attempt,
-                    retries=settings.retries,
-                    error=str(exc),
                 ),
-            ),
-        )
-        merge_chapter(document, analysis, group)
-        update_analysis_metadata(
-            document,
-            collection=collection,
-            manifest=manifest,
-            llm_model=llm_model,
-            llm_endpoint=llm_endpoint,
-            settings=settings,
-            progress=progress_filter,
-            selected_chapter_count=len(selected),
-        )
-        artifacts.save(run)
-        _emit(
-            on_progress,
-            AnalysisBuildEvent(
-                stage="analyzed",
-                index=index,
-                total=len(pending),
-                chapter_title=group.title,
-                character_count=len(analysis.characters),
-                event_count=len(analysis.events),
-                rejected_count=analysis.rejected_count,
-                unanchored_count=analysis.unanchored_count,
-            ),
-        )
+            )
+            analysis = generate_with_retry(
+                generator,
+                build_chapter_prompt(group),
+                lambda raw: parse_chapter_analysis(raw, group),
+                schema=ANALYSIS_RESPONSE_SCHEMA,
+                retries=settings.retries,
+                label=f"failed to analyze chapter {group.title}",
+                on_retry=lambda attempt, exc: _emit(
+                    on_progress,
+                    AnalysisBuildEvent(
+                        stage="retry",
+                        index=index,
+                        total=len(pending),
+                        chapter_title=group.title,
+                        attempt=attempt,
+                        retries=settings.retries,
+                        error=str(exc),
+                    ),
+                ),
+            )
+            with checkpoint.unit():
+                merge_chapter(document, analysis, group)
+                update_analysis_metadata(
+                    document,
+                    collection=collection,
+                    manifest=manifest,
+                    llm_model=llm_model,
+                    llm_endpoint=llm_endpoint,
+                    settings=settings,
+                    progress=progress_filter,
+                    selected_chapter_count=len(selected),
+                )
+            _emit(
+                on_progress,
+                AnalysisBuildEvent(
+                    stage="analyzed",
+                    index=index,
+                    total=len(pending),
+                    chapter_title=group.title,
+                    character_count=len(analysis.characters),
+                    event_count=len(analysis.events),
+                    rejected_count=analysis.rejected_count,
+                    unanchored_count=analysis.unanchored_count,
+                ),
+            )
+    finally:
+        checkpoint.flush()
 
     update_analysis_metadata(
         document,
@@ -1333,6 +1348,44 @@ def _fuse_channels(
     ]
     fused.sort(key=lambda item: (-(item.score or 0.0), item.chunk_index))
     return fused
+
+
+class _Checkpoint:
+    """Saves a run's document when a save is cheap next to the time since the last.
+
+    Units merged since the last save are owed, and `flush` pays them — the
+    caller does that on the way out of its loop, whether it finished, failed or
+    was interrupted. A unit whose merge did not finish leaves the document half
+    changed, so nothing is saved after that, and the units still owed are
+    derived again by the next run.
+    """
+
+    def __init__(self, artifacts: ArtifactStore, run: StoredRun) -> None:
+        self._artifacts = artifacts
+        self._run = run
+        self._saved_at = time.monotonic()
+        self._save_seconds = 0.0
+        self._owed = False
+        self._consistent = True
+
+    @contextmanager
+    def unit(self) -> Iterator[None]:
+        self._consistent = False
+        yield
+        self._consistent = True
+        self._owed = True
+        waited = time.monotonic() - self._saved_at
+        if waited >= max(SAVE_INTERVAL_SECONDS, SAVE_COST_RATIO * self._save_seconds):
+            self.flush()
+
+    def flush(self) -> None:
+        if not (self._owed and self._consistent):
+            return
+        start = time.monotonic()
+        self._artifacts.save(self._run)
+        self._saved_at = time.monotonic()
+        self._save_seconds = self._saved_at - start
+        self._owed = False
 
 
 def _emit(

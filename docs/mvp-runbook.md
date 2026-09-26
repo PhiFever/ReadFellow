@@ -105,7 +105,7 @@ uv run readfellow analyze     --collection sample --max-chapter 1:50
 uv run readfellow graph-index --collection sample --max-chapter 1:50
 ```
 
-两者都逐单元落盘、支持断点续建，可以分批推进、随时 Ctrl-C 后重跑。
+两者都按耗时分批落盘（约每 30 秒一次，Ctrl-C 时补存）、支持断点续建，可以分批推进、随时 Ctrl-C 后重跑。
 
 输出里的 `rejected=N (unanchored A, unreadable B)` 是**被丢弃的条目数**，按成因拆开：`unanchored` 是模型给的引文在原文里找不到（全量实测 3.9%，只有它偏高才说明模型或 prompt 出了问题）；`unreadable` 是条目读不出形状，大头是关系谓词不在白名单内（全量实测 20.7%，是封闭谓词表的设计成本）。**别看总数，看 `unanchored`。**
 

@@ -374,6 +374,54 @@ def test_graph_build_survives_a_chunk_it_cannot_parse(tmp_path: Path) -> None:
     ) == len(chunks)
 
 
+def test_interrupted_graph_build_keeps_finished_chunks_and_resumes(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "novel.txt"
+    source.write_text(
+        "第一章 开始\n\n向山帮助了尤基。\n\n尤基认识向山。\n\n向山离开了。\n",
+        encoding="utf-8",
+    )
+    chunks = chunk_document(
+        source, source_path=str(source), target_chars=12, overlap_chars=0
+    )
+    assert len(chunks) >= 3
+    config = ReadFellowConfig(
+        paths=PathConfig(
+            index_dir=tmp_path / "indexes",
+            metadata_dir=tmp_path / "metadata",
+        )
+    )
+    open_artifacts(config).write_source(manifest=manifest_for(source), chunks=chunks)
+    answer: dict[str, object] = {"entities": [{"name": "向山", "type": "人物"}]}
+
+    class CtrlCOnThirdChunk(DeterministicGenerator):
+        def generate_json(self, prompt: str, schema: dict[str, object]) -> str:
+            if len(self.prompts) == 2:
+                raise KeyboardInterrupt
+            return super().generate_json(prompt, schema)
+
+    with pytest.raises(KeyboardInterrupt):
+        build_graph(
+            config,
+            "books",
+            options=GraphBuildOptions(retries=0),
+            generator=CtrlCOnThirdChunk([answer] * 2),
+        )
+
+    # Saves are spaced out in time, so the ones still owed land on the way out.
+    stored = open_artifacts(config).latest("books", "graph").document
+    assert [record.chunk_id for record in stored.extractions] == [
+        chunk.id for chunk in chunks[:2]
+    ]
+    rest = DeterministicGenerator([answer] * (len(chunks) - 2))
+    resumed = build_graph(
+        config, "books", options=GraphBuildOptions(retries=0), generator=rest
+    )
+    assert len(rest.prompts) == len(chunks) - 2
+    assert resumed.processed_chunk_count == len(chunks)
+
+
 def test_changed_chunk_metadata_invalidates_queries_and_rebuilds_graph(
     tmp_path: Path,
 ) -> None:
