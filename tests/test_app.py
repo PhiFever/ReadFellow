@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 from readfellow.artifacts import open_artifacts
 from artifact_helpers import replace_run
@@ -28,7 +29,13 @@ from readfellow.chunking import (
     sha256_file,
     sha256_text,
 )
-from readfellow.config import OllamaConfig, PathConfig, ReadFellowConfig, SearchConfig
+from readfellow.config import (
+    DerivationConfig,
+    OllamaConfig,
+    PathConfig,
+    ReadFellowConfig,
+    SearchConfig,
+)
 from readfellow.graph import (
     empty_graph,
     merge_extraction,
@@ -372,6 +379,52 @@ def test_graph_build_survives_a_chunk_it_cannot_parse(tmp_path: Path) -> None:
     assert len(
         open_artifacts(config).read_run(retry.run_id).document.extractions
     ) == len(chunks)
+
+
+def test_concurrent_graph_build_merges_in_chunk_order(tmp_path: Path) -> None:
+    source = tmp_path / "novel.txt"
+    source.write_text(
+        "第一章 开始\n\n向山帮助了尤基。\n\n尤基认识向山。\n\n向山离开了。\n",
+        encoding="utf-8",
+    )
+    chunks = chunk_document(
+        source, source_path=str(source), target_chars=12, overlap_chars=0
+    )
+    assert len(chunks) >= 3
+    config = ReadFellowConfig(
+        paths=PathConfig(
+            index_dir=tmp_path / "indexes",
+            metadata_dir=tmp_path / "metadata",
+        ),
+        graph=DerivationConfig(concurrency=2),
+    )
+    open_artifacts(config).write_source(manifest=manifest_for(source), chunks=chunks)
+    second_started = threading.Event()
+    lock = threading.Lock()
+    wait_results: list[bool] = []
+
+    class ConcurrentGenerator:
+        def generate_json(self, prompt: str, schema: dict[str, object]) -> str:
+            chunk_id = next(
+                line.removeprefix("chunk_id: ")
+                for line in prompt.splitlines()
+                if line.startswith("chunk_id: ")
+            )
+            if chunk_id == chunks[0].id:
+                overlapped = second_started.wait(timeout=5)
+                with lock:
+                    wait_results.append(overlapped)
+            elif chunk_id == chunks[1].id:
+                second_started.set()
+            return json.dumps({"entities": [{"name": "向山", "type": "人物"}]})
+
+    result = build_graph(config, "books", generator=ConcurrentGenerator())
+
+    assert wait_results == [True]
+    graph = open_artifacts(config).read_run(result.run_id).document
+    assert [record.chunk_id for record in graph.extractions] == [
+        chunk.id for chunk in chunks
+    ]
 
 
 def test_interrupted_graph_build_keeps_finished_chunks_and_resumes(

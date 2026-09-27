@@ -75,6 +75,20 @@ def test_generation_sends_schema_and_sampling_settings():
     }
 
 
+def test_json_object_mode_omits_schema():
+    client = FakeClient()
+    generator = OpenAICompatGenerator(
+        base_url="https://example.test/v1",
+        model="cloud-test",
+        settings=DerivationSettings(),
+        response_format="json_object",
+        client=client,
+    )
+
+    generator.generate_json("原文", {"type": "object"})
+    assert client.kwargs["response_format"] == {"type": "json_object"}
+
+
 @pytest.mark.parametrize(
     "response_fields",
     [{"reasoning_content": "思考内容"}, {"reasoning_tokens": 1}],

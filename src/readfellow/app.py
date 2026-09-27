@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from collections import defaultdict
 from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -55,6 +56,7 @@ from .models import (
     Evidence,
     EvidenceGraphContext,
     EvidenceMatch,
+    GraphExtraction,
     GraphQueryResult,
     IndexManifest,
     ProgressFilter,
@@ -547,8 +549,29 @@ def build_graph(
 
     failed_chunk_count = 0
     checkpoint = _Checkpoint(artifacts, run)
+    executor = ThreadPoolExecutor(max_workers=config.graph.concurrency)
+
+    def extract(
+        chunk: Chunk,
+    ) -> tuple[GraphExtraction | RuntimeError, list[tuple[int, str]]]:
+        retries: list[tuple[int, str]] = []
+        try:
+            extraction = generate_with_retry(
+                generator,
+                build_extraction_prompt(chunk),
+                lambda raw: parse_graph_extraction(raw, chunk),
+                schema=GRAPH_RESPONSE_SCHEMA,
+                retries=extraction_settings.retries,
+                label=f"failed to extract graph for chunk {chunk.id}",
+                on_retry=lambda attempt, exc: retries.append((attempt, str(exc))),
+            )
+        except RuntimeError as exc:
+            return exc, retries
+        return extraction, retries
+
     try:
-        for index, chunk in enumerate(pending, start=1):
+        futures = [executor.submit(extract, chunk) for chunk in pending]
+        for index, (chunk, future) in enumerate(zip(pending, futures), start=1):
             chunk_id = chunk.id
             _emit(
                 on_progress,
@@ -560,14 +583,9 @@ def build_graph(
                 ),
             )
             try:
-                extraction = generate_with_retry(
-                    generator,
-                    build_extraction_prompt(chunk),
-                    lambda raw: parse_graph_extraction(raw, chunk),
-                    schema=GRAPH_RESPONSE_SCHEMA,
-                    retries=extraction_settings.retries,
-                    label=f"failed to extract graph for chunk {chunk_id}",
-                    on_retry=lambda attempt, exc: _emit(
+                extraction, retries = future.result()
+                for attempt, error in retries:
+                    _emit(
                         on_progress,
                         GraphBuildEvent(
                             stage="retry",
@@ -576,10 +594,11 @@ def build_graph(
                             chunk_id=chunk_id,
                             attempt=attempt,
                             retries=extraction_settings.retries,
-                            error=str(exc),
+                            error=error,
                         ),
-                    ),
-                )
+                    )
+                if isinstance(extraction, RuntimeError):
+                    raise extraction
             except RuntimeError as exc:
                 # One chunk the model never answered usably costs that chunk. A book
                 # is thousands of them, and the run has already paid for every one
@@ -625,6 +644,7 @@ def build_graph(
                 ),
             )
     finally:
+        executor.shutdown(wait=False, cancel_futures=True)
         checkpoint.flush()
 
     return GraphBuildResult(
@@ -1177,7 +1197,10 @@ def _default_generator(
 ) -> JsonGenerator:
     if derivation.backend == "openai":
         return OpenAICompatGenerator(
-            base_url=config.openai.base_url, model=llm_model, settings=settings
+            base_url=config.openai.base_url,
+            model=llm_model,
+            settings=settings,
+            response_format=config.openai.response_format,
         )
     return OllamaGenerator(
         base_url=config.ollama.base_url,

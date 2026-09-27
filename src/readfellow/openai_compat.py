@@ -21,6 +21,7 @@ class OpenAICompatGenerator:
         base_url: str,
         model: str,
         settings: DerivationSettings,
+        response_format: str = "json_schema",
         client: OpenAI | None = None,
     ) -> None:
         if client is None:
@@ -31,16 +32,21 @@ class OpenAICompatGenerator:
         self.client = client
         self.model = model
         self.settings = settings
+        self.response_format = response_format
 
     def generate_json(self, prompt: str, schema: dict[str, Any]) -> str:
         settings = self.settings
+        if self.response_format == "json_object":
+            response_format = {"type": "json_object"}
+        else:
+            response_format = {
+                "type": "json_schema",
+                "json_schema": {"name": "readfellow", "strict": True, "schema": schema},
+            }
         response = self.client.chat.completions.create(
             model=self.model,
             messages=[{"role": "user", "content": prompt}],
-            response_format={
-                "type": "json_schema",
-                "json_schema": {"name": "readfellow", "strict": True, "schema": schema},
-            },
+            response_format=response_format,
             temperature=settings.temperature,
             top_p=settings.top_p,
             presence_penalty=settings.presence_penalty,

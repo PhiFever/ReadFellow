@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import ConfigDict, SecretStr
+from pydantic import ConfigDict, Field, SecretStr
 
 from .models import ReadFellowModel
 
@@ -35,6 +35,9 @@ class OpenAIConfig(ReadFellowModel):
     base_url: str = "https://api.b.ai/v1"
     generation_model: str = "qwen3.8-flash"
     num_ctx: int = 65536
+    # json_object for servers without schema-constrained decoding; the prompts
+    # spell out the JSON shape, and parsing still validates every item.
+    response_format: Literal["json_schema", "json_object"] = "json_schema"
 
 
 class IndexingConfig(ReadFellowModel):
@@ -60,6 +63,7 @@ class DerivationConfig(ReadFellowModel):
     backend: Literal["ollama", "openai"] = "ollama"
     num_predict: int = 4096
     retries: int = 2
+    concurrency: int = Field(default=1, ge=1)
 
 
 class ReadFellowConfig(ReadFellowModel):
