@@ -33,3 +33,18 @@ packages = ["src/readfellow"]
 pythonpath = ["src"]
 # 全量 `uv run pytest` 只跑 tests/。
 testpaths = ["tests"]
+
+[tool.ruff.lint]
+extend-select = ["TID251"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+zvec = { msg = "zvec 只在 store.py 里 import，其余模块经 ChunkStore 访问" }
+openai = { msg = "openai 只在 openai_compat.py 里 import，其余模块经生成接口访问" }
+sqlalchemy = { msg = "sqlalchemy 只在 artifacts.py 和 artifact_schema.py 里 import，其余模块经 ArtifactStore 访问" }
+
+[tool.ruff.lint.per-file-ignores]
+"src/readfellow/store.py" = ["TID251"]
+"src/readfellow/openai_compat.py" = ["TID251"]
+"src/readfellow/artifacts.py" = ["TID251"]
+"src/readfellow/artifact_schema.py" = ["TID251"]
+"tests/**" = ["TID251"]
