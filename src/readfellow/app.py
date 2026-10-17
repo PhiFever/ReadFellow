@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import threading
 import time
 from collections import defaultdict
-from collections.abc import Callable, Iterator
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Callable, Generator, Iterator
+from concurrent.futures import Future
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from queue import Empty, Queue
 from typing import Any, Literal
 
 from .analysis import (
@@ -464,6 +466,64 @@ def fetch_chunk(
     )
 
 
+def _generate_in_order[Unit, Parsed](
+    generator: JsonGenerator,
+    units: list[Unit],
+    request: Callable[[Unit], tuple[str, Callable[[str], Parsed], str]],
+    *,
+    schema: dict[str, Any],
+    retries: int,
+    concurrency: int,
+) -> Generator[tuple[Parsed | RuntimeError, list[tuple[int, str]]], None, None]:
+    """Generate concurrently, yielding answers and retry messages in input order.
+
+    Daemon threads let an interrupted build exit without waiting for in-flight
+    answers it would discard anyway. Workers never write to the database, so
+    terminating them with the process is safe.
+    """
+    queue: Queue[tuple[Unit, Future]] = Queue()
+    futures = [Future() for _ in units]
+    for unit, future in zip(units, futures):
+        queue.put((unit, future))
+    stop = threading.Event()
+
+    def extract(unit: Unit) -> tuple[Parsed | RuntimeError, list[tuple[int, str]]]:
+        prompt, parse, label = request(unit)
+        retry_events: list[tuple[int, str]] = []
+        try:
+            result = generate_with_retry(
+                generator,
+                prompt,
+                parse,
+                schema=schema,
+                retries=retries,
+                label=label,
+                on_retry=lambda attempt, exc: retry_events.append((attempt, str(exc))),
+            )
+        except RuntimeError as exc:
+            return exc, retry_events
+        return result, retry_events
+
+    def worker() -> None:
+        while not stop.is_set():
+            try:
+                unit, future = queue.get_nowait()
+            except Empty:
+                return
+            try:
+                future.set_result(extract(unit))
+            except BaseException as exc:  # noqa: BLE001 -- else the caller waits forever
+                future.set_exception(exc)
+
+    try:
+        for _ in range(min(concurrency, len(units))):
+            threading.Thread(target=worker, daemon=True).start()
+        for future in futures:
+            yield future.result()
+    finally:
+        stop.set()
+
+
 def build_graph(
     config: ReadFellowConfig,
     collection: str,
@@ -483,7 +543,7 @@ def build_graph(
     if options.limit:
         chunks = chunks[: options.limit]
 
-    llm_model, llm_endpoint, extraction_settings = _generation_plan(
+    llm_model, llm_endpoint, response_format, extraction_settings = _generation_plan(
         config,
         config.graph,
         llm_model=options.llm_model,
@@ -497,6 +557,7 @@ def build_graph(
             manifest=manifest,
             llm_model=llm_model,
             llm_endpoint=llm_endpoint,
+            response_format=response_format,
             extraction_settings=extraction_settings,
         ),
         stale=lambda stored: graph_staleness_reason(
@@ -506,6 +567,7 @@ def build_graph(
             source_path=manifest.source_path,
             llm_model=llm_model,
             llm_endpoint=llm_endpoint,
+            response_format=response_format,
             extraction_settings=extraction_settings,
         ),
         rebuild=options.rebuild,
@@ -520,6 +582,7 @@ def build_graph(
         manifest=manifest,
         llm_model=llm_model,
         llm_endpoint=llm_endpoint,
+        response_format=response_format,
         extraction_settings=extraction_settings,
         progress=progress_filter,
         selected_chunk_count=len(chunks),
@@ -548,29 +611,24 @@ def build_graph(
 
     failed_chunk_count = 0
     checkpoint = _Checkpoint(artifacts, run)
-    executor = ThreadPoolExecutor(max_workers=config.graph.concurrency)
 
-    def extract(
-        chunk: Chunk,
-    ) -> tuple[GraphExtraction | RuntimeError, list[tuple[int, str]]]:
-        retries: list[tuple[int, str]] = []
-        try:
-            extraction = generate_with_retry(
-                generator,
-                build_extraction_prompt(chunk),
-                lambda raw: parse_graph_extraction(raw, chunk),
-                schema=GRAPH_RESPONSE_SCHEMA,
-                retries=extraction_settings.retries,
-                label=f"failed to extract graph for chunk {chunk.id}",
-                on_retry=lambda attempt, exc: retries.append((attempt, str(exc))),
-            )
-        except RuntimeError as exc:
-            return exc, retries
-        return extraction, retries
+    def request(chunk: Chunk) -> tuple[str, Callable[[str], GraphExtraction], str]:
+        return (
+            build_extraction_prompt(chunk),
+            lambda raw: parse_graph_extraction(raw, chunk),
+            f"failed to extract graph for chunk {chunk.id}",
+        )
 
+    results = _generate_in_order(
+        generator,
+        pending,
+        request,
+        schema=GRAPH_RESPONSE_SCHEMA,
+        retries=extraction_settings.retries,
+        concurrency=config.graph.concurrency,
+    )
     try:
-        futures = [executor.submit(extract, chunk) for chunk in pending]
-        for index, (chunk, future) in enumerate(zip(pending, futures), start=1):
+        for index, chunk in enumerate(pending, start=1):
             chunk_id = chunk.id
             _emit(
                 on_progress,
@@ -582,7 +640,7 @@ def build_graph(
                 ),
             )
             try:
-                extraction, retries = future.result()
+                extraction, retries = next(results)
                 for attempt, error in retries:
                     _emit(
                         on_progress,
@@ -625,6 +683,7 @@ def build_graph(
                     manifest=manifest,
                     llm_model=llm_model,
                     llm_endpoint=llm_endpoint,
+                    response_format=response_format,
                     extraction_settings=extraction_settings,
                     progress=progress_filter,
                     selected_chunk_count=len(chunks),
@@ -643,7 +702,7 @@ def build_graph(
                 ),
             )
     finally:
-        executor.shutdown(wait=False, cancel_futures=True)
+        results.close()
         checkpoint.flush()
 
     return GraphBuildResult(
@@ -683,7 +742,7 @@ def build_analysis(
         if all(progress_filter.allows(chunk) for chunk in group.chunks)
     ]
 
-    llm_model, llm_endpoint, settings = _generation_plan(
+    llm_model, llm_endpoint, response_format, settings = _generation_plan(
         config,
         config.analysis,
         llm_model=options.llm_model,
@@ -698,6 +757,7 @@ def build_analysis(
             manifest=manifest,
             llm_model=llm_model,
             llm_endpoint=llm_endpoint,
+            response_format=response_format,
             settings=settings,
         ),
         stale=lambda stored: analysis_staleness_reason(
@@ -707,6 +767,7 @@ def build_analysis(
             source_path=manifest.source_path,
             llm_model=llm_model,
             llm_endpoint=llm_endpoint,
+            response_format=response_format,
             settings=settings,
         ),
         rebuild=options.rebuild,
@@ -719,6 +780,7 @@ def build_analysis(
         manifest=manifest,
         llm_model=llm_model,
         llm_endpoint=llm_endpoint,
+        response_format=response_format,
         settings=settings,
         progress=progress_filter,
         selected_chapter_count=len(selected),
@@ -759,6 +821,24 @@ def build_analysis(
         )
 
     checkpoint = _Checkpoint(artifacts, run)
+
+    def request(
+        group: ChapterGroup,
+    ) -> tuple[str, Callable[[str], ChapterAnalysis], str]:
+        return (
+            build_chapter_prompt(group),
+            lambda raw: parse_chapter_analysis(raw, group),
+            f"failed to analyze chapter {group.title}",
+        )
+
+    results = _generate_in_order(
+        generator,
+        pending,
+        request,
+        schema=ANALYSIS_RESPONSE_SCHEMA,
+        retries=settings.retries,
+        concurrency=config.analysis.concurrency,
+    )
     try:
         for index, group in enumerate(pending, start=1):
             _emit(
@@ -770,14 +850,9 @@ def build_analysis(
                     chapter_title=group.title,
                 ),
             )
-            analysis = generate_with_retry(
-                generator,
-                build_chapter_prompt(group),
-                lambda raw: parse_chapter_analysis(raw, group),
-                schema=ANALYSIS_RESPONSE_SCHEMA,
-                retries=settings.retries,
-                label=f"failed to analyze chapter {group.title}",
-                on_retry=lambda attempt, exc: _emit(
+            analysis, retries = next(results)
+            for attempt, error in retries:
+                _emit(
                     on_progress,
                     AnalysisBuildEvent(
                         stage="retry",
@@ -786,10 +861,11 @@ def build_analysis(
                         chapter_title=group.title,
                         attempt=attempt,
                         retries=settings.retries,
-                        error=str(exc),
+                        error=error,
                     ),
-                ),
-            )
+                )
+            if isinstance(analysis, RuntimeError):
+                raise analysis
             with checkpoint.unit():
                 merge_chapter(document, analysis, group)
                 update_analysis_metadata(
@@ -798,6 +874,7 @@ def build_analysis(
                     manifest=manifest,
                     llm_model=llm_model,
                     llm_endpoint=llm_endpoint,
+                    response_format=response_format,
                     settings=settings,
                     progress=progress_filter,
                     selected_chapter_count=len(selected),
@@ -816,6 +893,7 @@ def build_analysis(
                 ),
             )
     finally:
+        results.close()
         checkpoint.flush()
 
     update_analysis_metadata(
@@ -824,6 +902,7 @@ def build_analysis(
         manifest=manifest,
         llm_model=llm_model,
         llm_endpoint=llm_endpoint,
+        response_format=response_format,
         settings=settings,
         progress=progress_filter,
         selected_chapter_count=len(selected),
@@ -904,7 +983,7 @@ def collection_status(
         lambda: artifacts.latest(collection, "graph")
     )
     graph = graph_run.document if graph_run else None
-    graph_model, graph_endpoint, graph_settings = _generation_plan(
+    graph_model, graph_endpoint, graph_format, graph_settings = _generation_plan(
         config, config.graph, llm_model=None, num_predict=None, retries=None
     )
     graph_report = DerivationReport(
@@ -921,6 +1000,7 @@ def collection_status(
             source_path=manifest.source_path,
             llm_model=graph_model,
             llm_endpoint=graph_endpoint,
+            response_format=graph_format,
             extraction_settings=graph_settings,
         )
         if graph
@@ -933,8 +1013,10 @@ def collection_status(
         lambda: artifacts.latest(collection, "analysis")
     )
     analysis = analysis_run.document if analysis_run else None
-    analysis_model, analysis_endpoint, analysis_settings = _generation_plan(
-        config, config.analysis, llm_model=None, num_predict=None, retries=None
+    analysis_model, analysis_endpoint, analysis_format, analysis_settings = (
+        _generation_plan(
+            config, config.analysis, llm_model=None, num_predict=None, retries=None
+        )
     )
     analysis_report = DerivationReport(
         run_id=analysis_run.id if analysis_run else None,
@@ -950,6 +1032,7 @@ def collection_status(
             source_path=manifest.source_path,
             llm_model=analysis_model,
             llm_endpoint=analysis_endpoint,
+            response_format=analysis_format,
             settings=analysis_settings,
         )
         if analysis
@@ -1216,7 +1299,7 @@ def _generation_plan(
     llm_model: str | None,
     num_predict: int | None,
     retries: int | None,
-) -> tuple[str, str, DerivationSettings]:
+) -> tuple[str, str, str, DerivationSettings]:
     """The model and settings one build runs with, after per-run overrides."""
     num_predict = derivation.num_predict if num_predict is None else num_predict
     retries = derivation.retries if retries is None else retries
@@ -1224,6 +1307,7 @@ def _generation_plan(
     return (
         llm_model or config.generation_model(derivation),
         config.openai.base_url if derivation.backend == "openai" else "",
+        config.openai.response_format if derivation.backend == "openai" else "",
         DerivationSettings(
             num_predict=num_predict,
             num_ctx=backend.num_ctx,

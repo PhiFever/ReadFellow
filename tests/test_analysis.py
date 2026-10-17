@@ -306,3 +306,28 @@ def test_complete_chapters_excludes_front_matter(tmp_path: Path) -> None:
         "第一章 出门",
         "001",
     ]
+
+
+def test_analysis_staleness_when_response_format_changes() -> None:
+    document = empty_analysis(collection="books", response_format="json_schema")
+    assert (
+        analysis_staleness_reason(
+            document,
+            [],
+            collection="books",
+            source_path="",
+            response_format="json_object",
+        )
+        == "analysis generator response format changed"
+    )
+    document.response_format = None
+    assert (
+        analysis_staleness_reason(
+            document,
+            [],
+            collection="books",
+            source_path="",
+            response_format="json_object",
+        )
+        is None
+    )

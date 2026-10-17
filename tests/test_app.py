@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 from artifact_helpers import replace_run
+from test_analysis import build_collection
 
 from readfellow import app
 from readfellow.app import (
@@ -1246,3 +1247,27 @@ def test_hybrid_fails_when_the_embedding_service_is_down(
 
     with pytest.raises(RuntimeError, match="ollama is unreachable"):
         hybrid_search(config, "向山", "books", store=store)
+
+
+def test_concurrent_analysis_build_merges_in_chapter_order(tmp_path: Path) -> None:
+    config = build_collection(tmp_path)
+    config.analysis = DerivationConfig(concurrency=2)
+    second_started = threading.Event()
+    wait_results: list[bool] = []
+
+    class ConcurrentGenerator:
+        def generate_json(self, prompt: str, schema: dict[str, object]) -> str:
+            if "第一章 开始" in prompt:
+                wait_results.append(second_started.wait(timeout=5))
+            elif "第二章 之后" in prompt:
+                second_started.set()
+            return json.dumps({"summary": "章节梗概", "characters": [], "events": []})
+
+    result = app.build_analysis(config, "books", generator=ConcurrentGenerator())
+
+    assert wait_results == [True]
+    document = open_artifacts(config).read_run(result.run_id).document
+    assert [chapter.chapter_title for chapter in document.chapters] == [
+        "第一章 开始",
+        "第二章 之后",
+    ]

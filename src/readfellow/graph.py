@@ -178,6 +178,7 @@ def empty_graph(
     manifest: IndexManifest | None = None,
     llm_model: str = "",
     llm_endpoint: str = "",
+    response_format: str | None = None,
     extraction_settings: DerivationSettings | None = None,
 ) -> KnowledgeGraph:
     now = utc_now_iso()
@@ -188,6 +189,7 @@ def empty_graph(
         source_path=manifest.source_path if manifest else "",
         llm_model=llm_model,
         llm_endpoint=llm_endpoint,
+        response_format=response_format,
         extraction_settings=extraction_settings or DerivationSettings(),
         created_at=now,
         updated_at=now,
@@ -201,6 +203,7 @@ def update_graph_metadata(
     manifest: IndexManifest,
     llm_model: str,
     llm_endpoint: str,
+    response_format: str,
     extraction_settings: DerivationSettings,
     progress: ProgressFilter,
     selected_chunk_count: int,
@@ -211,6 +214,7 @@ def update_graph_metadata(
     graph.source_path = manifest.source_path
     graph.llm_model = llm_model
     graph.llm_endpoint = llm_endpoint
+    graph.response_format = response_format
     graph.extraction_settings = extraction_settings
     graph.updated_at = utc_now_iso()
     graph.progress_limit = progress.description
@@ -234,6 +238,7 @@ def graph_staleness_reason(
     source_path: str,
     llm_model: str | None = None,
     llm_endpoint: str | None = None,
+    response_format: str | None = None,
     extraction_settings: DerivationSettings | None = None,
 ) -> str | None:
     if graph.schema_version != GRAPH_SCHEMA_VERSION:
@@ -246,6 +251,15 @@ def graph_staleness_reason(
         return "graph generator model changed"
     if llm_endpoint is not None and graph.llm_endpoint != llm_endpoint:
         return "graph generator endpoint changed"
+    # Old runs did not record this setting. Guessing a default would either
+    # rebuild needlessly or mislabel json_object as json_schema. A resumed build
+    # records the current value, so subsequent changes can be detected.
+    if (
+        response_format is not None
+        and graph.response_format is not None
+        and graph.response_format != response_format
+    ):
+        return "graph generator response format changed"
     if extraction_settings is not None and settings_changed(
         graph.extraction_settings, extraction_settings
     ):

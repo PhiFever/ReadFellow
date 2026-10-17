@@ -35,7 +35,7 @@ uv run readfellow status --collection sample                       # 集合体�
 
 元数据及派生物使用 MySQL（SQLAlchemy Core），连接读取 `MYSQL_URI` 环境变量或 `.env`；`database_url` 配置可显式覆盖。离线测试注入 SQL 存储或使用临时 SQLite；`uv run pytest tests/test_artifacts.py --mysql -q` 在随机 MySQL 测试库验收，结束后删掉测试库。
 
-测试与 lint（ruff 是 dev 依赖，走 `uv run` 保证版本与规则集一致）：
+测试与 lint（ruff 统一用 `uvx ruff`，不放进 dev 依赖）：
 
 ```sh
 uv run pytest                                        # 全量（~3s，无网络依赖）
@@ -84,7 +84,7 @@ uvx ruff format . && uvx ruff check .          # 两者当前都保持 clean
 - **丢弃按成因分两类计数，只有 `unanchored_count` 是质量信号**。`extraction.Rejections` 把 `collect_items` 的损失拆成 `unanchored`（抛 `EvidenceNotFound`，引文不在 chunk 里）与 `unreadable`（`parse` 返回 `None`：谓词超出 `RELATION_TYPES`、实体没名字、字段缺失）；`rejected_count` 是两者之和，`unanchored_count` 单独落盘。2026-07-28 全量实测（2307 chunk）总丢弃 26.7% = **白名单拒绝 20.7% + 证据锚定失败 3.9%**，后者比加固时的 7.8% 还低。白名单拒绝掉的是 `怀疑`/`担心`/`回答`/`使用` 这类叙事长尾谓词，是封闭谓词表的**设计成本，不是缺陷**（9094a72 已统计过：词表外 156 个谓词、146 个只出现一次，没有可扩充的目标）——所以只有 `MAX_UNANCHORED_ITEM_SHARE` 有阈值，总数不设阈值。**不要再去调采样参数降这个数**：实测 `presence_penalty` 1.5→0.0 对丢弃率无影响（40 chunk 配对，29.3% vs 28.9%，sign test p=0.63）。
 - **`unanchored_count` 是 `int | None`，`None` 表示"没测过"而不是 0**。拆分之前写的单元没有这个字段，读出来是 `None`；`derivation.sum_or_unknown` 保证只要有一个单元是 `None`，整份派生物的合计就是 `None`（旧图谱续建会同时含两种单元），`status` 于是显示 `cause not recorded` 并跳过告警。不要给它补默认值 0——那等于伪造一次没做过的测量。**这个字段刻意没有 bump `GRAPH_SCHEMA_VERSION`**：按 `docs/storage-engine-decision.md` 第 3 条，带默认值的可选字段旧文件直接能载入，只有语义改动（prompt 变了、抽取结果该不一样）才值得那 7 小时重建。抽取行为一个字节都没变，只是多记了个计数器。
 - **改 prompt 必须 bump `GRAPH_PROMPT_VERSION`**（改图谱结构则 bump `GRAPH_SCHEMA_VERSION`）。`graph_staleness_reason` 会比对 schema/prompt 版本、生成模型、extraction settings（`retries`、`num_ctx` 除外，见 `derivation.settings_changed`）、每个已处理 chunk 的 source/text hash 与位置；stale 时 `graph-index` 整图重建、`graph-query` 直接报错。仅新增 chunk 时是断点续建（`processed_chunk_ids`）。
-- **失效指纹含生成接口地址 `llm_endpoint`**：云端记 base_url，Ollama 记空串；已有 run 读回也是空串，所以本地图谱不会因此失效。字段存在 `runs.extra` JSON 里、不单列，因为 `db-init` 不升级已有表，加列会让已有库读 `runs` 时报 unknown column。
+- **失效指纹含生成接口地址 `llm_endpoint`**：云端记 base_url，Ollama 记空串；已有 run 读回也是空串，所以本地图谱不会因此失效。字段存在 `runs.extra` JSON 里、不单列，因为 `db-init` 不升级已有表，加列会让已有库读 `runs` 时报 unknown column。`response_format` 同样存于 `runs.extra`；旧 run 的存储值为 `None` 时不判失效，因为缺失代表设置未知，猜默认值可能误触发重建或把 `json_object` 误记为 `json_schema`，续建时记录当前值后才检测后续变化。
 - **`_validate_chunk_metadata_source`** 校验数据库 chunks 的 source path 与源文件当前 hash，源文件被改过就要求重新 index。它接收去重后的 `(source_path, source_hash)` 集合，被两个函数包住：`app._load_indexed_source` 给要读 chunks 原文的派生入口用；`app._load_manifest` 给 `search` / `fts` / `fetch` 用（`hybrid` 经由前两者），只查身份集合（`ArtifactStore.read_manifest`），不拉正文。检索路径也必须校验：源文件改过之后，存储的行号和 `--max-chapter` 算出的行号不在同一坐标系，会放行越界章节。**唯一例外是 `collection_status`**：它自己通过 `ArtifactStore.read_source` 读取 + 显式调 `_validate_chunk_metadata_source` 并把异常 catch 成 `source_error` 字段，因为 status 的职责就是把失效**报出来**而不是 fail closed。新增入口一律走这两个函数之一，不要照抄这个例外。
 - **`config.graph` 与 `config.analysis` 是同一个 `DerivationConfig` 类的两个实例**，`KnowledgeGraph.extraction_settings` 与 `AnalysisDocument.settings` 也都是 `DerivationSettings`。但这两个**落盘字段名不能动**——改了会让已有 `graph.json`/`analysis.json` 被判 stale 而全量重建。
 - **`status` 是唯一"报告失效而不 fail closed"的入口**（`app.collection_status`）。它做三件别处不做的事：失效判定用**配置里当前的模型与参数**（回答"重跑会续建还是从头来"，而不只是"现在坏没坏"）；`ChunkStore.stats()` 的 doc 数与 manifest 对账（这是检出"索引不是原子发布"的唯一手段）；`graph.graph_diagnostics` 的比值带实测参考值（`MIN_DECLARED_ENTITY_SHARE` / `MAX_UNANCHORED_ITEM_SHARE` / `MAX_SILENT_CHUNK_SHARE`，2026-07-28 赛博英雄传 + qwen3:8b 全量）。**丢弃总数没有阈值，只有 unanchored 那部分有**。**参考值是提示不是判死**，换书换模型必然漂移；它们是 read-side 常量，不落盘、不进失效指纹，可以随便调。

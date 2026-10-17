@@ -179,6 +179,8 @@ uv run readfellow analyze --collection sample --max-chapter 1:50
 
 按检测到的章节分组，对每个**完整章节**调一次生成模型，产出梗概、人物、事件，写入 MySQL 中独立的章节分析运行版本。参数与 `graph-index` 同（除 `--limit`，`analyze` 用 `--max-chapter` 分批）。
 
+`graph.concurrency` / `analysis.concurrency` 控制各自同时在途的生成请求数，默认 1；AMD 端点实测并发 6 稳定、12 会触发 429。`openai.response_format` 默认 `json_schema`，服务端不支持 schema 约束时可改用 `json_object`，靠解析校验和重试兜底。修改该设置会让已记录这个字段的派生物失效。
+
 三条规则：
 
 - **前置内容不分析**。第一个匹配章节标题规则的组之前，书名等内容不生成笔记；中间的无号节照常分析。

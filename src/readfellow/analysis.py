@@ -76,6 +76,7 @@ def empty_analysis(
     manifest: IndexManifest | None = None,
     llm_model: str = "",
     llm_endpoint: str = "",
+    response_format: str | None = None,
     settings: DerivationSettings | None = None,
 ) -> AnalysisDocument:
     now = utc_now_iso()
@@ -86,6 +87,7 @@ def empty_analysis(
         source_path=manifest.source_path if manifest else "",
         llm_model=llm_model,
         llm_endpoint=llm_endpoint,
+        response_format=response_format,
         settings=settings or DerivationSettings(),
         created_at=now,
         updated_at=now,
@@ -99,6 +101,7 @@ def update_analysis_metadata(
     manifest: IndexManifest,
     llm_model: str,
     llm_endpoint: str,
+    response_format: str,
     settings: DerivationSettings,
     progress: ProgressFilter,
     selected_chapter_count: int,
@@ -109,6 +112,7 @@ def update_analysis_metadata(
     document.source_path = manifest.source_path
     document.llm_model = llm_model
     document.llm_endpoint = llm_endpoint
+    document.response_format = response_format
     document.settings = settings
     document.updated_at = utc_now_iso()
     document.progress_limit = progress.description
@@ -333,6 +337,7 @@ def analysis_staleness_reason(
     source_path: str,
     llm_model: str | None = None,
     llm_endpoint: str | None = None,
+    response_format: str | None = None,
     settings: DerivationSettings | None = None,
 ) -> str | None:
     if document.schema_version != ANALYSIS_SCHEMA_VERSION:
@@ -345,6 +350,15 @@ def analysis_staleness_reason(
         return "analysis generator model changed"
     if llm_endpoint is not None and document.llm_endpoint != llm_endpoint:
         return "analysis generator endpoint changed"
+    # Old runs did not record this setting. Guessing a default would either
+    # rebuild needlessly or mislabel json_object as json_schema. A resumed build
+    # records the current value, so subsequent changes can be detected.
+    if (
+        response_format is not None
+        and document.response_format is not None
+        and document.response_format != response_format
+    ):
+        return "analysis generator response format changed"
     if settings is not None and settings_changed(document.settings, settings):
         return "analysis settings changed"
 

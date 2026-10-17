@@ -7,6 +7,7 @@ from readfellow.graph import (
     empty_graph,
     finalize_graph,
     graph_diagnostics,
+    graph_staleness_reason,
     merge_extraction,
     parse_graph_extraction,
     query_graph,
@@ -489,3 +490,28 @@ def test_annotation_drops_undeclared_endpoints_and_their_relations() -> None:
     # The graph still holds both, and a query still answers over them.
     assert {entity.name for entity in graph.entities} == {"向山", "尤基"}
     assert query_graph(graph, "尤基").relations != []
+
+
+def test_graph_staleness_when_response_format_changes() -> None:
+    document = empty_graph(collection="books", response_format="json_schema")
+    assert (
+        graph_staleness_reason(
+            document,
+            [],
+            collection="books",
+            source_path="",
+            response_format="json_object",
+        )
+        == "graph generator response format changed"
+    )
+    document.response_format = None
+    assert (
+        graph_staleness_reason(
+            document,
+            [],
+            collection="books",
+            source_path="",
+            response_format="json_object",
+        )
+        is None
+    )
