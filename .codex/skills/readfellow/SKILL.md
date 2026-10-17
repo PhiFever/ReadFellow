@@ -1,6 +1,6 @@
 ---
 name: readfellow
-description: Use this skill when working in the ReadFellow repository to index, search, fetch, or discuss local long-form text corpora through the project's uv-managed readfellow CLI, zvec indexes, and Ollama embeddings. Trigger for requests about reading the indexed corpus, semantic search, Chinese FTS, chunk provenance, rebuilding indexes, non-spoiler reading progress limits, or answering questions from original document passages.
+description: Answer questions about a ReadFellow-indexed corpus from original passages, with citations and within the user's reading progress. Use when discussing a book's content, searching or fetching chunks, setting spoiler limits, or rebuilding an index.
 ---
 
 # ReadFellow
