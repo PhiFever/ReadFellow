@@ -2,11 +2,18 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import event, func, select, text
+from test_app import DeterministicGenerator
 
 from readfellow import artifact_schema as db
+from readfellow.analysis import (
+    ChapterGroup,
+    empty_analysis,
+    merge_chapter,
+    write_analysis,
+)
 from readfellow.app import (
-    GraphBuildOptions,
     AnalysisBuildOptions,
+    GraphBuildOptions,
     build_analysis,
     build_graph,
     import_json,
@@ -16,16 +23,9 @@ from readfellow.artifacts import ArtifactStore
 from readfellow.chunking import CHUNKER_VERSION, chunk_document
 from readfellow.config import PathConfig, ReadFellowConfig
 from readfellow.graph import annotate_chunks, write_graph
-from readfellow.analysis import (
-    ChapterGroup,
-    empty_analysis,
-    merge_chapter,
-    write_analysis,
-)
 from readfellow.models import ChapterAnalysis, IndexManifest
 from readfellow.progress import build_progress_filter
 from readfellow.store import write_manifest
-from test_app import DeterministicGenerator
 
 
 def workspace(tmp_path, artifacts):

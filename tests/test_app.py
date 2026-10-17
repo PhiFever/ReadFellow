@@ -3,11 +3,10 @@ from __future__ import annotations
 import json
 import threading
 from pathlib import Path
-from readfellow.artifacts import open_artifacts
-from artifact_helpers import replace_run
 from typing import Any
 
 import pytest
+from artifact_helpers import replace_run
 
 from readfellow import app
 from readfellow.app import (
@@ -23,6 +22,7 @@ from readfellow.app import (
     query_graph,
     semantic_search,
 )
+from readfellow.artifacts import open_artifacts
 from readfellow.chunking import (
     CHUNKER_VERSION,
     chunk_document,

@@ -1,7 +1,7 @@
 """Read and validate legacy artifacts, without changing their version metadata."""
 
-from pathlib import Path
 import hashlib
+from pathlib import Path
 
 from .analysis import analysis_path, read_analysis
 from .artifacts import ArtifactStore, ImportResult, fingerprint

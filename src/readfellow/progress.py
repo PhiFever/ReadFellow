@@ -6,7 +6,6 @@ from pathlib import Path
 from .chunking import iter_headings
 from .models import ChapterBoundary, IndexManifest, ProgressFilter
 
-
 _CHAPTER_NUMBER_RE = re.compile(r"^\d*第([0-9零〇一二两三四五六七八九十百千万]+)章")
 
 

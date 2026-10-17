@@ -6,9 +6,8 @@ from dotenv import dotenv_values
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
 
-from readfellow.artifacts import make_engine
+from readfellow.artifacts import make_engine, open_artifacts
 from readfellow.config import ReadFellowConfig
-from readfellow.artifacts import open_artifacts
 
 
 def pytest_addoption(parser):

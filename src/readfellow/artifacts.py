@@ -380,7 +380,7 @@ class ArtifactStore:
             for chunk_id, text_hash in document.chunk_text_hashes.items():
                 context_add(
                     db.fingerprints,
-                    dict(chunk_id=chunk_id, source_hash="", text_hash=text_hash),
+                    {"chunk_id": chunk_id, "source_hash": "", "text_hash": text_hash},
                 )
         return rows
 

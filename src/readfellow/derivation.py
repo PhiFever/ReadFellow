@@ -6,13 +6,11 @@ import json
 import os
 from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import Any, Protocol, TypeVar
+from typing import Any, Protocol
 
 from pydantic import BaseModel
 
 from .models import DerivationSettings
-
-Parsed = TypeVar("Parsed")
 
 # Stored with each run for reference, but they only decide how hard a build
 # tries and which units fit its budget, never what an answer says.
@@ -23,7 +21,7 @@ class JsonGenerator(Protocol):
     def generate_json(self, prompt: str, schema: dict[str, Any]) -> str: ...
 
 
-def generate_with_retry(
+def generate_with_retry[Parsed](
     generator: JsonGenerator,
     prompt: str,
     parse: Callable[[str], Parsed],

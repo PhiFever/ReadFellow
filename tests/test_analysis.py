@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from readfellow.artifacts import open_artifacts
+
 from artifact_helpers import replace_run
 
 from readfellow.analysis import (
@@ -12,6 +12,7 @@ from readfellow.analysis import (
     group_chapters,
 )
 from readfellow.app import AnalysisBuildOptions, ProgressLimit, build_analysis
+from readfellow.artifacts import open_artifacts
 from readfellow.chunking import CHUNKER_VERSION, chunk_document
 from readfellow.config import DerivationConfig, PathConfig, ReadFellowConfig
 from readfellow.models import IndexManifest

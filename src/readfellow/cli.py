@@ -20,9 +20,9 @@ from .app import (
     collection_status,
     fts_search,
     hybrid_search,
+    import_json,
     index_document,
     initialize_database,
-    import_json,
     semantic_search,
 )
 from .app import (

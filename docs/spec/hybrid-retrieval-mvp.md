@@ -123,16 +123,17 @@ FTS 路无独立失败模式（与 vector 读同一 collection，打不开则三
 `models.py`：
 
 ```python
-class EvidenceMatch(ReadFellowModel):          # 新增，frozen
+class EvidenceMatch(ReadFellowModel):  # 新增，frozen
     model_config = ConfigDict(extra="forbid", frozen=True)
     mode: Literal["vector", "fts", "graph"]
-    rank: int                                   # 该通道内 1-based 名次
+    rank: int  # 该通道内 1-based 名次
+
 
 class Evidence(ReadFellowModel):
-    retrieval_mode: Literal["vector", "fts", "fetch", "graph", "hybrid"]   # 加一个值
-    score: float | None = None                  # hybrid 时 = 融合后 RRF 分
-    matches: list[EvidenceMatch] = []           # 新增；非 hybrid 时为空
-    graph_context: EvidenceGraphContext | None = None   # 不变
+    retrieval_mode: Literal["vector", "fts", "fetch", "graph", "hybrid"]  # 加一个值
+    score: float | None = None  # hybrid 时 = 融合后 RRF 分
+    matches: list[EvidenceMatch] = []  # 新增；非 hybrid 时为空
+    graph_context: EvidenceGraphContext | None = None  # 不变
 ```
 
 `app.py`：
@@ -143,6 +144,7 @@ class ChannelStatus:
     mode: Literal["vector", "fts", "graph"]
     candidates: int
     skipped_reason: str | None = None
+
 
 @dataclass(frozen=True)
 class HybridSearchResult:

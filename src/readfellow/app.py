@@ -70,7 +70,6 @@ from .store import (
     collection_path,
 )
 
-
 RRF_K = 60
 FAN_OUT_MULTIPLIER = 10
 # A derivation saves its run once this long has passed since the last save, or
@@ -421,7 +420,7 @@ def fts_search(
     artifacts: ArtifactStore | None = None,
 ) -> SearchResult:
     artifacts = artifacts or open_artifacts(config)
-    manifest, progress_filter = _load_manifest(collection, progress, artifacts)
+    _manifest, progress_filter = _load_manifest(collection, progress, artifacts)
     store = store or _open_store(config, collection)
     return SearchResult(
         progress=progress_filter,
@@ -443,7 +442,7 @@ def fetch_chunk(
     artifacts: ArtifactStore | None = None,
 ) -> FetchChunkResult:
     artifacts = artifacts or open_artifacts(config)
-    manifest, progress_filter = _load_manifest(collection, progress, artifacts)
+    _manifest, progress_filter = _load_manifest(collection, progress, artifacts)
     store = store or _open_store(config, collection)
     evidence = store.fetch(chunk_id)
     if evidence is None:
@@ -1013,7 +1012,7 @@ def _load_graph(
     chunk_ids: list[str] | None = None,
 ) -> tuple[StoredRun, list[Chunk], ProgressFilter]:
     """The checked graph run; with `chunk_ids`, only the slice annotating them."""
-    source_id, manifest, all_chunks, progress_filter = _load_indexed_source(
+    _source_id, manifest, all_chunks, progress_filter = _load_indexed_source(
         config, collection, progress, artifacts
     )
     run = (

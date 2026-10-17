@@ -6,13 +6,11 @@ import json
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any, TypeVar
+from typing import Any
 
 from pydantic import BaseModel
 
 from .models import Chunk, ChunkContext
-
-ParsedItem = TypeVar("ParsedItem")
 
 
 def parse_json_object(raw: str | Mapping[str, Any]) -> Mapping[str, Any]:
@@ -133,7 +131,7 @@ class Rejections:
         )
 
 
-def collect_items(
+def collect_items[ParsedItem](
     items: list[Any],
     parse: Callable[[int, Any], ParsedItem | None],
 ) -> tuple[list[ParsedItem], Rejections]:

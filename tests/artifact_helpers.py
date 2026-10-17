@@ -1,5 +1,4 @@
-from readfellow.artifacts import StoredRun
-from readfellow.artifacts import open_artifacts
+from readfellow.artifacts import StoredRun, open_artifacts
 
 
 def replace_run(config, kind, document):
