@@ -44,7 +44,7 @@ CLI 只调用 app 工作流；app 编排领域逻辑并注入存储与模型接�
 - 改 `graph-index`、`analyze`、失效指纹、MySQL 持久化或 `status` 前，读 `docs/derivation.md`。
 - 提议改设计前，查 `docs/decisions.md`：已定的决策各一行，附原文出处。
 - 审查 diff 时按 `CODING_STANDARDS.md` 逐条核对。
-- 当前进行中的工作是 `docs/spec/narrative-index-plan.md`：动 `analyze`、章节识别、图谱或检索排序前读它，实施从「执行顺序」里状态行指明的那一步接着做。
+- 当前进行中的工作是 `docs/spec/reading-architecture-plan.md`：动存储、进度、命令、`analyze`、章节识别、图谱或检索排序前读它，实施从「执行顺序」里状态行指明的那一步接着做。它引用的 `analyze` v2、身份归并、剧情段、评估集设计在 `docs/spec/narrative-index-plan.md`。
 - 跑全量或估算耗时，看 `docs/mvp-runbook.md`。用 DataGrip 查 MySQL，看 `docs/mysql-storage.md`。
 - `docs/archive/` 是已完成的 spec，只在 `decisions.md` 指过去时读。`docs/architecture-archive.md` 是早期架构记录，同样按需读。
 - 回答用户关于语料内容的问题时，按 readfellow skill（`.claude/skills/readfellow`）执行。
