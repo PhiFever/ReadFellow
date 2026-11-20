@@ -10,9 +10,6 @@ from .app import (
     AnalysisBuildOptions,
     ChannelStatus,
     DerivationReport,
-    GraphAnnotationStatus,
-    GraphBuildEvent,
-    GraphBuildOptions,
     IndexDocumentOptions,
     IndexProgressEvent,
     IndexReport,
@@ -29,16 +26,9 @@ from .app import (
     build_analysis as build_analysis_workflow,
 )
 from .app import (
-    build_graph as build_graph_workflow,
-)
-from .app import (
     fetch_chunk as fetch_chunk_workflow,
 )
-from .app import (
-    query_graph as query_graph_workflow,
-)
 from .config import CONFIG_FILE, ReadFellowConfig, load_config
-from .graph import GraphDiagnostics
 from .models import ChapterAnalysis, ChunkContext, Evidence, ProgressFilter
 
 
@@ -119,7 +109,7 @@ def build_parser(config: ReadFellowConfig) -> argparse.ArgumentParser:
 
     hybrid = subparsers.add_parser(
         "hybrid",
-        help="fuse vector, FTS, and graph retrieval into one ranked evidence list",
+        help="fuse vector and FTS retrieval into one ranked evidence list",
     )
     hybrid.add_argument("query")
     hybrid.add_argument(
@@ -138,51 +128,6 @@ def build_parser(config: ReadFellowConfig) -> argparse.ArgumentParser:
         default=config.indexing.default_collection,
     )
     add_progress_args(fetch)
-
-    graph_index = subparsers.add_parser(
-        "graph-index",
-        help="extract a versioned knowledge graph into MySQL",
-    )
-    graph_index.add_argument(
-        "--collection",
-        type=valid_collection_name,
-        default=config.indexing.default_collection,
-    )
-    graph_index.add_argument(
-        "--limit",
-        type=int,
-        default=0,
-        help="extract only the first N eligible chunks",
-    )
-    graph_index.add_argument(
-        "--llm-model", default=config.generation_model(config.graph)
-    )
-    graph_index.add_argument(
-        "--num-predict",
-        type=int,
-        default=config.graph.num_predict,
-        help="maximum generated tokens per chunk for Ollama graph extraction",
-    )
-    graph_index.add_argument(
-        "--retries",
-        type=int,
-        default=config.graph.retries,
-        help="retry failed graph extraction this many times per chunk",
-    )
-    graph_index.add_argument("--rebuild", action="store_true")
-    add_progress_args(graph_index)
-
-    graph_query = subparsers.add_parser(
-        "graph-query",
-        help="query the latest knowledge graph in MySQL",
-    )
-    graph_query.add_argument("query")
-    graph_query.add_argument(
-        "--collection",
-        type=valid_collection_name,
-        default=config.indexing.default_collection,
-    )
-    add_progress_args(graph_query)
 
     analyze = subparsers.add_parser(
         "analyze",
@@ -304,7 +249,6 @@ def command_hybrid(args: argparse.Namespace, config: ReadFellowConfig) -> int:
     )
     print_progress(result.progress)
     print_channels(result.channels)
-    print_graph_annotation(result.graph_annotation, results=len(result.evidence))
     print_evidence(result.evidence)
     return 0
 
@@ -331,60 +275,6 @@ def command_fetch(args: argparse.Namespace, config: ReadFellowConfig) -> int:
         raise RuntimeError(f"fetch returned no evidence for {args.chunk_id}")
     print_progress(result.progress)
     print_evidence([result.evidence], full_text=True)
-    return 0
-
-
-def command_graph_index(args: argparse.Namespace, config: ReadFellowConfig) -> int:
-    result = build_graph_workflow(
-        config,
-        args.collection,
-        progress=progress_limit_from_args(args),
-        options=GraphBuildOptions(
-            limit=args.limit,
-            llm_model=args.llm_model,
-            num_predict=args.num_predict,
-            retries=args.retries,
-            rebuild=args.rebuild,
-        ),
-        on_progress=print_graph_progress,
-    )
-    print(
-        f"run_id={result.run_id}, processed={result.processed_chunk_count}/{result.selected_chunk_count} chunks"
-    )
-    if result.status == "empty":
-        print(f"done: no chunks selected for collection={result.collection}")
-        return 0
-    if result.status == "up_to_date":
-        print(
-            f"done: graph is already up to date for collection={result.collection}, "
-            f"selected_chunks={result.selected_chunk_count}"
-        )
-        return 0
-
-    failed = (
-        f", failed_chunks={result.failed_chunk_count} (rerun to retry them)"
-        if result.failed_chunk_count
-        else ""
-    )
-    print(
-        f"done: collection={result.collection}, run_id={result.run_id}, "
-        f"entities={result.entity_count}, relations={result.relation_count}{failed}"
-    )
-    return 0
-
-
-def command_graph_query(args: argparse.Namespace, config: ReadFellowConfig) -> int:
-    result = query_graph_workflow(
-        config,
-        args.query,
-        args.collection,
-        progress=progress_limit_from_args(args),
-    )
-    print(
-        f"run_id={result.run_id}, processed={result.processed}/{result.selected} chunks"
-    )
-    print_progress(result.progress)
-    print_evidence(result.evidence)
     return 0
 
 
@@ -424,10 +314,6 @@ def command_status(args: argparse.Namespace, config: ReadFellowConfig) -> int:
 
     print()
     print_index_status(status.index)
-    print()
-    print_derivation_status("graph-index", "chunks", status.graph)
-    if status.diagnostics is not None:
-        print_graph_diagnostics(status.diagnostics)
     print()
     print_derivation_status("analyze", "chapters", status.analysis)
     return 0
@@ -473,36 +359,6 @@ def print_derivation_status(command: str, unit: str, report: DerivationReport) -
         print(f"  → {command} would resume on the remaining {remaining} {unit}")
 
 
-def print_graph_diagnostics(diagnostics: GraphDiagnostics) -> None:
-    print(
-        f"  entities   {diagnostics.entity_count} "
-        f"(declared {diagnostics.declared_entity_share:.1%}), "
-        f"relations {diagnostics.relation_count}"
-    )
-    print(
-        f"  spread     p50={diagnostics.spread_p50} p90={diagnostics.spread_p90} "
-        f"max={diagnostics.spread_max} chunks per entity"
-    )
-    print(
-        f"  dropped    {diagnostics.dropped_item_share:.1%} of "
-        f"{diagnostics.extracted_item_count} extracted items, mostly relations "
-        "whose predicate is outside the vocabulary"
-    )
-    if diagnostics.unanchored_item_share is None:
-        print("  unanchored not recorded; this graph predates the split by cause")
-    else:
-        print(
-            f"  unanchored {diagnostics.unanchored_item_share:.1%} of them, the part "
-            "that quoted text not in its chunk"
-        )
-    print(
-        f"  silent     {diagnostics.silent_chunk_count}/"
-        f"{diagnostics.processed_chunk_count} chunks yielded nothing"
-    )
-    for warning in diagnostics.warnings:
-        print(f"  ⚠ {warning}")
-
-
 def print_index_progress(event: IndexProgressEvent) -> None:
     if event.stage == "probe":
         print(f"probing embedding dimension with {event.model} ...", flush=True)
@@ -520,34 +376,6 @@ def print_index_progress(event: IndexProgressEvent) -> None:
         print(
             f"[{event.processed:>5}/{event.total}] indexed {event.inserted}, "
             f"skipped {event.skipped}, {event.rate:.2f} chunks/s",
-            flush=True,
-        )
-
-
-def print_graph_progress(event: GraphBuildEvent) -> None:
-    if event.stage == "selected" and event.progress is not None:
-        print_progress(event.progress)
-        return
-    if event.stage == "extracting":
-        print(
-            f"[{event.index:>5}/{event.total}] extracting graph from {event.chunk_id}",
-            flush=True,
-        )
-        return
-    if event.stage == "retry":
-        print(
-            f"        retry {event.attempt}/{event.retries}: {event.error}",
-            flush=True,
-        )
-        return
-    if event.stage == "failed":
-        print(f"        skipped: {event.error}", flush=True)
-        return
-    if event.stage == "extracted":
-        print(
-            f"        entities={event.entity_count},"
-            f" relations={event.relation_count}"
-            f"{_rejected_suffix(event.rejected_count, event.unanchored_count)}",
             flush=True,
         )
 
@@ -647,11 +475,6 @@ def print_evidence(items: list[Evidence], *, full_text: bool = False) -> None:
                 + ", ".join(f"{match.mode}#{match.rank}" for match in evidence.matches)
             )
         print(f"chapter: {chapter}")
-        if evidence.graph_context is not None:
-            if evidence.graph_context.entities:
-                print("graph entities: " + ", ".join(evidence.graph_context.entities))
-            for relation in evidence.graph_context.relations:
-                print(f"graph relation: {relation}")
         text = evidence.text.rstrip()
         if not full_text:
             text = re.sub(r"\s+", " ", text)[:260]
@@ -674,16 +497,6 @@ def print_progress(progress: ProgressFilter) -> None:
 def print_channels(channels: list[ChannelStatus]) -> None:
     parts = [f"{channel.mode}={channel.candidates}" for channel in channels]
     print("channels: " + ", ".join(parts), file=sys.stderr)
-
-
-def print_graph_annotation(annotation: GraphAnnotationStatus, *, results: int) -> None:
-    if annotation.skipped_reason is not None:
-        print(f"graph context: skipped ({annotation.skipped_reason})", file=sys.stderr)
-        return
-    print(
-        f"graph context: {annotation.annotated}/{results} results annotated",
-        file=sys.stderr,
-    )
 
 
 def config_path_from_argv(argv: list[str] | None) -> Path:
@@ -726,7 +539,7 @@ def main(argv: list[str] | None = None) -> int:
             result = import_json(config, args.collection)
             print(
                 f"{'already imported' if result.skipped else 'imported'}: collection={args.collection}, "
-                f"source_version_id={result.source_version_id}, graph_run_id={result.graph_run_id}, "
+                f"source_version_id={result.source_version_id}, "
                 f"analysis_run_id={result.analysis_run_id}"
             )
             return 0
@@ -740,10 +553,6 @@ def main(argv: list[str] | None = None) -> int:
             return command_hybrid(args, config)
         if args.command == "fetch":
             return command_fetch(args, config)
-        if args.command == "graph-index":
-            return command_graph_index(args, config)
-        if args.command == "graph-query":
-            return command_graph_query(args, config)
         if args.command == "analyze":
             return command_analyze(args, config)
         if args.command == "status":

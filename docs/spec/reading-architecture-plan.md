@@ -1,7 +1,7 @@
 # 阅读架构规格：章节为骨架、单文件存储、事件图
 
 日期：2026-11-16
-状态：**未开工**，从文末「执行顺序」第 1 步开始。
+状态：**第 1 步已完成**，从文末「执行顺序」第 2 步接着做。
 来源：一次架构评审会话。前提是只依据项目最初的目的（让 LLM 能读不在训练数据里的小说并与用户讨论），允许推翻此前任何文档结论。
 
 与 `narrative-index-plan.md` 的关系：**本文件接管执行顺序**。那份计划里 `analyze` v2、人物身份归并、剧情段、Q15 人名检查、评估集的设计仍然有效，本文件不重复，只在「对叙事索引计划的改动」里列出被改写的条目。两边冲突时以本文件为准。
@@ -178,6 +178,7 @@
 1. **删除图谱。**
    - 范围见「删除的东西」。`Evidence.graph_context`、`retrieval_mode` 里的 `graph`、`status` 的图谱诊断一并删掉。
    - **完成标准**：`uv run pytest` 通过，ruff clean；`rg -n -i graph src/readfellow tests | rg -v paragraph` 没有输出；`uv run readfellow --help` 不再列出 `graph-index` 和 `graph-query`。
+   - **结果**（2026-11-20）：完成标准全部满足，46 个测试通过。`src/` 从 6696 行减到 4610 行，`tests/` 从 3311 行减到 1743 行。删了 `graph.py`、`tests/test_graph.py`、六张图谱专用表和 `artifact_imports.graph_run_id`；`extraction.py`、`derivation.py` 一行没动，里面的函数 `analyze` 都还在用。真实语料上 `fts` 输出逐字节不变，`status` 只少了 graph-index 那一段。MySQL 里已有的图谱表和数据没有动，第 2 步整库去掉。
 2. **新库落地并切换。**
    - 实现「一本书一个文件」的索引组和「章节表」。`index` 写新库，`SqliteChunkStore` 实现 `ChunkStore`，`search` / `fts` / `hybrid` / `fetch` / `status` 改读新库，进度由章节表换算。
    - 删除 MySQL 持久化层及其命令和依赖；`analyze` 命令下线。numpy、jieba 加为直接依赖。zvec 留到第 3 步。

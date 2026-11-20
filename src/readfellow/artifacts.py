@@ -8,7 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import defaultdict
-from collections.abc import Callable, Collection
+from collections.abc import Callable
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import TYPE_CHECKING, Literal
@@ -17,13 +17,13 @@ from sqlalchemy import create_engine, delete, event, insert, select, update
 from sqlalchemy.engine import Connection, Engine, make_url
 
 from . import artifact_schema as db
-from .models import AnalysisDocument, Chunk, IndexManifest, KnowledgeGraph
+from .models import AnalysisDocument, Chunk, IndexManifest
 
 if TYPE_CHECKING:
     from .config import ReadFellowConfig
 
-Document = KnowledgeGraph | AnalysisDocument
-Kind = Literal["graph", "analysis"]
+Document = AnalysisDocument
+Kind = Literal["analysis"]
 
 
 @dataclass(frozen=True)
@@ -36,7 +36,6 @@ class StoredRun:
 @dataclass(frozen=True)
 class ImportResult:
     source_version_id: int
-    graph_run_id: int | None
     analysis_run_id: int | None
     skipped: bool = False
 
@@ -181,25 +180,6 @@ class ArtifactStore:
             row = self._latest_row(connection, collection, kind)
             return self._read_run(connection, row) if row else None
 
-    def read_graph_slice(
-        self, collection: str, chunk_ids: Collection[str]
-    ) -> StoredRun | None:
-        """The latest graph run, holding only what `graph.annotate_chunks` reads.
-
-        Entities keep all their values, mentions and evidence, because ranking
-        needs each entity's spread over the whole book. Run fields, extractions
-        and fingerprints stay complete for the staleness check. The result is
-        not the whole document, so it never becomes the baseline `save` diffs
-        against.
-        """
-        with self.engine.connect() as connection:
-            row = self._latest_row(connection, collection, "graph")
-            if row is None:
-                return None
-            return self._assemble(
-                row, self._read_slice_rows(connection, row, set(chunk_ids))
-            )
-
     @staticmethod
     def _latest_row(connection, collection, kind):
         return (
@@ -230,8 +210,7 @@ class ArtifactStore:
         stale: Callable[[Document], str | None],
         rebuild: bool,
     ) -> tuple[StoredRun, bool]:
-        kind = "graph" if isinstance(empty, KnowledgeGraph) else "analysis"
-        previous = self.latest(empty.collection, kind)
+        previous = self.latest(empty.collection, "analysis")
         reset = previous is not None and (
             rebuild or stale(previous.document) is not None
         )
@@ -260,34 +239,13 @@ class ArtifactStore:
 
     @staticmethod
     def _run_values(document):
-        graph = isinstance(document, KnowledgeGraph)
-        excluded = (
-            {
-                "entities",
-                "relations",
-                "extractions",
-                "source_chunk_hashes",
-                "entity_count",
-                "relation_count",
-            }
-            if graph
-            else {"chapters", "chunk_text_hashes"}
+        values = document.model_dump(
+            mode="json", exclude={"chapters", "chunk_text_hashes"}
         )
-        values = document.model_dump(mode="json", exclude=excluded)
-        values["settings"] = values.pop("extraction_settings" if graph else "settings")
-        values["selected_count"] = values.pop(
-            "selected_chunk_count" if graph else "selected_chapter_count"
-        )
-        values["processed_count"] = values.pop(
-            "processed_chunk_count" if graph else "processed_chapter_count"
-        )
+        values["selected_count"] = values.pop("selected_chapter_count")
+        values["processed_count"] = values.pop("processed_chapter_count")
         extra = {k: values.pop(k) for k in list(values) if k not in db.runs.c}
-        if graph:
-            extra.update(
-                entity_count=document.entity_count,
-                relation_count=document.relation_count,
-            )
-        return dict(values, kind="graph" if graph else "analysis", extra=extra)
+        return dict(values, kind="analysis", extra=extra)
 
     def _rows(self, run):
         rows = {table.name: [] for table in db.run_tables}
@@ -298,11 +256,9 @@ class ArtifactStore:
                 if hasattr(value, "model_dump")
                 else dict(value)
             )
-            if table is db.entities:
-                identity = values["name"]
-            elif table is db.chapters:
+            if table is db.chapters:
                 identity = [values["chapter_index"], values["chapter_title"]]
-            elif table in (db.extractions, db.fingerprints):
+            elif table is db.fingerprints:
                 identity = values["chunk_id"]
             else:
                 identity = [
@@ -325,63 +281,26 @@ class ArtifactStore:
             add(table, value, source_version_id=run.source_version_id, **parent)
 
         document = run.document
-        if isinstance(document, KnowledgeGraph):
-            for entity in document.entities:
-                i = add(db.entities, {"name": entity.name})
-                for kind in ("aliases", "types"):
-                    for value in getattr(entity, kind):
-                        add(
-                            db.entity_values,
-                            {"kind": kind, "value": value},
-                            entity_position=i,
-                        )
-                for table, values in (
-                    (db.entity_mentions, entity.mentions),
-                    (db.entity_evidence, entity.evidence),
-                ):
-                    for value in values:
-                        context_add(table, value, entity_position=i)
-            names = {
-                entity.name: fingerprint(entity.name) for entity in document.entities
-            }
-            for relation in document.relations:
+        for chapter in document.chapters:
+            i = add(
+                db.chapters,
+                chapter.model_dump(exclude={"chunk_ids", "characters", "events"}),
+            )
+            for chunk_id in chapter.chunk_ids:
                 context_add(
-                    db.relations,
-                    relation,
-                    subject_position=names.get(
-                        relation.subject_entity or relation.subject
-                    ),
-                    object_position=names.get(
-                        relation.object_entity or relation.object
-                    ),
+                    db.chapter_chunks, {"chunk_id": chunk_id}, chapter_position=i
                 )
-            for record in document.extractions:
-                context_add(db.extractions, record)
-            for chunk_id, hashes in document.source_chunk_hashes.items():
-                context_add(
-                    db.fingerprints, dict(hashes.model_dump(), chunk_id=chunk_id)
-                )
-        else:
-            for chapter in document.chapters:
-                i = add(
-                    db.chapters,
-                    chapter.model_dump(exclude={"chunk_ids", "characters", "events"}),
-                )
-                for chunk_id in chapter.chunk_ids:
-                    context_add(
-                        db.chapter_chunks, {"chunk_id": chunk_id}, chapter_position=i
-                    )
-                for table, values in (
-                    (db.characters, chapter.characters),
-                    (db.events, chapter.events),
-                ):
-                    for value in values:
-                        context_add(table, value, chapter_position=i)
-            for chunk_id, text_hash in document.chunk_text_hashes.items():
-                context_add(
-                    db.fingerprints,
-                    {"chunk_id": chunk_id, "source_hash": "", "text_hash": text_hash},
-                )
+            for table, values in (
+                (db.characters, chapter.characters),
+                (db.events, chapter.events),
+            ):
+                for value in values:
+                    context_add(table, value, chapter_position=i)
+        for chunk_id, text_hash in document.chunk_text_hashes.items():
+            context_add(
+                db.fingerprints,
+                {"chunk_id": chunk_id, "source_hash": "", "text_hash": text_hash},
+            )
         return rows
 
     def _save(self, connection: Connection, run: StoredRun):
@@ -410,17 +329,6 @@ class ArtifactStore:
         for table in db.run_tables:
             old = {r["position"]: r for r in old_rows[table.name]}
             new = {r["position"]: r for r in rows[table.name]}
-            if table in (
-                db.entities,
-                db.entity_values,
-                db.entity_mentions,
-                db.entity_evidence,
-            ):
-                # These lists have domain ordering (name/value/chunk position).
-                # Adding a name must not rewrite every later entity's rows just
-                # because its ordinal in the whole graph shifted.
-                for key in old.keys() & new.keys():
-                    new[key]["sort_order"] = old[key]["sort_order"]
             changes[table.name] = (old, new)
         # Delete children before parents; unchanged rows are never rewritten.
         for table in reversed(db.run_tables):
@@ -428,8 +336,7 @@ class ArtifactStore:
             removed = [
                 k
                 for k in old
-                if k not in new
-                or (old[k] != new[k] and table not in (db.entities, db.chapters))
+                if k not in new or (old[k] != new[k] and table is not db.chapters)
             ]
             for offset in range(0, len(removed), 500):
                 connection.execute(
@@ -444,7 +351,7 @@ class ArtifactStore:
             for key, row in new.items():
                 if key in old and old[key] == row:
                     continue
-                if key in old and table in (db.entities, db.chapters):
+                if key in old and table is db.chapters:
                     connection.execute(
                         update(table)
                         .where(table.c.run_id == run.id, table.c.position == key)
@@ -487,48 +394,6 @@ class ArtifactStore:
             for table in db.run_tables
         }
 
-    @staticmethod
-    def _read_slice_rows(connection, row, chunk_ids):
-        run_id = row["id"]
-
-        def in_chunks(table):
-            # Every row of a run carries the run's source version, since `_save`
-            # rewrites them together; matching it lets the chunk index serve this.
-            return (
-                table.c.source_version_id == row["source_version_id"],
-                table.c.chunk_id.in_(chunk_ids),
-            )
-
-        def rows(table, *conditions):
-            return [
-                dict(r)
-                for r in connection.execute(
-                    select(table)
-                    .where(table.c.run_id == run_id, *conditions)
-                    .order_by(table.c.sort_order)
-                ).mappings()
-            ]
-
-        data = {table.name: [] for table in db.run_tables}
-        for table in (db.extractions, db.fingerprints):
-            data[table.name] = rows(table)
-        data["relations"] = rows(db.relations, *in_chunks(db.relations))
-        # Merging a relation mentions both endpoints in its chunk, so the
-        # entities anchored to these chunks include every relation endpoint.
-        positions = set()
-        for table in (db.entity_mentions, db.entity_evidence):
-            positions.update(
-                connection.scalars(
-                    select(table.c.entity_position)
-                    .where(table.c.run_id == run_id, *in_chunks(table))
-                    .distinct()
-                )
-            )
-        data["entities"] = rows(db.entities, db.entities.c.position.in_(positions))
-        for table in (db.entity_values, db.entity_mentions, db.entity_evidence):
-            data[table.name] = rows(table, table.c.entity_position.in_(positions))
-        return data
-
     def _read_run(self, connection, row):
         data = self._read_rows(connection, row["id"])
         self._snapshots[row["id"]] = data
@@ -539,21 +404,12 @@ class ArtifactStore:
     def _assemble(row, data):
         values = dict(row)
         run_id, source_id = values.pop("id"), values.pop("source_version_id")
-        kind = values.pop("kind")
+        values.pop("kind")
         values.update(values.pop("extra"))
-        graph = kind == "graph"
-        values["extraction_settings" if graph else "settings"] = values.pop("settings")
-        values["selected_chunk_count" if graph else "selected_chapter_count"] = (
-            values.pop("selected_count")
-        )
-        values["processed_chunk_count" if graph else "processed_chapter_count"] = (
-            values.pop("processed_count")
-        )
+        values["selected_chapter_count"] = values.pop("selected_count")
+        values["processed_chapter_count"] = values.pop("processed_count")
         grouped = {}
         for name, parent in (
-            ("entity_values", "entity_position"),
-            ("entity_mentions", "entity_position"),
-            ("entity_evidence", "entity_position"),
             ("chapter_chunks", "chapter_position"),
             ("characters", "chapter_position"),
             ("events", "chapter_position"),
@@ -570,63 +426,22 @@ class ArtifactStore:
                 not in {"run_id", "position", "sort_order", "source_version_id", *omit}
             }
 
-        if graph:
-            values["entities"] = []
-            for entity in sorted(data["entities"], key=lambda item: item["name"]):
-                position = entity["position"]
-                item = clean(entity)
-                for kind in ("aliases", "types"):
-                    item[kind] = sorted(
-                        v["value"]
-                        for v in grouped["entity_values"][position]
-                        if v["kind"] == kind
-                    )
-                for field, table in (
-                    ("mentions", "entity_mentions"),
-                    ("evidence", "entity_evidence"),
-                ):
-                    item[field] = [
-                        clean(v, "entity_position")
-                        for v in sorted(
-                            grouped[table][position],
-                            key=lambda item: (
-                                item["chunk_index"],
-                                item["line_start"],
-                                item["sort_order"],
-                            ),
-                        )
-                    ]
-                values["entities"].append(item)
-            values["relations"] = [
-                clean(v, "subject_position", "object_position")
-                for v in data["relations"]
+        values["chapters"] = []
+        for chapter in data["chapters"]:
+            position = chapter["position"]
+            item = clean(chapter)
+            item["chunk_ids"] = [
+                v["chunk_id"] for v in grouped["chapter_chunks"][position]
             ]
-            values["extractions"] = [clean(v) for v in data["extractions"]]
-            values["source_chunk_hashes"] = {
-                v["chunk_id"]: {
-                    "source_hash": v["source_hash"],
-                    "text_hash": v["text_hash"],
-                }
-                for v in data["run_chunks"]
-            }
-            document = KnowledgeGraph.model_validate(values)
-        else:
-            values["chapters"] = []
-            for chapter in data["chapters"]:
-                position = chapter["position"]
-                item = clean(chapter)
-                item["chunk_ids"] = [
-                    v["chunk_id"] for v in grouped["chapter_chunks"][position]
+            for field in ("characters", "events"):
+                item[field] = [
+                    clean(v, "chapter_position") for v in grouped[field][position]
                 ]
-                for field in ("characters", "events"):
-                    item[field] = [
-                        clean(v, "chapter_position") for v in grouped[field][position]
-                    ]
-                values["chapters"].append(item)
-            values["chunk_text_hashes"] = {
-                v["chunk_id"]: v["text_hash"] for v in data["run_chunks"]
-            }
-            document = AnalysisDocument.model_validate(values)
+            values["chapters"].append(item)
+        values["chunk_text_hashes"] = {
+            v["chunk_id"]: v["text_hash"] for v in data["run_chunks"]
+        }
+        document = AnalysisDocument.model_validate(values)
         return StoredRun(run_id, source_id, document)
 
     def import_documents(
@@ -634,7 +449,6 @@ class ArtifactStore:
         digest: str,
         manifest: IndexManifest,
         chunks: list[Chunk],
-        graph: KnowledgeGraph | None,
         analysis: AnalysisDocument | None,
     ) -> ImportResult:
         with self.engine.begin() as connection:
@@ -648,14 +462,10 @@ class ArtifactStore:
             if existing:
                 return ImportResult(
                     existing["source_version_id"],
-                    existing["graph_run_id"],
                     existing["analysis_run_id"],
                     True,
                 )
             source_id = self._write_source(connection, manifest, chunks)
-            graph_id = (
-                self._create_run(connection, source_id, graph)[0] if graph else None
-            )
             analysis_id = (
                 self._create_run(connection, source_id, analysis)[0]
                 if analysis
@@ -666,11 +476,10 @@ class ArtifactStore:
                     digest=digest,
                     collection=manifest.collection,
                     source_version_id=source_id,
-                    graph_run_id=graph_id,
                     analysis_run_id=analysis_id,
                 )
             )
-            return ImportResult(source_id, graph_id, analysis_id)
+            return ImportResult(source_id, analysis_id)
 
 
 def open_artifacts(config: ReadFellowConfig) -> ArtifactStore:

@@ -131,76 +131,6 @@ def chunk_reference():
     ]
 
 
-entities = table(
-    "entities", *run_columns(), text("name"), UniqueConstraint("run_id", "position")
-)
-
-
-def entity_reference():
-    return [
-        Column("entity_position", String(64), nullable=False),
-        ForeignKeyConstraint(
-            ["run_id", "entity_position"], ["entities.run_id", "entities.position"]
-        ),
-    ]
-
-
-entity_values = table(
-    "entity_values",
-    *run_columns(),
-    *entity_reference(),
-    Column("kind", String(16), nullable=False),
-    text("value"),
-)
-entity_mentions = table(
-    "entity_mentions",
-    *run_columns(),
-    *entity_reference(),
-    *context(),
-    *chunk_reference(),
-)
-entity_evidence = table(
-    "entity_evidence",
-    *run_columns(),
-    *entity_reference(),
-    *context(),
-    *chunk_reference(),
-    text("text"),
-)
-relations = table(
-    "relations",
-    *run_columns(),
-    *context(),
-    *chunk_reference(),
-    text("subject"),
-    text("relation"),
-    text("object"),
-    text("evidence"),
-    text("subject_entity"),
-    text("object_entity"),
-    Column("subject_position", String(64)),
-    Column("object_position", String(64)),
-    ForeignKeyConstraint(
-        ["run_id", "subject_position"], ["entities.run_id", "entities.position"]
-    ),
-    ForeignKeyConstraint(
-        ["run_id", "object_position"], ["entities.run_id", "entities.position"]
-    ),
-    Index("ix_relation_subject", "run_id", "subject_position"),
-    Index("ix_relation_object", "run_id", "object_position"),
-)
-extractions = table(
-    "extractions",
-    *run_columns(),
-    *context(),
-    *chunk_reference(),
-    text("source_hash"),
-    text("text_hash"),
-    number("entity_count"),
-    number("relation_count"),
-    *counts(),
-    UniqueConstraint("run_id", "chunk_id"),
-)
 fingerprints = table(
     "run_chunks",
     *run_columns(),
@@ -265,18 +195,11 @@ imports = table(
     Column("digest", String(64), primary_key=True),
     Column("collection", String(128), nullable=False),
     Column("source_version_id", ForeignKey("source_versions.id"), nullable=False),
-    Column("graph_run_id", ForeignKey("runs.id")),
     Column("analysis_run_id", ForeignKey("runs.id")),
 )
 
 # Reverse dependency order is used when publishing an updated run in a transaction.
 run_tables = (
-    entities,
-    entity_values,
-    entity_mentions,
-    entity_evidence,
-    relations,
-    extractions,
     fingerprints,
     chapters,
     chapter_chunks,

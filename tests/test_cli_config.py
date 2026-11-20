@@ -32,7 +32,6 @@ def test_cli_defaults_come_from_config() -> None:
             batch_size=3,
         ),
         search=SearchConfig(top_k=9),
-        graph=DerivationConfig(num_predict=512, retries=4),
         analysis=DerivationConfig(backend="openai"),
         openai=OpenAIConfig(generation_model="cloud-test"),
     )
@@ -53,9 +52,4 @@ def test_cli_defaults_come_from_config() -> None:
     assert search_args.collection == "books"
     assert search_args.top_k == 9
 
-    graph_args = parser.parse_args(["graph-index"])
-    assert graph_args.collection == "books"
-    assert graph_args.llm_model == "generate-test"
-    assert graph_args.num_predict == 512
-    assert graph_args.retries == 4
     assert parser.parse_args(["analyze"]).llm_model == "cloud-test"

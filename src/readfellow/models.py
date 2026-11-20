@@ -106,18 +106,9 @@ class QueryChunkFields(ReadFellowModel):
     text: str = ""
 
 
-class EvidenceGraphContext(ReadFellowModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    entities: list[str] = Field(default_factory=list)
-    relations: list[str] = Field(default_factory=list)
-
-
 class EvidenceMatch(ReadFellowModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    # Only the channels that are scored and ranked. The graph annotates the
-    # results the other two found; it never contributes a rank of its own.
     mode: Literal["vector", "fts"]
     rank: int
 
@@ -135,10 +126,9 @@ class Evidence(ReadFellowModel):
     chapter: str = ""
     text_hash: str
     text: str
-    retrieval_mode: Literal["vector", "fts", "fetch", "graph", "hybrid"]
+    retrieval_mode: Literal["vector", "fts", "fetch", "hybrid"]
     score: float | None = None
     matches: list[EvidenceMatch] = Field(default_factory=list)
-    graph_context: EvidenceGraphContext | None = None
 
 
 class ChapterBoundary(ReadFellowModel):
@@ -214,94 +204,6 @@ class DerivationSettings(ReadFellowModel):
     num_predict: int = 0
     num_ctx: int = 0
     retries: int = 0
-
-
-class GraphEvidence(ChunkContext):
-    text: str = ""
-
-
-class GraphEntity(ReadFellowModel):
-    model_config = ConfigDict(extra="forbid")
-
-    name: str
-    types: list[str] = Field(default_factory=list)
-    aliases: list[str] = Field(default_factory=list)
-    mentions: list[ChunkContext] = Field(default_factory=list)
-    evidence: list[GraphEvidence] = Field(default_factory=list)
-
-
-class GraphRelation(ChunkContext):
-    subject: str
-    relation: str
-    object: str
-    evidence: str = ""
-    subject_entity: str = ""
-    object_entity: str = ""
-
-
-class GraphExtractionRecord(ChunkContext):
-    source_hash: str = ""
-    text_hash: str = ""
-    entity_count: int = 0
-    relation_count: int = 0
-    # `rejected_count` is every item the model produced that could not be kept.
-    # `unanchored_count` is the part of it that quoted text its chunk does not
-    # contain; the remainder is a shape the parser cannot read, dominated by
-    # relations whose predicate is outside RELATION_TYPES. Only the unanchored
-    # part is a claim about extraction quality, so it is recorded rather than
-    # left to be inferred from a total that mixes the two.
-    #
-    # None on a unit written before that split — its drops are one total, and
-    # the unanchored part of them is unknown rather than zero. Every model here
-    # that aggregates these carries the same pair, and the same None.
-    rejected_count: int = 0
-    unanchored_count: int | None = None
-
-
-class GraphExtraction(ReadFellowModel):
-    entities: list[GraphEntity] = Field(default_factory=list)
-    relations: list[GraphRelation] = Field(default_factory=list)
-    # Never None: a parse is where both counts are made.
-    rejected_count: int = 0
-    unanchored_count: int = 0
-
-
-class GraphChunkFingerprint(ReadFellowModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    source_hash: str = ""
-    text_hash: str = ""
-
-
-class KnowledgeGraph(ReadFellowModel):
-    model_config = ConfigDict(extra="allow")
-
-    schema_version: int = 1
-    prompt_version: str = ""
-    collection: str = ""
-    source_path: str = ""
-    llm_model: str = ""
-    llm_endpoint: str = ""
-    response_format: str | None = None
-    extraction_settings: DerivationSettings = DerivationSettings()
-    source_chunk_hashes: dict[str, GraphChunkFingerprint] = Field(default_factory=dict)
-    created_at: str = Field(default_factory=utc_now_iso)
-    updated_at: str = Field(default_factory=utc_now_iso)
-    progress_limit: str = ""
-    selected_chunk_count: int = 0
-    processed_chunk_count: int = 0
-    entity_count: int = 0
-    relation_count: int = 0
-    rejected_count: int = 0
-    unanchored_count: int | None = None
-    entities: list[GraphEntity] = Field(default_factory=list)
-    relations: list[GraphRelation] = Field(default_factory=list)
-    extractions: list[GraphExtractionRecord] = Field(default_factory=list)
-
-
-class GraphQueryResult(ReadFellowModel):
-    entities: list[GraphEntity] = Field(default_factory=list)
-    relations: list[GraphRelation] = Field(default_factory=list)
 
 
 class CharacterMention(ChunkContext):
@@ -385,8 +287,8 @@ class OllamaGenerateRequest(ReadFellowModel):
     model: str
     prompt: str
     # A JSON schema rather than "json". Both constrain decoding, but "json" only
-    # promises the answer parses: a relation answered as a flat string instead of
-    # an object is valid JSON, and `_parse_relation` drops it. The schema is what
+    # promises the answer parses: a chapter event answered as a flat string
+    # instead of an object is valid JSON, and the parser drops it. The schema
     # makes the shape a guarantee instead of a request the prompt has to win.
     format: dict[str, Any]
     stream: bool = False

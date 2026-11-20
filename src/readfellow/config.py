@@ -56,7 +56,7 @@ class SearchConfig(ReadFellowModel):
 
 
 class DerivationConfig(ReadFellowModel):
-    """Generation limits for one derived artifact; `graph` and `analysis` differ."""
+    """Generation limits for chapter analysis."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -75,7 +75,6 @@ class ReadFellowConfig(ReadFellowModel):
     openai: OpenAIConfig = OpenAIConfig()
     indexing: IndexingConfig = IndexingConfig()
     search: SearchConfig = SearchConfig()
-    graph: DerivationConfig = DerivationConfig()
     analysis: DerivationConfig = DerivationConfig()
 
     def generation_model(self, derivation: DerivationConfig) -> str:

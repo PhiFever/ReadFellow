@@ -1,10 +1,10 @@
 # ReadFellow
 
-ReadFellow 是一个本地优先的 CLI 工作流：把长文档（主要是中文小说）切块、用 Ollama 生成 embedding、存进 zvec 本地向量库，让 agent 能按语义 / 全文 / 图谱检索出**原文段落**，并带着精确出处（`source_path:line_start-line_end`）与用户讨论。
+ReadFellow 是一个本地优先的 CLI 工作流：把长文档（主要是中文小说）切块、用 Ollama 生成 embedding、存进 zvec 本地向量库，让 agent 能按语义 / 全文检索出**原文段落**，并带着精确出处（`source_path:line_start-line_end`）与用户讨论。
 
 三条贯穿全流程的不变量：
 
-1. **源文档是唯一事实依据**。index、metadata、graph 都是派生物，派生物 stale 时 fail closed，不猜测。
+1. **源文档是唯一事实依据**。index、metadata、analysis 都是派生物，派生物 stale 时 fail closed，不猜测。
 2. **检索只是导航，原始 chunk 才是证据**。任何输出都回落到存储的 chunk 原文 + 精确出处。
 3. **防剧透优先**。一旦设定阅读进度，超出进度的文本绝不出现在输出里。
 
@@ -18,7 +18,7 @@ ReadFellow 是一个本地优先的 CLI 工作流：把长文档（主要是中�
 uv sync
 ```
 
-**MySQL** 保存图谱、章节分析和切块元数据。先在 `.env` 设置 `MYSQL_URI`（已有数据库的 SQLAlchemy URL），再初始化表；已有 JSON 结果可一次性导入：
+**MySQL** 保存章节分析和切块元数据。先在 `.env` 设置 `MYSQL_URI`（已有数据库的 SQLAlchemy URL），再初始化表；已有 JSON 结果可一次性导入：
 
 ```sh
 uv run readfellow db-init
@@ -27,15 +27,14 @@ uv run readfellow import-json --collection sample
 
 连接方式、历史版本和 DataGrip SQL 示例见 [MySQL 存储与查询](docs/mysql-storage.md)。
 
-**Ollama** 必须运行在 `config.yaml` 配置的端点上，并已拉取两个模型：
+**Ollama** 必须运行在 `config.yaml` 配置的端点上，并已拉取 embedding 模型：
 
 ```sh
 ollama serve                        # 另开一个终端
 ollama pull qwen3-embedding:8b      # embedding，4096 维
-ollama pull qwen3:8b                # 生成，供 graph-index 使用
 ```
 
-`analyze` 按 `config.yaml` 默认走云端（`analysis.backend: openai`，b.ai `qwen3.8-flash`），需要 `LLM_API_KEY`，和 `MYSQL_URI` 一样优先从环境变量读取，其次从当前目录的 `.env` 读取。`graph-index` 仍用本地 Ollama。
+`analyze` 按 `config.yaml` 默认走云端（`analysis.backend: openai`，b.ai `qwen3.8-flash`），需要 `LLM_API_KEY`，和 `MYSQL_URI` 一样优先从环境变量读取，其次从当前目录的 `.env` 读取。将 `analysis.backend` 设为 `ollama` 时，需额外拉取本地生成模型 `qwen3:8b`。
 
 自检（返回模型列表即正常；连不上会是 `503`）：
 
@@ -43,7 +42,7 @@ ollama pull qwen3:8b                # 生成，供 graph-index 使用
 curl -s http://127.0.0.1:11434/api/tags
 ```
 
-只做 `index` / `search` / `fts` / `hybrid` / `fetch` 时只需要 embedding 模型；`graph-index` 才需要本地生成模型。**跑测试不需要 Ollama**（全离线）。
+只做 `index` / `search` / `fts` / `hybrid` / `fetch` 时只需要 embedding 模型。**跑测试不需要 Ollama**（全离线）。
 
 ---
 
@@ -59,7 +58,7 @@ uv run readfellow search "尤基的父亲" --collection smoke --top-k 2
 # 3) 中文全文检索
 uv run readfellow fts "回收站镇" --collection smoke --top-k 2
 
-# 4) 融合检索（向量+全文打分，图谱标注）
+# 4) 融合检索（向量+全文打分）
 uv run readfellow hybrid "基因税" --collection smoke --top-k 3
 
 # 5) 按 id 取回单个 chunk 原文
@@ -116,27 +115,16 @@ uv run readfellow index <文档.txt> --collection sample --rebuild
 ```sh
 uv run readfellow search "要查询的问题" --collection sample --top-k 5   # 向量语义
 uv run readfellow fts    "关键词"       --collection sample --top-k 5   # zvec jieba 中文全文
-uv run readfellow hybrid "问题或关键词" --collection sample --top-k 5   # 向量+全文融合，图谱做标注
+uv run readfellow hybrid "问题或关键词" --collection sample --top-k 5   # 向量+全文融合
 ```
 
-`hybrid` 用向量和全文两路打分，融合后再用图谱标注选中的结果：
+`hybrid` 用向量和全文两路打分，融合为同一份证据列表：
 
 ```
 channels: vector=12, fts=7
-graph context: 3/5 results annotated
 ```
 
-命中项带 `matched: vector#1, fts#3`，标明它在两条打分通道里的排名；带图谱标注的还会多出 `graph entities:` 与 `graph relation:` 行。
-
-**图谱不参与打分,只做标注**。它按子串匹配查询串（见 3.5），自然语言问句几乎不可能匹配到实体名，所以曾经的图谱召回通道对真实提问长期是空的；而它能产出结果的高频实体（主角出现在过半 chunk 里）又恰恰没有区分度。标注不查询、只回答「这个 chunk 上挂着什么」，因此对任何提问都有效。
-
-标注是**给 agent 看的、有预算的摘要**，每个 chunk 最多 3 个实体 + 3 条关系：只列抽取器真正声明过的实体（只作为关系端点出现的名字不算，那一类几乎囊括了全部抽取噪声），关系要求两端都是这类实体，然后按跨越 chunk 数从少到多排序截断——覆盖半本书的名字对单个 chunk 没有信息量。**这只收窄显示**，图谱本身一条不少，`graph-query` 仍然全量作答。
-
-图谱缺失或 stale 时只丢标注，两路打分照常返回：
-
-```
-graph context: skipped (graph index not found: ...; run graph-index first)
-```
+命中项带 `matched: vector#1, fts#3`，标明它在两条打分通道里的排名。
 
 ### 3.4 `fetch` — 按 id 取回原文
 
@@ -146,30 +134,7 @@ uv run readfellow fetch <chunk-id> --collection sample
 
 打印完整原文（不截断）。三种结果：`found`、`not_found`（无此 chunk）、`outside_progress`（超出阅读进度，**不带原文**）。
 
-### 3.5 `graph-index` / `graph-query` — 知识图谱
-
-> ⚠️ 全量运行当前存在已知阻塞，见 [§6 已知问题](#6-已知问题)。
-
-```sh
-uv run readfellow graph-index --collection sample --limit 20
-uv run readfellow graph-query "向山" --collection sample
-```
-
-`graph-index` 从 MySQL 读取 chunks，对每个 chunk 调一次生成模型抽取实体/关系，写入当前运行版本。`--rebuild` 创建新 `run_id` 并保留历史；CLI 默认查询最新版本，即使其尚未完成，也不回退旧版。
-
-| 参数 | 默认 | 说明 |
-|---|---|---|
-| `--limit` | 0 | 只抽取前 N 个符合条件的 chunk |
-| `--llm-model` | 对应派生 `backend` 所指的 `generation_model` | 生成模型 |
-| `--num-predict` | `graph.num_predict` (4096) | 每 chunk 最大生成 token |
-| `--retries` | `graph.retries` (2) | 每 chunk 失败重试次数 |
-| `--rebuild` | off | 整图重建 |
-
-**抽完的 chunk 按耗时分批提交数据库事务**：距上次提交超过 30 秒（或上次提交耗时的 20 倍）就存一次，正常结束、出错或 Ctrl-C 时再存一次。进程被强杀时最多丢最近约 30 秒的抽取。重跑靠 `processed_chunk_ids` 断点续建，不会重做已提交的部分。
-
-`graph-query` 按实体名、别名或关系关键词查询；图谱只给出 chunk id 与上下文，**原文仍从对应版本的 chunks 取**。
-
-### 3.6 `analyze` — 章节级分析
+### 3.5 `analyze` — 章节级分析
 
 > ⚠️ 全量运行当前存在已知阻塞，见 [§6 已知问题](#6-已知问题)。
 
@@ -177,9 +142,16 @@ uv run readfellow graph-query "向山" --collection sample
 uv run readfellow analyze --collection sample --max-chapter 1:50
 ```
 
-按检测到的章节分组，对每个**完整章节**调一次生成模型，产出梗概、人物、事件，写入 MySQL 中独立的章节分析运行版本。参数与 `graph-index` 同（除 `--limit`，`analyze` 用 `--max-chapter` 分批）。
+按检测到的章节分组，对每个**完整章节**调一次生成模型，产出梗概、人物、事件，写入 MySQL 中独立的章节分析运行版本。`analyze` 用 `--max-chapter` 分批。
 
-`graph.concurrency` / `analysis.concurrency` 控制各自同时在途的生成请求数，默认 1；AMD 端点实测并发 6 稳定、12 会触发 429。`openai.response_format` 默认 `json_schema`，服务端不支持 schema 约束时可改用 `json_object`，靠解析校验和重试兜底。修改该设置会让已记录这个字段的派生物失效。
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `--llm-model` | `analysis.backend` 所指的 `generation_model` | 生成模型 |
+| `--num-predict` | `analysis.num_predict` (4096) | 每章最大生成 token |
+| `--retries` | `analysis.retries` (2) | 每章失败重试次数 |
+| `--rebuild` | off | 创建新 `run_id`，保留历史 |
+
+`analysis.concurrency` 控制同时在途的生成请求数，默认 1；AMD 端点实测并发 6 稳定、12 会触发 429。`openai.response_format` 默认 `json_schema`，服务端不支持 schema 约束时可改用 `json_object`，靠解析校验和重试兜底。修改该设置会让已记录这个字段的派生物失效。
 
 三条规则：
 
@@ -187,9 +159,9 @@ uv run readfellow analyze --collection sample --max-chapter 1:50
 - **最后一组永不分析**。它可能被 `index --limit` 截断，无法与完整章节区分。
 - **超出 `num_ctx` 预算的章节被跳过**并打印原因。预算 = `(num_ctx − num_predict − 600) × 1.5` 字符；`num_ctx` 取所选后端的配置；`analysis` 默认走 openai（`num_ctx: 65536`），预算为 91260 字符。
 
-**分析完的章节与 `graph-index` 一样按耗时分批提交**，正常结束、出错或 Ctrl-C 时补存一次，重跑按 `(章序号, 章标题)` 续建。
+**分析完的章节按耗时分批提交**：距上次提交超过 30 秒（或上次提交耗时的 20 倍）就存一次，正常结束、出错或 Ctrl-C 时补存一次，重跑按 `(章序号, 章标题)` 续建。
 
-### 3.7 `status` — 集合体检
+### 3.6 `status` — 集合体检
 
 ```sh
 uv run readfellow status --collection sample
@@ -197,7 +169,7 @@ uv run readfellow status --collection sample
 
 不联网、不改任何东西，回答两个问题：**现在有什么**，以及**再跑一次会发生什么**。
 
-下面是一次 `--limit 8` 冒烟索引之后的真实输出：
+下面是一次 `--limit 8` 冒烟索引之后的输出示例：
 
 ```
 collection:  sample
@@ -207,29 +179,17 @@ embedding:   qwen3-embedding:8b, dim 4096
 
 index:       8/8 docs, embedding 100% indexed
 
-graph-index: 8/8 chunks, rejected=44 (unanchored 4, unreadable 40)
-  entities   74 (declared 64.9%), relations 50
-  spread     p50=1 p90=2 max=6 chunks per entity
-  dropped    25.1% of 175 extracted items, mostly relations whose predicate is outside the vocabulary
-  unanchored 2.3% of them, the part that quoted text not in its chunk
-  silent     0/8 chunks yielded nothing
-
 analyze:     not built (4 chapters eligible)
 ```
 
 - **`index` 行读的是 zvec 自己的 `stats`**，不是 manifest。两个数字对不上就是 §6.2 那个已知问题的现场。
-- **没跑完时会多出一行 `→`，那是最该看的一行**：失效判定用**配置里当前的模型与参数**做，所以它回答的是「续建还是从头重来」（例如 `→ graph-index would resume on the remaining 1723 chunks`，stale 时则是 `would discard all ... and start over`）。别的命令遇到 stale 直接报错，`status` 是唯一负责把原因说出来还继续往下走的。
-- **诊断数字有实测参考值**（2026-07-28，赛博英雄传 + qwen3:8b 全量 2307 chunk：declared 47.0%、unanchored 3.9%、silent 1/2307）。超出范围会打 `⚠`。**换书或换模型会误报——它是提示去看一眼，不是判死。**
-  - `declared` 是**声明过的实体占比**：有类型或有引文的才算，只作为关系端点出现的名字不算（那一类几乎囊括全部噪声，也是 `hybrid` 标注唯一会显示的层）。
-  - `spread` 是每个实体跨越多少 chunk。健康形状是 p50=1：绝大多数实体只出现在一处。`max` 很大是正常的，主角本来就覆盖半本书。
-  - `dropped` 是**丢弃条目占比**，`unanchored` 是其中引文对不上原文的那部分（同一个分母）。**只有 `unanchored` 有阈值**：`dropped` 的大头是白名单在拒绝叙事谓词，那是词表的性质而不是这次跑得好坏，见 §6.1。
-  - `silent` 是**一个实体一条关系都没产出的 chunk 数**。不为 0 通常意味着 `num_predict` 太小或 prompt 坏了。
+- **没跑完时会多出一行 `→`，那是最该看的一行**：失效判定用**配置里当前的模型与参数**做，所以它回答的是「续建还是从头重来」（例如 `→ analyze would resume on the remaining 4 chapters`，stale 时则是 `would create a new version; the ... historical units remain`）。别的命令遇到 stale 直接报错，`status` 是唯一负责把原因说出来还继续往下走的。
 
 ---
 
 ## 4. 防剧透：阅读进度限制
 
-所有检索命令和两个派生命令都接受同一组进度参数：
+所有检索命令和 `analyze` 都接受同一组进度参数：
 
 | 参数 | 语义 |
 |---|---|
@@ -241,12 +201,9 @@ analyze:     not built (4 chapters eligible)
 uv run readfellow search "他的真实身份"  --collection sample --max-chapter 1:50
 uv run readfellow hybrid "武神"          --collection sample --max-chapter 1:50
 uv run readfellow fetch  <chunk-id>      --collection sample --max-chapter 1:50
-uv run readfellow graph-query "向山"     --collection sample --max-chapter 1:10
 ```
 
-进度限制在两条路径上生效：整体传给 zvec（转成过滤表达式），以及进程内逐 chunk 判定（graph、fetch 走这条）。
-
-**图谱在进度限制下会清空实体的 `aliases` 和 `types`** —— 它们是跨 chunk 聚合、没有逐值出处，保留会泄露进度之外的信息。这是刻意行为。
+进度限制在两条路径上生效：整体传给 zvec（转成过滤表达式），以及进程内逐 chunk 判定（fetch 走这条）。
 
 ---
 
@@ -257,14 +214,13 @@ indexes/<collection>/                 # zvec 数据
 metadata/<collection>/                # 一次性导入后保留的旧文件备份
 MySQL:
   source_versions / chunks           # manifest 与原文切块版本
-  runs                               # 图谱、章节分析的运行历史
-  entities / relations / ...         # 可用 SQL 联查的实体、关系与证据
+  runs                               # 章节分析的运行历史
   chapters / characters / events     # 章节分析
 ```
 
 `indexes/`、`metadata/`、`corpus/` 均不纳入版本控制。
 
-**Evidence 模型**：向量检索、全文检索、fetch、图谱查询返回同一个 `Evidence`，包含原文、chunk id、源路径、行范围、章节、chunk 序号、字节范围、text hash、检索模式和可选分数。图谱查询把命中的实体/关系作为 `graph_context` 附加，证据本身仍是存储的原文 chunk。
+**Evidence 模型**：向量检索、全文检索、fetch 返回同一个 `Evidence`，包含原文、chunk id、源路径、行范围、章节、chunk 序号、字节范围、text hash、检索模式和可选分数。
 
 ---
 
@@ -275,16 +231,16 @@ MySQL:
 单个条目抽不出来时会被**丢弃并计数**，其余照常入库。丢弃分两种成因，按成因分开报：
 
 ```
-[    2/20] extracting graph from bdd935754e17_000001
-        entities=12, relations=12, rejected=5 (unanchored 1, unreadable 4)
+[    2/20] analyzing 第一章 开始
+        characters=2, events=3, rejected=1 (unanchored 1, unreadable 0)
 ```
 
-- **unanchored** —— 模型给的 evidence 不是所属 chunk 原文的精确子串（多为把代词换成人名这类改写）。放宽匹配等于伪造出处，所以按设计丢弃。这是唯一一个"模型没读好"的信号，实测 **3.9%**（2307 chunk 全量）。显著高于此值才值得查模型或 prompt。
-- **unreadable** —— 条目根本读不出形状：关系谓词不在 `RELATION_TYPES` 白名单内、实体没有名字、字段缺失。其中**绝大部分是白名单拒绝**（全量实测 20.7%），拒掉的是 `怀疑`／`担心`／`回答` 这类叙事长尾谓词。这是封闭谓词表的**设计成本，不是缺陷**：调采样参数、改 prompt 都不会让它下降。
+- **unanchored** —— 模型给的 evidence 不是所属 chunk 原文的精确子串（多为把代词换成人名这类改写）。放宽匹配等于伪造出处，所以按设计丢弃。这表示引文未能锚定到原文。
+- **unreadable** —— 条目根本读不出形状：人物没有名字、事件没有描述、字段缺失。
 
-两者相加就是 `rejected=N`，保存在 MySQL 运行及抽取记录的 `rejected_count`，其中 unanchored 那部分单独落在 `unanchored_count`。**总数偏高本身不说明问题，要看拆开后的 unanchored。**
+两者相加就是 `rejected=N`，保存在 MySQL 运行及章节记录的 `rejected_count`，其中 unanchored 那部分单独落在 `unanchored_count`。**总数偏高本身不说明问题，要看拆开后的 unanchored。**
 
-这意味着图谱与分析是**真实但不完整**的子集：留下的每一条都能回落到原文精确子串，但模型引错的、以及词表不收的那部分不会出现。
+这意味着分析中的人物和事件是**真实但不完整**的子集：留下的每一条都能回落到原文精确子串，但模型引错的、字段缺失的条目不会出现。
 
 2026-07-27 之前，一条引文对不上会耗尽重试并终止整个 run，全量因此跑不完。根因排查与修复见 [`docs/archive/derivation-hardening-plan.md`](docs/archive/derivation-hardening-plan.md)，执行步骤与成本基线见 [`docs/mvp-runbook.md`](docs/mvp-runbook.md)。
 
@@ -292,7 +248,7 @@ MySQL:
 
 embedding 中途失败会留下 metadata 完整而 collection 不完整的状态。用 `--rebuild` 重跑可恢复。**`status` 的 `index:` 行能检出它**（zvec 报的 doc 数少于 manifest 承诺的 chunk 数），但写入本身仍不是两阶段发布。
 
-派生物使用 MySQL 事务：每个单元的实体、关系或章节结果与处理记录一起提交，读取时不会看到只写了一半的单元。
+派生物使用 MySQL 事务：每个单元的章节结果与处理记录一起提交，读取时不会看到只写了一半的单元。
 
 ### 6.3 换模型 / 换切块参数必须 `--rebuild`
 
@@ -311,9 +267,8 @@ embedding 中途失败会留下 metadata 完整而 collection 不完整的状态
 | `chunk metadata is stale (source path changed)` | 源文档被移动或改名，重新索引 |
 | 源文件 hash 不符 | 源文档被修改过。源文档不可变是第一不变量，必须重新索引 |
 | `fts` 查不到内容但 `search` 正常 | 索引时用了 `--no-optimize`，重新索引且不要跳过 optimize |
-| 输出里 `rejected=N` 偏高 | 先看括号里的 unanchored：高才是模型问题，unreadable 高是词表在拒绝叙事谓词，见 §6.1 |
-| `graph-query` 报 stale | prompt/schema 版本、生成模型或 chunk hash 变了，重跑 `graph-index --rebuild` |
-| 不确定重跑会续建还是重来 | `readfellow status`，看 `graph-index:` 下面那行 `→` |
+| 输出里 `rejected=N` 偏高 | 先看括号里的 unanchored：高才是模型问题，unreadable 高说明条目缺字段或形状不对，见 §6.1 |
+| 不确定重跑会续建还是重来 | `readfellow status`，看 `analyze:` 下面那行 `→` |
 | `status` 的 `index:` 两个数字不等 | 索引没跑完（§6.2），`index --rebuild` |
 
 ---
@@ -322,7 +277,7 @@ embedding 中途失败会留下 metadata 完整而 collection 不完整的状态
 
 ```sh
 uv run pytest                                   # 全量测试（约 3s，完全离线）
-uv run pytest tests/test_graph.py -k alias -q   # 单文件 / 单用例
+uv run pytest tests/test_analysis.py -q         # 单文件 / 单用例
 uvx ruff format . && uvx ruff check .           # 格式化与 lint，两者当前均 clean
 ```
 

@@ -85,13 +85,9 @@ def test_cli_fts_then_fetch_prints_persisted_source_evidence(
     capsys,
     artifacts,
 ) -> None:
-    backup = tmp_path / "metadata" / "books" / "graph.json"
-    backup.parent.mkdir(parents=True)
-    backup.write_text("legacy backup", encoding="utf-8")
     index_dir, metadata_dir, source, early = _index_two_chapters(
         tmp_path, artifacts, "第二章 之后\n另一位武神出现。"
     )
-    assert backup.read_text(encoding="utf-8") == "legacy backup"
 
     fts_exit = main(
         [
