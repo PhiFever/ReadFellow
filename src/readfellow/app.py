@@ -1,67 +1,22 @@
 from __future__ import annotations
 
-import threading
 import time
 from collections import defaultdict
-from collections.abc import Callable, Generator, Iterator
-from concurrent.futures import Future
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from queue import Empty, Queue
 from typing import Any, Literal
 
-from .analysis import (
-    ANALYSIS_RESPONSE_SCHEMA,
-    ChapterGroup,
-    analysis_staleness_reason,
-    build_chapter_prompt,
-    chapter_body,
-    chapter_char_budget,
-    complete_chapters,
-    empty_analysis,
-    filter_chapter,
-    group_chapters,
-    merge_chapter,
-    parse_chapter_analysis,
-    processed_chapter_keys,
-    update_analysis_metadata,
-)
-from .artifacts import ArtifactStore, ImportResult, StoredRun, open_artifacts
-from .chunking import CHUNKER_VERSION, chunk_document, sha256_file
-from .config import DerivationConfig, ReadFellowConfig
-from .derivation import (
-    JsonGenerator,
-    derivation_status,
-    generate_with_retry,
-)
-from .models import (
-    ChapterAnalysis,
-    Chunk,
-    DerivationSettings,
-    Evidence,
-    EvidenceMatch,
-    IndexManifest,
-    ProgressFilter,
-)
-from .ollama import OllamaEmbedder, OllamaGenerator
-from .openai_compat import OpenAICompatGenerator
-from .progress import build_progress_filter, source_from_manifest
-from .store import (
-    ChunkStore,
-    ZvecChunkStore,
-    collection_path,
-)
+from .chunking import CHUNKER_VERSION, chunk_document, read_chapters, sha256_file
+from .config import ReadFellowConfig
+from .library import SqliteChunkStore
+from .models import Evidence, EvidenceMatch, IndexManifest, ProgressFilter
+from .ollama import OllamaEmbedder
+from .progress import build_progress_filter
 
 RRF_K = 60
 FAN_OUT_MULTIPLIER = 10
-# A derivation saves its run once this long has passed since the last save, or
-# this many times the last save's duration if that is longer. Every save writes
-# the whole document, so saving per unit grows quadratically with the book;
-# spacing saves in time caps their share near 1/SAVE_COST_RATIO at any size.
-SAVE_INTERVAL_SECONDS = 30.0
-SAVE_COST_RATIO = 20
-
 ChannelMode = Literal["vector", "fts"]
 
 
@@ -131,82 +86,25 @@ class HybridSearchResult:
 
 @dataclass(frozen=True)
 class IndexReport:
-    collection_path: Path
     expected_doc_count: int
     stored_doc_count: int
-    index_completeness: dict[str, float]
-    error: str | None = None
 
     @property
     def is_complete(self) -> bool:
-        """Whether the collection really holds what the metadata promises.
-
-        Indexing publishes the metadata before the embeddings, so a run killed
-        halfway leaves a manifest claiming chunks the collection never got.
-        """
-        return (
-            self.error is None
-            and self.stored_doc_count == self.expected_doc_count
-            and all(share >= 1.0 for share in self.index_completeness.values())
-        )
-
-
-@dataclass(frozen=True)
-class DerivationReport:
-    run_id: int | None
-    exists: bool
-    processed: int
-    total: int
-    rejected_count: int = 0
-    unanchored_count: int | None = None
-    stale_reason: str | None = None
-    error: str | None = None
+        return self.stored_doc_count == self.expected_doc_count
 
 
 @dataclass(frozen=True)
 class CollectionStatus:
     collection: str
     manifest: IndexManifest
+    chapter_count: int
     source_error: str | None
     index: IndexReport
-    analysis: DerivationReport
 
 
-@dataclass(frozen=True)
-class AnalysisBuildOptions:
-    llm_model: str | None = None
-    num_predict: int | None = None
-    retries: int | None = None
-    rebuild: bool = False
-
-
-@dataclass(frozen=True)
-class AnalysisBuildEvent:
-    stage: str
-    progress: ProgressFilter | None = None
-    index: int = 0
-    total: int = 0
-    chapter_title: str = ""
-    attempt: int = 0
-    retries: int = 0
-    error: str = ""
-    reason: str = ""
-    character_count: int = 0
-    event_count: int = 0
-    rejected_count: int = 0
-    unanchored_count: int | None = None
-
-
-@dataclass(frozen=True)
-class AnalysisBuildResult:
-    collection: str
-    run_id: int
-    processed_chapter_count: int
-    selected_chapter_count: int
-    status: str
-    progress: ProgressFilter
-    chapters: list[ChapterAnalysis]
-    skipped: list[tuple[str, str]]
+def _library_path(config: ReadFellowConfig, collection: str) -> Path:
+    return config.paths.library_dir / f"{collection}.db"
 
 
 def index_document(
@@ -216,13 +114,14 @@ def index_document(
     *,
     options: IndexDocumentOptions | None = None,
     on_progress: Callable[[IndexProgressEvent], None] | None = None,
-    store: ChunkStore | None = None,
-    artifacts: ArtifactStore | None = None,
 ) -> IndexDocumentResult:
-    artifacts = artifacts or open_artifacts(config)
     options = options or IndexDocumentOptions()
     chunk_chars = options.chunk_chars or config.indexing.chunk_chars
-    overlap_chars = options.overlap_chars or config.indexing.overlap_chars
+    overlap_chars = (
+        config.indexing.overlap_chars
+        if options.overlap_chars is None
+        else options.overlap_chars
+    )
     batch_size = options.batch_size or config.indexing.batch_size
 
     relative_source = _relative_source_path(source)
@@ -237,6 +136,7 @@ def index_document(
     if not chunks:
         raise ValueError("no chunks produced")
 
+    chapters = read_chapters(source)
     embedder = OllamaEmbedder(
         base_url=config.ollama.base_url,
         model=config.ollama.embedding_model,
@@ -246,66 +146,135 @@ def index_document(
         on_progress,
         IndexProgressEvent(stage="probe", model=config.ollama.embedding_model),
     )
-    probe_vector = embedder.embed_one(chunks[0].text)
+    probe_vector = embedder.embed_one("embedding dimension probe")
     dimension = len(probe_vector)
 
-    store = store or ZvecChunkStore.open_for_write(
-        index_dir=config.paths.index_dir,
-        metadata_dir=config.paths.metadata_dir,
-        collection=collection,
-        dimension=dimension,
-        rebuild=options.rebuild,
-    )
-
-    manifest = IndexManifest(
-        collection=collection,
-        collection_path=str(collection_path(config.paths.index_dir, collection)),
-        source_path=relative_source,
-        model=config.ollama.embedding_model,
-        embedding_dimension=dimension,
-        chunk_count=len(chunks),
-        chunk_chars=chunk_chars,
-        overlap_chars=overlap_chars,
-        chunker_version=CHUNKER_VERSION,
-    )
-    artifacts.write_source(manifest, chunks)
-
-    start = time.monotonic()
-    inserted = 0
-    skipped = 0
-    for offset in range(0, len(chunks), batch_size):
-        batch = chunks[offset : offset + batch_size]
-        outcome = store.upsert(
-            batch,
+    path = _library_path(config, collection)
+    with SqliteChunkStore.open(path, write=True, rebuild=options.rebuild) as store:
+        manifest = IndexManifest(
+            source_hash=chunks[0].source_hash,
+            source_path=relative_source,
             model=config.ollama.embedding_model,
-            embed=embedder.embed,
+            embedding_dimension=dimension,
+            chunk_count=len(chunks),
+            chunk_chars=chunk_chars,
+            overlap_chars=overlap_chars,
+            chunker_version=CHUNKER_VERSION,
         )
-        inserted += outcome.written
-        skipped += outcome.skipped
-        elapsed = time.monotonic() - start
-        _emit(
-            on_progress,
-            IndexProgressEvent(
-                stage="batch",
-                processed=offset + len(batch),
-                total=len(chunks),
-                inserted=inserted,
-                skipped=skipped,
-                rate=inserted / elapsed if elapsed else 0,
-                skipped_existing=outcome.written == 0,
-            ),
+        store.prepare(manifest, chapters)
+
+        start = time.monotonic()
+        inserted = 0
+        skipped = 0
+        for offset in range(0, len(chunks), batch_size):
+            batch = chunks[offset : offset + batch_size]
+            outcome = store.upsert(
+                batch,
+                model=config.ollama.embedding_model,
+                embed=embedder.embed,
+            )
+            inserted += outcome.written
+            skipped += outcome.skipped
+            elapsed = time.monotonic() - start
+            _emit(
+                on_progress,
+                IndexProgressEvent(
+                    stage="batch",
+                    processed=offset + len(batch),
+                    total=len(chunks),
+                    inserted=inserted,
+                    skipped=skipped,
+                    rate=inserted / elapsed if elapsed else 0,
+                    skipped_existing=outcome.written == 0,
+                ),
+            )
+
+        if options.optimize:
+            _emit(on_progress, IndexProgressEvent(stage="optimize"))
+        store.commit(optimize=options.optimize)
+        return IndexDocumentResult(
+            collection=collection,
+            chunk_count=len(chunks),
+            inserted=inserted,
+            skipped=skipped,
+            collection_path=path,
         )
 
-    if options.optimize:
-        _emit(on_progress, IndexProgressEvent(stage="optimize"))
-    store.commit(optimize=options.optimize)
-    return IndexDocumentResult(
-        collection=collection,
-        chunk_count=len(chunks),
-        inserted=inserted,
-        skipped=skipped,
-        collection_path=collection_path(config.paths.index_dir, collection),
+
+@dataclass(frozen=True)
+class _IndexedBook:
+    store: SqliteChunkStore
+    manifest: IndexManifest
+    progress: ProgressFilter
+    chapter_count: int
+    source_error: str | None
+
+
+@contextmanager
+def _read_collection(
+    config: ReadFellowConfig,
+    collection: str,
+    progress: ProgressLimit | None = None,
+    *,
+    report_errors: bool = False,
+) -> Iterator[_IndexedBook]:
+    path = _library_path(config, collection)
+    with SqliteChunkStore.open(path) as store:
+        manifest = store.manifest()
+        if manifest is None:
+            raise RuntimeError(
+                f"collection has no book: {path}; run the index command first"
+            )
+        chapters = store.chapters()
+        error = None
+        source = Path(manifest.source_path)
+        if manifest.chunker_version != CHUNKER_VERSION:
+            error = (
+                f"chunk metadata was produced by chunker version {manifest.chunker_version} "
+                f"(current {CHUNKER_VERSION}); run index --rebuild"
+            )
+        else:
+            try:
+                current_hash = sha256_file(source)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                if not report_errors:
+                    raise
+                error = str(exc)
+            else:
+                if current_hash != manifest.source_hash:
+                    error = "chunk metadata is stale (source file hash changed); run index --rebuild"
+        if error and not report_errors:
+            raise RuntimeError(error)
+        limit = build_progress_filter(
+            chapters=chapters,
+            source=manifest.source_path,
+            **asdict(progress or ProgressLimit()),
+        )
+        yield _IndexedBook(store, manifest, limit, len(chapters), error)
+
+
+def collection_status(config: ReadFellowConfig, collection: str) -> CollectionStatus:
+    with _read_collection(config, collection, report_errors=True) as book:
+        return CollectionStatus(
+            collection,
+            book.manifest,
+            book.chapter_count,
+            book.source_error,
+            IndexReport(book.manifest.chunk_count, book.store.stats().doc_count),
+        )
+
+
+def _query_vector(
+    config: ReadFellowConfig, manifest: IndexManifest, query: str
+) -> list[float]:
+    embedder = OllamaEmbedder(
+        base_url=config.ollama.base_url,
+        model=manifest.model,
+        keep_alive=config.ollama.keep_alive,
     )
+    return embedder.embed_one(query)
 
 
 def semantic_search(
@@ -315,26 +284,18 @@ def semantic_search(
     *,
     top_k: int | None = None,
     progress: ProgressLimit | None = None,
-    store: ChunkStore | None = None,
-    artifacts: ArtifactStore | None = None,
 ) -> SearchResult:
-    artifacts = artifacts or open_artifacts(config)
-    manifest, progress_filter = _load_manifest(collection, progress, artifacts)
-    store = store or _open_store(config, collection)
-    embedder = OllamaEmbedder(
-        base_url=config.ollama.base_url,
-        model=manifest.model or config.ollama.embedding_model,
-        keep_alive=config.ollama.keep_alive,
-    )
-    vector = embedder.embed_one(query)
-    return SearchResult(
-        progress=progress_filter,
-        evidence=store.search_vector(
-            vector,
-            top_k=top_k or config.search.top_k,
-            progress=progress_filter,
-        ),
-    )
+    with _read_collection(config, collection, progress) as book:
+        store = book.store
+        vector = _query_vector(config, book.manifest, query)
+        return SearchResult(
+            progress=book.progress,
+            evidence=store.search_vector(
+                vector,
+                top_k=top_k or config.search.top_k,
+                progress=book.progress,
+            ),
+        )
 
 
 def fts_search(
@@ -344,20 +305,17 @@ def fts_search(
     *,
     top_k: int | None = None,
     progress: ProgressLimit | None = None,
-    store: ChunkStore | None = None,
-    artifacts: ArtifactStore | None = None,
 ) -> SearchResult:
-    artifacts = artifacts or open_artifacts(config)
-    _manifest, progress_filter = _load_manifest(collection, progress, artifacts)
-    store = store or _open_store(config, collection)
-    return SearchResult(
-        progress=progress_filter,
-        evidence=store.search_fts(
-            query,
-            top_k=top_k or config.search.top_k,
-            progress=progress_filter,
-        ),
-    )
+    with _read_collection(config, collection, progress) as book:
+        store = book.store
+        return SearchResult(
+            progress=book.progress,
+            evidence=store.search_fts(
+                query,
+                top_k=top_k or config.search.top_k,
+                progress=book.progress,
+            ),
+        )
 
 
 def fetch_chunk(
@@ -366,399 +324,27 @@ def fetch_chunk(
     collection: str,
     *,
     progress: ProgressLimit | None = None,
-    store: ChunkStore | None = None,
-    artifacts: ArtifactStore | None = None,
 ) -> FetchChunkResult:
-    artifacts = artifacts or open_artifacts(config)
-    _manifest, progress_filter = _load_manifest(collection, progress, artifacts)
-    store = store or _open_store(config, collection)
-    evidence = store.fetch(chunk_id)
-    if evidence is None:
+    with _read_collection(config, collection, progress) as book:
+        store = book.store
+        evidence = store.fetch(chunk_id)
+        if evidence is None:
+            return FetchChunkResult(
+                progress=book.progress,
+                status="not_found",
+                evidence=None,
+            )
+        if not book.progress.allows(evidence):
+            return FetchChunkResult(
+                progress=book.progress,
+                status="outside_progress",
+                evidence=None,
+            )
         return FetchChunkResult(
-            progress=progress_filter,
-            status="not_found",
-            evidence=None,
+            progress=book.progress,
+            status="found",
+            evidence=evidence,
         )
-    if not progress_filter.allows(evidence):
-        return FetchChunkResult(
-            progress=progress_filter,
-            status="outside_progress",
-            evidence=None,
-        )
-    return FetchChunkResult(
-        progress=progress_filter,
-        status="found",
-        evidence=evidence,
-    )
-
-
-def _generate_in_order[Unit, Parsed](
-    generator: JsonGenerator,
-    units: list[Unit],
-    request: Callable[[Unit], tuple[str, Callable[[str], Parsed], str]],
-    *,
-    schema: dict[str, Any],
-    retries: int,
-    concurrency: int,
-) -> Generator[tuple[Parsed | RuntimeError, list[tuple[int, str]]], None, None]:
-    """Generate concurrently, yielding answers and retry messages in input order.
-
-    Daemon threads let an interrupted build exit without waiting for in-flight
-    answers it would discard anyway. Workers never write to the database, so
-    terminating them with the process is safe.
-    """
-    queue: Queue[tuple[Unit, Future]] = Queue()
-    futures = [Future() for _ in units]
-    for unit, future in zip(units, futures):
-        queue.put((unit, future))
-    stop = threading.Event()
-
-    def extract(unit: Unit) -> tuple[Parsed | RuntimeError, list[tuple[int, str]]]:
-        prompt, parse, label = request(unit)
-        retry_events: list[tuple[int, str]] = []
-        try:
-            result = generate_with_retry(
-                generator,
-                prompt,
-                parse,
-                schema=schema,
-                retries=retries,
-                label=label,
-                on_retry=lambda attempt, exc: retry_events.append((attempt, str(exc))),
-            )
-        except RuntimeError as exc:
-            return exc, retry_events
-        return result, retry_events
-
-    def worker() -> None:
-        while not stop.is_set():
-            try:
-                unit, future = queue.get_nowait()
-            except Empty:
-                return
-            try:
-                future.set_result(extract(unit))
-            except BaseException as exc:  # noqa: BLE001 -- else the caller waits forever
-                future.set_exception(exc)
-
-    try:
-        for _ in range(min(concurrency, len(units))):
-            threading.Thread(target=worker, daemon=True).start()
-        for future in futures:
-            yield future.result()
-    finally:
-        stop.set()
-
-
-def build_analysis(
-    config: ReadFellowConfig,
-    collection: str,
-    *,
-    progress: ProgressLimit | None = None,
-    options: AnalysisBuildOptions | None = None,
-    on_progress: Callable[[AnalysisBuildEvent], None] | None = None,
-    generator: JsonGenerator | None = None,
-    artifacts: ArtifactStore | None = None,
-) -> AnalysisBuildResult:
-    artifacts = artifacts or open_artifacts(config)
-    options = options or AnalysisBuildOptions()
-    source_id, manifest, all_chunks, progress_filter = _load_indexed_source(
-        config, collection, progress, artifacts
-    )
-
-    groups = group_chapters(all_chunks)
-    selected = [
-        group
-        for group in complete_chapters(groups)
-        if all(progress_filter.allows(chunk) for chunk in group.chunks)
-    ]
-
-    llm_model, llm_endpoint, response_format, settings = _generation_plan(
-        config,
-        config.analysis,
-        llm_model=options.llm_model,
-        num_predict=options.num_predict,
-        retries=options.retries,
-    )
-
-    run, rebuilt = artifacts.prepare(
-        source_id,
-        empty_analysis(
-            collection=collection,
-            manifest=manifest,
-            llm_model=llm_model,
-            llm_endpoint=llm_endpoint,
-            response_format=response_format,
-            settings=settings,
-        ),
-        stale=lambda stored: analysis_staleness_reason(
-            stored,
-            groups,
-            collection=collection,
-            source_path=manifest.source_path,
-            llm_model=llm_model,
-            llm_endpoint=llm_endpoint,
-            response_format=response_format,
-            settings=settings,
-        ),
-        rebuild=options.rebuild,
-    )
-
-    document = run.document
-    update_analysis_metadata(
-        document,
-        collection=collection,
-        manifest=manifest,
-        llm_model=llm_model,
-        llm_endpoint=llm_endpoint,
-        response_format=response_format,
-        settings=settings,
-        progress=progress_filter,
-        selected_chapter_count=len(selected),
-    )
-    artifacts.save(run)
-    processed = processed_chapter_keys(document)
-    budget = chapter_char_budget(
-        num_ctx=settings.num_ctx, num_predict=settings.num_predict
-    )
-    pending: list[ChapterGroup] = []
-    skipped: list[tuple[str, str]] = []
-    for group in selected:
-        if (group.index, group.title) in processed:
-            continue
-        size = len(chapter_body(group))
-        if budget and size > budget:
-            skipped.append(
-                (group.title, f"chapter is too long for num_ctx ({size} > {budget})")
-            )
-            continue
-        pending.append(group)
-
-    _emit(
-        on_progress,
-        AnalysisBuildEvent(
-            stage="selected", progress=progress_filter, total=len(selected)
-        ),
-    )
-    for title, reason in skipped:
-        _emit(
-            on_progress,
-            AnalysisBuildEvent(stage="skipped", chapter_title=title, reason=reason),
-        )
-
-    if generator is None:
-        generator = _default_generator(
-            config, config.analysis, llm_model=llm_model, settings=settings
-        )
-
-    checkpoint = _Checkpoint(artifacts, run)
-
-    def request(
-        group: ChapterGroup,
-    ) -> tuple[str, Callable[[str], ChapterAnalysis], str]:
-        return (
-            build_chapter_prompt(group),
-            lambda raw: parse_chapter_analysis(raw, group),
-            f"failed to analyze chapter {group.title}",
-        )
-
-    results = _generate_in_order(
-        generator,
-        pending,
-        request,
-        schema=ANALYSIS_RESPONSE_SCHEMA,
-        retries=settings.retries,
-        concurrency=config.analysis.concurrency,
-    )
-    try:
-        for index, group in enumerate(pending, start=1):
-            _emit(
-                on_progress,
-                AnalysisBuildEvent(
-                    stage="analyzing",
-                    index=index,
-                    total=len(pending),
-                    chapter_title=group.title,
-                ),
-            )
-            analysis, retries = next(results)
-            for attempt, error in retries:
-                _emit(
-                    on_progress,
-                    AnalysisBuildEvent(
-                        stage="retry",
-                        index=index,
-                        total=len(pending),
-                        chapter_title=group.title,
-                        attempt=attempt,
-                        retries=settings.retries,
-                        error=error,
-                    ),
-                )
-            if isinstance(analysis, RuntimeError):
-                raise analysis
-            with checkpoint.unit():
-                merge_chapter(document, analysis, group)
-                update_analysis_metadata(
-                    document,
-                    collection=collection,
-                    manifest=manifest,
-                    llm_model=llm_model,
-                    llm_endpoint=llm_endpoint,
-                    response_format=response_format,
-                    settings=settings,
-                    progress=progress_filter,
-                    selected_chapter_count=len(selected),
-                )
-            _emit(
-                on_progress,
-                AnalysisBuildEvent(
-                    stage="analyzed",
-                    index=index,
-                    total=len(pending),
-                    chapter_title=group.title,
-                    character_count=len(analysis.characters),
-                    event_count=len(analysis.events),
-                    rejected_count=analysis.rejected_count,
-                    unanchored_count=analysis.unanchored_count,
-                ),
-            )
-    finally:
-        results.close()
-        checkpoint.flush()
-
-    update_analysis_metadata(
-        document,
-        collection=collection,
-        manifest=manifest,
-        llm_model=llm_model,
-        llm_endpoint=llm_endpoint,
-        response_format=response_format,
-        settings=settings,
-        progress=progress_filter,
-        selected_chapter_count=len(selected),
-    )
-    artifacts.save(run)
-
-    chunks_by_id = {chunk.id: chunk for chunk in all_chunks}
-    chapters = [
-        filtered
-        for filtered in (
-            filter_chapter(chapter, chunks_by_id, progress_filter)
-            for chapter in document.chapters
-        )
-        if filtered is not None
-    ]
-    return AnalysisBuildResult(
-        collection=collection,
-        run_id=run.id,
-        processed_chapter_count=document.processed_chapter_count,
-        selected_chapter_count=document.selected_chapter_count,
-        status=derivation_status(
-            selected=len(selected), pending=len(pending), rebuilt=rebuilt
-        ),
-        progress=progress_filter,
-        chapters=chapters,
-        skipped=skipped,
-    )
-
-
-def collection_status(
-    config: ReadFellowConfig,
-    collection: str,
-    *,
-    store: ChunkStore | None = None,
-    artifacts: ArtifactStore | None = None,
-) -> CollectionStatus:
-    """What the collection holds and what a rebuild would do to it, changing nothing.
-
-    Every other entry fails closed the moment a derivative is stale. This is the
-    one that has to say so instead, so each check that would otherwise raise is
-    caught and reported. The staleness questions are asked with the *configured*
-    model and settings, to report whether analyze would resume or start over.
-    """
-    artifacts = artifacts or open_artifacts(config)
-    _, manifest, chunks = artifacts.read_source(collection)
-    try:
-        _validate_chunk_metadata_source(manifest, _source_identities(chunks))
-        source_error = None
-    except (RuntimeError, FileNotFoundError) as exc:
-        source_error = str(exc)
-
-    groups = complete_chapters(group_chapters(chunks))
-    analysis_run, analysis_error = _read_derivation(
-        lambda: artifacts.latest(collection, "analysis")
-    )
-    analysis = analysis_run.document if analysis_run else None
-    analysis_model, analysis_endpoint, analysis_format, analysis_settings = (
-        _generation_plan(
-            config, config.analysis, llm_model=None, num_predict=None, retries=None
-        )
-    )
-    analysis_report = DerivationReport(
-        run_id=analysis_run.id if analysis_run else None,
-        exists=analysis is not None,
-        processed=analysis.processed_chapter_count if analysis else 0,
-        total=len(groups),
-        rejected_count=analysis.rejected_count if analysis else 0,
-        unanchored_count=analysis.unanchored_count if analysis else 0,
-        stale_reason=analysis_staleness_reason(
-            analysis,
-            groups,
-            collection=collection,
-            source_path=manifest.source_path,
-            llm_model=analysis_model,
-            llm_endpoint=analysis_endpoint,
-            response_format=analysis_format,
-            settings=analysis_settings,
-        )
-        if analysis
-        else None,
-        error=analysis_error,
-    )
-
-    return CollectionStatus(
-        collection=collection,
-        manifest=manifest,
-        source_error=source_error,
-        index=_index_report(config, collection, manifest, store),
-        analysis=analysis_report,
-    )
-
-
-def _index_report(
-    config: ReadFellowConfig,
-    collection: str,
-    manifest: IndexManifest,
-    store: ChunkStore | None,
-) -> IndexReport:
-    path = collection_path(config.paths.index_dir, collection)
-    try:
-        stats = (store or _open_store(config, collection)).stats()
-    except (FileNotFoundError, RuntimeError, ValueError) as exc:
-        return IndexReport(
-            collection_path=path,
-            expected_doc_count=manifest.chunk_count,
-            stored_doc_count=0,
-            index_completeness={},
-            error=str(exc),
-        )
-    return IndexReport(
-        collection_path=path,
-        expected_doc_count=manifest.chunk_count,
-        stored_doc_count=stats.doc_count,
-        index_completeness=stats.index_completeness,
-    )
-
-
-def _read_derivation(
-    read: Callable[[], StoredRun | None],
-) -> tuple[StoredRun | None, str | None]:
-    """The stored document, or why it cannot be reported on."""
-    try:
-        return read(), None
-    except (ValueError, OSError) as exc:
-        return None, str(exc)
 
 
 def hybrid_search(
@@ -768,179 +354,27 @@ def hybrid_search(
     *,
     top_k: int | None = None,
     progress: ProgressLimit | None = None,
-    store: ChunkStore | None = None,
-    artifacts: ArtifactStore | None = None,
 ) -> HybridSearchResult:
-    artifacts = artifacts or open_artifacts(config)
-    limit = top_k or config.search.top_k
-    fan_out = limit * FAN_OUT_MULTIPLIER
-    store = store or _open_store(config, collection)
-
-    vector_result = semantic_search(
-        config,
-        query,
-        collection,
-        top_k=fan_out,
-        progress=progress,
-        store=store,
-        artifacts=artifacts,
-    )
-    fts_result = fts_search(
-        config,
-        query,
-        collection,
-        top_k=fan_out,
-        progress=progress,
-        store=store,
-        artifacts=artifacts,
-    )
-
-    channels: list[tuple[ChannelMode, list[Evidence]]] = [
-        ("vector", vector_result.evidence),
-        ("fts", fts_result.evidence),
-    ]
-    evidence = _fuse_channels(channels)[:limit]
-    return HybridSearchResult(
-        progress=vector_result.progress,
-        channels=[
-            ChannelStatus(mode=mode, candidates=len(items)) for mode, items in channels
-        ],
-        evidence=evidence,
-    )
-
-
-def _open_store(config: ReadFellowConfig, collection: str) -> ChunkStore:
-    return ZvecChunkStore.open_for_read(
-        index_dir=config.paths.index_dir, collection=collection
-    )
-
-
-def progress_filter_from_limit(
-    progress: ProgressLimit | None,
-    *,
-    manifest: IndexManifest | None,
-) -> ProgressFilter:
-    progress = progress or ProgressLimit()
-    return build_progress_filter(
-        manifest=manifest,
-        max_chapter=progress.max_chapter,
-        max_line=progress.max_line,
-        max_chunk_index=progress.max_chunk_index,
-    )
-
-
-def _load_indexed_source(
-    config: ReadFellowConfig,
-    collection: str,
-    progress: ProgressLimit | None,
-    artifacts: ArtifactStore,
-) -> tuple[int, IndexManifest, list[Chunk], ProgressFilter]:
-    """The manifest, chunks and progress filter a derivation reads the corpus through.
-
-    The chunks are checked against the source file here, so no path that reaches
-    the stored chunks can skip that check.
-    """
-    source_id, manifest, chunks = artifacts.read_source(collection)
-    _validate_chunk_metadata_source(manifest, _source_identities(chunks))
-    return (
-        source_id,
-        manifest,
-        chunks,
-        progress_filter_from_limit(progress, manifest=manifest),
-    )
-
-
-def _load_manifest(
-    collection: str,
-    progress: ProgressLimit | None,
-    artifacts: ArtifactStore,
-) -> tuple[IndexManifest, ProgressFilter]:
-    """The manifest and progress filter a search reads the index through.
-
-    The same source-file check as `_load_indexed_source`, without the chunk text:
-    stored line ranges only mean something while the source is unchanged.
-    """
-    _, manifest, identities = artifacts.read_manifest(collection)
-    _validate_chunk_metadata_source(manifest, identities)
-    return manifest, progress_filter_from_limit(progress, manifest=manifest)
-
-
-def _source_identities(chunks: list[Chunk]) -> set[tuple[str, str]]:
-    return {(chunk.source_path, chunk.source_hash) for chunk in chunks}
-
-
-def _default_generator(
-    config: ReadFellowConfig,
-    derivation: DerivationConfig,
-    *,
-    llm_model: str,
-    settings: DerivationSettings,
-) -> JsonGenerator:
-    if derivation.backend == "openai":
-        return OpenAICompatGenerator(
-            base_url=config.openai.base_url,
-            model=llm_model,
-            settings=settings,
-            response_format=config.openai.response_format,
-        )
-    return OllamaGenerator(
-        base_url=config.ollama.base_url,
-        model=llm_model,
-        keep_alive=config.ollama.keep_alive,
-        settings=settings,
-    )
-
-
-def _generation_plan(
-    config: ReadFellowConfig,
-    derivation: DerivationConfig,
-    *,
-    llm_model: str | None,
-    num_predict: int | None,
-    retries: int | None,
-) -> tuple[str, str, str, DerivationSettings]:
-    """The model and settings one build runs with, after per-run overrides."""
-    num_predict = derivation.num_predict if num_predict is None else num_predict
-    retries = derivation.retries if retries is None else retries
-    backend = config.openai if derivation.backend == "openai" else config.ollama
-    return (
-        llm_model or config.generation_model(derivation),
-        config.openai.base_url if derivation.backend == "openai" else "",
-        config.openai.response_format if derivation.backend == "openai" else "",
-        DerivationSettings(
-            num_predict=num_predict,
-            num_ctx=backend.num_ctx,
-            retries=retries,
-        ),
-    )
-
-
-def _validate_chunk_metadata_source(
-    manifest: IndexManifest,
-    identities: set[tuple[str, str]],
-) -> None:
-    """Fail unless every chunk's (source_path, source_hash) matches the source file."""
-    if not identities:
-        return
-    if manifest.chunker_version != CHUNKER_VERSION:
-        raise RuntimeError(
-            f"chunk metadata was produced by chunker version "
-            f"{manifest.chunker_version} (current {CHUNKER_VERSION}); "
-            "run index --rebuild"
-        )
-    if any(path != manifest.source_path for path, _ in identities):
-        raise RuntimeError(
-            "chunk metadata is stale (source path changed); run index to rebuild it"
-        )
-
-    source = source_from_manifest(manifest)
-    if not source.is_file():
-        raise FileNotFoundError(f"source file for chunk metadata not found: {source}")
-    current_hash = sha256_file(source)
-    if any(source_hash != current_hash for _, source_hash in identities):
-        raise RuntimeError(
-            "chunk metadata is stale (source file hash changed); "
-            "run index to rebuild it"
+    with _read_collection(config, collection, progress) as book:
+        store = book.store
+        limit = top_k or config.search.top_k
+        fan_out = limit * FAN_OUT_MULTIPLIER
+        vector = _query_vector(config, book.manifest, query)
+        channels: list[tuple[ChannelMode, list[Evidence]]] = [
+            (
+                "vector",
+                store.search_vector(vector, top_k=fan_out, progress=book.progress),
+            ),
+            ("fts", store.search_fts(query, top_k=fan_out, progress=book.progress)),
+        ]
+        evidence = _fuse_channels(channels)[:limit]
+        return HybridSearchResult(
+            progress=book.progress,
+            channels=[
+                ChannelStatus(mode=mode, candidates=len(items))
+                for mode, items in channels
+            ],
+            evidence=evidence,
         )
 
 
@@ -978,63 +412,9 @@ def _fuse_channels(
     return fused
 
 
-class _Checkpoint:
-    """Saves a run's document when a save is cheap next to the time since the last.
-
-    Units merged since the last save are owed, and `flush` pays them — the
-    caller does that on the way out of its loop, whether it finished, failed or
-    was interrupted. A unit whose merge did not finish leaves the document half
-    changed, so nothing is saved after that, and the units still owed are
-    derived again by the next run.
-    """
-
-    def __init__(self, artifacts: ArtifactStore, run: StoredRun) -> None:
-        self._artifacts = artifacts
-        self._run = run
-        self._saved_at = time.monotonic()
-        self._save_seconds = 0.0
-        self._owed = False
-        self._consistent = True
-
-    @contextmanager
-    def unit(self) -> Iterator[None]:
-        self._consistent = False
-        yield
-        self._consistent = True
-        self._owed = True
-        waited = time.monotonic() - self._saved_at
-        if waited >= max(SAVE_INTERVAL_SECONDS, SAVE_COST_RATIO * self._save_seconds):
-            self.flush()
-
-    def flush(self) -> None:
-        if not (self._owed and self._consistent):
-            return
-        start = time.monotonic()
-        self._artifacts.save(self._run)
-        self._saved_at = time.monotonic()
-        self._save_seconds = self._saved_at - start
-        self._owed = False
-
-
 def _emit(
     callback: Callable[[Any], None] | None,
     event: Any,
 ) -> None:
     if callback is not None:
         callback(event)
-
-
-def initialize_database(
-    config: ReadFellowConfig, *, artifacts: ArtifactStore | None = None
-) -> None:
-    (artifacts or open_artifacts(config)).initialize()
-
-
-def import_json(
-    config: ReadFellowConfig, collection: str, *, artifacts: ArtifactStore | None = None
-) -> ImportResult:
-    from .legacy_import import import_collection
-
-    return import_collection(
-        artifacts or open_artifacts(config), config.paths.metadata_dir, collection
-    )

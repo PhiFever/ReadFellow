@@ -1,50 +1,39 @@
-import os
-import uuid
+from typing import ClassVar
 
 import pytest
-from dotenv import dotenv_values
-from sqlalchemy import text
-from sqlalchemy.engine import make_url
 
-from readfellow.artifacts import make_engine, open_artifacts
-from readfellow.config import ReadFellowConfig
+from readfellow import app
+from readfellow.config import PathConfig, ReadFellowConfig
 
 
-def pytest_addoption(parser):
-    parser.addoption(
-        "--mysql",
-        action="store_true",
-        help="run SQL tests in disposable MySQL databases",
+@pytest.fixture
+def embedder(monkeypatch):
+    class Embedder:
+        batches: ClassVar[list[list[str]]] = []
+        queries: ClassVar[list[str]] = []
+        settings: ClassVar[list[dict[str, str]]] = []
+
+        def __init__(self, **settings):
+            self.settings.append(settings)
+
+        def embed_one(self, text):
+            self.queries.append(text)
+            return [1.0, 0.0]
+
+        def embed(self, texts):
+            self.batches.append(texts)
+            return [[1.0, 0.0] if "第一章" in text else [0.0, 1.0] for text in texts]
+
+    monkeypatch.setattr(app, "OllamaEmbedder", Embedder)
+    return Embedder
+
+
+@pytest.fixture
+def book(tmp_path, embedder):
+    config = ReadFellowConfig(paths=PathConfig(library_dir=tmp_path / "library"))
+    source = tmp_path / "novel.txt"
+    source.write_text(
+        "第一章 开始\n尤基修好了机器。\n第二章 之后\n尤基发现了秘密。\n",
+        encoding="utf-8",
     )
-
-
-@pytest.fixture(autouse=True)
-def artifacts(tmp_path, monkeypatch, request):
-    admin = None
-    database = None
-    if request.config.getoption("--mysql"):
-        uri = os.environ.get("MYSQL_URI") or dotenv_values(".env").get("MYSQL_URI")
-        if not uri:
-            pytest.fail("--mysql requires MYSQL_URI")
-        admin = make_engine(uri)
-        database = "readfellow_test_" + uuid.uuid4().hex
-        with admin.begin() as connection:
-            connection.execute(
-                text(
-                    f"CREATE DATABASE `{database}` CHARACTER SET utf8mb4 COLLATE utf8mb4_bin"
-                )
-            )
-        uri = make_url(uri).set(database=database).render_as_string(hide_password=False)
-    else:
-        uri = f"sqlite:///{tmp_path / 'artifacts.sqlite'}"
-    monkeypatch.setenv("MYSQL_URI", uri)
-    store = open_artifacts(ReadFellowConfig())
-    try:
-        store.initialize()
-        yield store
-    finally:
-        store.close()
-        if admin is not None:
-            with admin.begin() as connection:
-                connection.execute(text(f"DROP DATABASE `{database}`"))
-            admin.dispose()
+    return config, source

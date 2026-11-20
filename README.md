@@ -1,6 +1,6 @@
 # ReadFellow
 
-ReadFellow 是一个本地优先的 CLI 工作流：把长文档（主要是中文小说）切块、用 Ollama 生成 embedding、存进 zvec 本地向量库，让 agent 能按语义 / 全文检索出**原文段落**，并带着精确出处（`source_path:line_start-line_end`）与用户讨论。
+ReadFellow 是一个本地优先的 CLI 工作流：把长文档（主要是中文小说）切块、用 Ollama 生成 embedding、存进 每本书独立的 SQLite 库，让 agent 能按语义 / 全文检索出**原文段落**，并带着精确出处（`source_path:line_start-line_end`）与用户讨论。
 
 三条贯穿全流程的不变量：
 
@@ -18,15 +18,6 @@ ReadFellow 是一个本地优先的 CLI 工作流：把长文档（主要是中�
 uv sync
 ```
 
-**MySQL** 保存章节分析和切块元数据。先在 `.env` 设置 `MYSQL_URI`（已有数据库的 SQLAlchemy URL），再初始化表；已有 JSON 结果可一次性导入：
-
-```sh
-uv run readfellow db-init
-uv run readfellow import-json --collection sample
-```
-
-连接方式、历史版本和 DataGrip SQL 示例见 [MySQL 存储与查询](docs/mysql-storage.md)。
-
 **Ollama** 必须运行在 `config.yaml` 配置的端点上，并已拉取 embedding 模型：
 
 ```sh
@@ -34,15 +25,13 @@ ollama serve                        # 另开一个终端
 ollama pull qwen3-embedding:8b      # embedding，4096 维
 ```
 
-`analyze` 按 `config.yaml` 默认走云端（`analysis.backend: openai`，b.ai `qwen3.8-flash`），需要 `LLM_API_KEY`，和 `MYSQL_URI` 一样优先从环境变量读取，其次从当前目录的 `.env` 读取。将 `analysis.backend` 设为 `ollama` 时，需额外拉取本地生成模型 `qwen3:8b`。
-
 自检（返回模型列表即正常；连不上会是 `503`）：
 
 ```sh
 curl -s http://127.0.0.1:11434/api/tags
 ```
 
-只做 `index` / `search` / `fts` / `hybrid` / `fetch` 时只需要 embedding 模型。**跑测试不需要 Ollama**（全离线）。
+`index`、`search` 和 `hybrid` 需要 embedding 服务。`fts`、`fetch`、`status` 和测试都可以离线运行。
 
 ---
 
@@ -61,11 +50,11 @@ uv run readfellow fts "回收站镇" --collection smoke --top-k 2
 # 4) 融合检索（向量+全文打分）
 uv run readfellow hybrid "基因税" --collection smoke --top-k 3
 
-# 5) 按 id 取回单个 chunk 原文
+# 5) 将下面的 id 换成上一步返回的 id，取回原文
 uv run readfellow fetch bdd935754e17_000001 --collection smoke
 ```
 
-全量索引把 `--limit 12` 去掉即可。示例小说 408 万字 / 2307 chunks，实测约 **12 分钟**（3.3 chunks/s）。
+去掉 `--limit 12` 再跑一次 `index`，即可在冒烟库上补齐全书。续跑时省略 `--rebuild`。
 
 ---
 
@@ -80,10 +69,9 @@ uv run readfellow fetch bdd935754e17_000001 --collection smoke
 | 参数 | 默认值来源 | 说明 |
 |---|---|---|
 | `--config` | `config.yaml` | 换一份配置文件 |
-| `--index-dir` | `paths.index_dir` | zvec 数据目录 |
-| `--metadata-dir` | `paths.metadata_dir` | 一次性导入的旧 JSON / JSONL 目录 |
+| `--library-dir` | `paths.library_dir` | 书库目录，默认 `library/` |
 | `--ollama-url` | `ollama.base_url` | Ollama 端点 |
-| `--model` | `ollama.embedding_model` | **embedding** 模型（生成模型是各子命令的 `--llm-model`） |
+| `--model` | `ollama.embedding_model` | 索引使用的 embedding 模型 |
 | `--keep-alive` | `ollama.keep_alive` | 模型驻留时间 |
 
 ```sh
@@ -98,23 +86,21 @@ uv run readfellow index <文档.txt> --collection sample --rebuild
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
-| `--collection` | `sample` | 集合名，只允许字母数字下划线 |
+| `--collection` | `sample` | 集合名，支持字母、数字、下划线和连字符 |
 | `--chunk-chars` | 2400 | 目标 chunk 字符数 |
 | `--overlap-chars` | 240 | 相邻 chunk 的尾部重叠 |
 | `--batch-size` | 8 | 每批 embedding 数量 |
 | `--limit` | 0（不限） | 只索引前 N 个 chunk |
 | `--rebuild` | off | 重建集合，换模型 / 换切块参数时必须加 |
-| `--no-optimize` | off | 跳过 `zvec.optimize()`，**仅用于测写入速度** |
+| `--no-optimize` | off | 跳过最后的 FTS5 优化 |
 
-流程：切块 → 用首个 chunk 探测 embedding 维度 → 先将 manifest 和 chunks 写入 MySQL 源数据版本 → 分批比对 `text_hash` 决定 insert/update/skip（只对真要写的 chunk 调 embedding）→ `optimize()`。
-
-> **`--no-optimize` 不要用于正式索引**：不 optimize 时持久化的中文 FTS 在集合重开后可能查不到。
+每批成功后，原文、分词索引和向量一起提交。重跑会跳过已存且文本哈希一致的 chunk。源文件、切块参数、模型或维度改变时需要 `--rebuild`。
 
 ### 3.3 `search` / `fts` / `hybrid` — 三种检索
 
 ```sh
 uv run readfellow search "要查询的问题" --collection sample --top-k 5   # 向量语义
-uv run readfellow fts    "关键词"       --collection sample --top-k 5   # zvec jieba 中文全文
+uv run readfellow fts    "关键词"       --collection sample --top-k 5   # jieba 分词和 FTS5 全文检索
 uv run readfellow hybrid "问题或关键词" --collection sample --top-k 5   # 向量+全文融合
 ```
 
@@ -134,62 +120,17 @@ uv run readfellow fetch <chunk-id> --collection sample
 
 打印完整原文（不截断）。三种结果：`found`、`not_found`（无此 chunk）、`outside_progress`（超出阅读进度，**不带原文**）。
 
-### 3.5 `analyze` — 章节级分析
-
-> ⚠️ 全量运行当前存在已知阻塞，见 [§6 已知问题](#6-已知问题)。
-
-```sh
-uv run readfellow analyze --collection sample --max-chapter 1:50
-```
-
-按检测到的章节分组，对每个**完整章节**调一次生成模型，产出梗概、人物、事件，写入 MySQL 中独立的章节分析运行版本。`analyze` 用 `--max-chapter` 分批。
-
-| 参数 | 默认 | 说明 |
-|---|---|---|
-| `--llm-model` | `analysis.backend` 所指的 `generation_model` | 生成模型 |
-| `--num-predict` | `analysis.num_predict` (4096) | 每章最大生成 token |
-| `--retries` | `analysis.retries` (2) | 每章失败重试次数 |
-| `--rebuild` | off | 创建新 `run_id`，保留历史 |
-
-`analysis.concurrency` 控制同时在途的生成请求数，默认 1；AMD 端点实测并发 6 稳定、12 会触发 429。`openai.response_format` 默认 `json_schema`，服务端不支持 schema 约束时可改用 `json_object`，靠解析校验和重试兜底。修改该设置会让已记录这个字段的派生物失效。
-
-三条规则：
-
-- **前置内容不分析**。第一个匹配章节标题规则的组之前，书名等内容不生成笔记；中间的无号节照常分析。
-- **最后一组永不分析**。它可能被 `index --limit` 截断，无法与完整章节区分。
-- **超出 `num_ctx` 预算的章节被跳过**并打印原因。预算 = `(num_ctx − num_predict − 600) × 1.5` 字符；`num_ctx` 取所选后端的配置；`analysis` 默认走 openai（`num_ctx: 65536`），预算为 91260 字符。
-
-**分析完的章节按耗时分批提交**：距上次提交超过 30 秒（或上次提交耗时的 20 倍）就存一次，正常结束、出错或 Ctrl-C 时补存一次，重跑按 `(章序号, 章标题)` 续建。
-
-### 3.6 `status` — 集合体检
+### 3.5 `status` — 查看索引进度
 
 ```sh
 uv run readfellow status --collection sample
 ```
 
-不联网、不改任何东西，回答两个问题：**现在有什么**，以及**再跑一次会发生什么**。
-
-下面是一次 `--limit 8` 冒烟索引之后的输出示例：
-
-```
-collection:  sample
-source:      corpus/samples/赛博英雄传.txt
-chunks:      8 @ 2400 chars, overlap 240
-embedding:   qwen3-embedding:8b, dim 4096
-
-index:       8/8 docs, embedding 100% indexed
-
-analyze:     not built (4 chapters eligible)
-```
-
-- **`index` 行读的是 zvec 自己的 `stats`**，不是 manifest。两个数字对不上就是 §6.2 那个已知问题的现场。
-- **没跑完时会多出一行 `→`，那是最该看的一行**：失效判定用**配置里当前的模型与参数**做，所以它回答的是「续建还是从头重来」（例如 `→ analyze would resume on the remaining 4 chapters`，stale 时则是 `would create a new version; the ... historical units remain`）。别的命令遇到 stale 直接报错，`status` 是唯一负责把原因说出来还继续往下走的。
-
----
+输出包含源路径、全书章节数、切块参数、向量模型和维度。`index: 8/16 docs` 表示应有 16 个 chunk，已经提交 8 个。沿用原参数再跑 `index`，省略 `--rebuild`，即可续上。
 
 ## 4. 防剧透：阅读进度限制
 
-所有检索命令和 `analyze` 都接受同一组进度参数：
+所有检索命令和 `fetch` 都接受同一组进度参数：
 
 | 参数 | 语义 |
 |---|---|
@@ -203,77 +144,15 @@ uv run readfellow hybrid "武神"          --collection sample --max-chapter 1:5
 uv run readfellow fetch  <chunk-id>      --collection sample --max-chapter 1:50
 ```
 
-进度限制在两条路径上生效：整体传给 zvec（转成过滤表达式），以及进程内逐 chunk 判定（fetch 走这条）。
+检索在 SQL 中按结束行和 chunk 序号过滤，`fetch` 在输出前检查进度。不传进度参数时可检索全书。
 
 ---
 
-## 5. 产物布局
+## 5. 书库与源文件
 
-```
-indexes/<collection>/                 # zvec 数据
-metadata/<collection>/                # 一次性导入后保留的旧文件备份
-MySQL:
-  source_versions / chunks           # manifest 与原文切块版本
-  runs                               # 章节分析的运行历史
-  chapters / characters / events     # 章节分析
-```
+`library/<collection>.db` 保存书目、完整章节、chunk 原文、FTS5 索引和向量。可以单独复制这个文件。源文件在场时会核对哈希，内容发生变化后需要重新运行 `index --rebuild`。源文件缺失时仍可用书库中的行号限制进度，检索和取回原文。
 
-`indexes/`、`metadata/`、`corpus/` 均不纳入版本控制。
-
-**Evidence 模型**：向量检索、全文检索、fetch 返回同一个 `Evidence`，包含原文、chunk id、源路径、行范围、章节、chunk 序号、字节范围、text hash、检索模式和可选分数。
-
----
-
-## 6. 已知问题
-
-### 6.1 派生管线会丢弃两类条目
-
-单个条目抽不出来时会被**丢弃并计数**，其余照常入库。丢弃分两种成因，按成因分开报：
-
-```
-[    2/20] analyzing 第一章 开始
-        characters=2, events=3, rejected=1 (unanchored 1, unreadable 0)
-```
-
-- **unanchored** —— 模型给的 evidence 不是所属 chunk 原文的精确子串（多为把代词换成人名这类改写）。放宽匹配等于伪造出处，所以按设计丢弃。这表示引文未能锚定到原文。
-- **unreadable** —— 条目根本读不出形状：人物没有名字、事件没有描述、字段缺失。
-
-两者相加就是 `rejected=N`，保存在 MySQL 运行及章节记录的 `rejected_count`，其中 unanchored 那部分单独落在 `unanchored_count`。**总数偏高本身不说明问题，要看拆开后的 unanchored。**
-
-这意味着分析中的人物和事件是**真实但不完整**的子集：留下的每一条都能回落到原文精确子串，但模型引错的、字段缺失的条目不会出现。
-
-2026-07-27 之前，一条引文对不上会耗尽重试并终止整个 run，全量因此跑不完。根因排查与修复见 [`docs/archive/derivation-hardening-plan.md`](docs/archive/derivation-hardening-plan.md)，执行步骤与成本基线见 [`docs/mvp-runbook.md`](docs/mvp-runbook.md)。
-
-### 6.2 索引不是原子发布
-
-embedding 中途失败会留下 metadata 完整而 collection 不完整的状态。用 `--rebuild` 重跑可恢复。**`status` 的 `index:` 行能检出它**（zvec 报的 doc 数少于 manifest 承诺的 chunk 数），但写入本身仍不是两阶段发布。
-
-派生物使用 MySQL 事务：每个单元的章节结果与处理记录一起提交，读取时不会看到只写了一半的单元。
-
-### 6.3 换模型 / 换切块参数必须 `--rebuild`
-
-- chunk id = `source_hash[:12]_%06d`。改 `--chunk-chars` / `--overlap-chars` 会让 id 与行范围全部漂移。
-- 换 embedding 模型时，**只有维度不匹配才会报错**；同维度的不同模型不会被拦住，必须自己记得 `--rebuild`。
-
----
-
-## 7. 故障排查
-
-| 症状 | 原因与处理 |
-|---|---|
-| `error loading config: ...` | `config.yaml` 语法错误，或 `--config` 指向的文件不存在 |
-| Ollama 返回 `503` / 连接被拒 | `ollama serve` 没起来，或 `--ollama-url` 端点不对 |
-| `run index --rebuild`（chunker 版本不符） | 数据库中的 chunks 由旧版切块器产出，重新索引 |
-| `chunk metadata is stale (source path changed)` | 源文档被移动或改名，重新索引 |
-| 源文件 hash 不符 | 源文档被修改过。源文档不可变是第一不变量，必须重新索引 |
-| `fts` 查不到内容但 `search` 正常 | 索引时用了 `--no-optimize`，重新索引且不要跳过 optimize |
-| 输出里 `rejected=N` 偏高 | 先看括号里的 unanchored：高才是模型问题，unreadable 高说明条目缺字段或形状不对，见 §6.1 |
-| 不确定重跑会续建还是重来 | `readfellow status`，看 `analyze:` 下面那行 `→` |
-| `status` 的 `index:` 两个数字不等 | 索引没跑完（§6.2），`index --rebuild` |
-
----
-
-## 8. 开发
+## 6. 开发
 
 ```sh
 uv run pytest                                   # 全量测试（约 3s，完全离线）

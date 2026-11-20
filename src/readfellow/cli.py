@@ -6,10 +6,7 @@ import sys
 from pathlib import Path
 
 from .app import (
-    AnalysisBuildEvent,
-    AnalysisBuildOptions,
     ChannelStatus,
-    DerivationReport,
     IndexDocumentOptions,
     IndexProgressEvent,
     IndexReport,
@@ -17,27 +14,22 @@ from .app import (
     collection_status,
     fts_search,
     hybrid_search,
-    import_json,
     index_document,
-    initialize_database,
     semantic_search,
-)
-from .app import (
-    build_analysis as build_analysis_workflow,
 )
 from .app import (
     fetch_chunk as fetch_chunk_workflow,
 )
 from .config import CONFIG_FILE, ReadFellowConfig, load_config
-from .models import ChapterAnalysis, ChunkContext, Evidence, ProgressFilter
+from .models import Evidence, ProgressFilter
 
 
 def valid_collection_name(value: str) -> str:
-    normalized = re.sub(r"[^A-Za-z0-9_]", "_", value.strip())
+    normalized = re.sub(r"[^A-Za-z0-9_-]", "_", value.strip())
     normalized = re.sub(r"_+", "_", normalized).strip("_")
     if len(normalized) < 2:
         raise argparse.ArgumentTypeError(
-            "collection name must contain at least two letters, numbers, or underscores"
+            "collection name must contain at least two letters, numbers, underscores, or hyphens"
         )
     return normalized
 
@@ -45,6 +37,7 @@ def valid_collection_name(value: str) -> str:
 def build_parser(config: ReadFellowConfig) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="readfellow")
     parser.add_argument("--config", type=Path, default=CONFIG_FILE)
+    parser.add_argument("--library-dir", type=Path, default=config.paths.library_dir)
     parser.add_argument("--index-dir", type=Path, default=config.paths.index_dir)
     parser.add_argument("--metadata-dir", type=Path, default=config.paths.metadata_dir)
     parser.add_argument("--ollama-url", default=config.ollama.base_url)
@@ -52,16 +45,6 @@ def build_parser(config: ReadFellowConfig) -> argparse.ArgumentParser:
     parser.add_argument("--keep-alive", default=config.ollama.keep_alive)
 
     subparsers = parser.add_subparsers(dest="command", required=True)
-
-    subparsers.add_parser("db-init", help="create the MySQL artifact tables")
-    importer = subparsers.add_parser(
-        "import-json", help="import one legacy collection into MySQL once"
-    )
-    importer.add_argument(
-        "--collection",
-        type=valid_collection_name,
-        default=config.indexing.default_collection,
-    )
 
     index = subparsers.add_parser("index", help="chunk and index a UTF-8 text document")
     index.add_argument("source", type=Path)
@@ -82,7 +65,7 @@ def build_parser(config: ReadFellowConfig) -> argparse.ArgumentParser:
     index.add_argument(
         "--no-optimize",
         action="store_true",
-        help="skip final zvec optimize; faster indexing, but persisted FTS may not be queryable",
+        help="skip final FTS5 optimization",
     )
 
     search = subparsers.add_parser("search", help="semantic vector search")
@@ -96,7 +79,7 @@ def build_parser(config: ReadFellowConfig) -> argparse.ArgumentParser:
     add_progress_args(search)
 
     fts = subparsers.add_parser(
-        "fts", help="Chinese full-text search using zvec jieba FTS"
+        "fts", help="Chinese full-text search using jieba and SQLite FTS5"
     )
     fts.add_argument("query")
     fts.add_argument(
@@ -128,33 +111,6 @@ def build_parser(config: ReadFellowConfig) -> argparse.ArgumentParser:
         default=config.indexing.default_collection,
     )
     add_progress_args(fetch)
-
-    analyze = subparsers.add_parser(
-        "analyze",
-        help="analyze complete chapters and print the stored analysis",
-    )
-    analyze.add_argument(
-        "--collection",
-        type=valid_collection_name,
-        default=config.indexing.default_collection,
-    )
-    analyze.add_argument(
-        "--llm-model", default=config.generation_model(config.analysis)
-    )
-    analyze.add_argument(
-        "--num-predict",
-        type=int,
-        default=config.analysis.num_predict,
-        help="maximum generated tokens per chapter for Ollama chapter analysis",
-    )
-    analyze.add_argument(
-        "--retries",
-        type=int,
-        default=config.analysis.retries,
-        help="retry failed chapter analysis this many times per chapter",
-    )
-    analyze.add_argument("--rebuild", action="store_true")
-    add_progress_args(analyze)
 
     status = subparsers.add_parser(
         "status",
@@ -278,27 +234,6 @@ def command_fetch(args: argparse.Namespace, config: ReadFellowConfig) -> int:
     return 0
 
 
-def command_analyze(args: argparse.Namespace, config: ReadFellowConfig) -> int:
-    result = build_analysis_workflow(
-        config,
-        args.collection,
-        progress=progress_limit_from_args(args),
-        options=AnalysisBuildOptions(
-            llm_model=args.llm_model,
-            num_predict=args.num_predict,
-            retries=args.retries,
-            rebuild=args.rebuild,
-        ),
-        on_progress=print_analysis_progress,
-    )
-    print_chapter_analyses(result.chapters)
-    print(
-        f"\ndone: collection={result.collection}, run_id={result.run_id}, processed={result.processed_chapter_count}/{result.selected_chapter_count} chapters, "
-        f"status={result.status}"
-    )
-    return 0
-
-
 def command_status(args: argparse.Namespace, config: ReadFellowConfig) -> int:
     status = collection_status(config, args.collection)
     manifest = status.manifest
@@ -308,55 +243,24 @@ def command_status(args: argparse.Namespace, config: ReadFellowConfig) -> int:
         f"chunks:      {manifest.chunk_count} @ {manifest.chunk_chars} chars, "
         f"overlap {manifest.overlap_chars}"
     )
+    print(f"chapters:    {status.chapter_count}")
     print(f"embedding:   {manifest.model}, dim {manifest.embedding_dimension}")
     if status.source_error is not None:
         print(f"  ⚠ {status.source_error}")
 
     print()
     print_index_status(status.index)
-    print()
-    print_derivation_status("analyze", "chapters", status.analysis)
     return 0
 
 
 def print_index_status(report: IndexReport) -> None:
-    if report.error is not None:
-        print(f"index:       ⚠ {report.error}")
-        return
-    indexed = ", ".join(
-        f"{name} {share:.0%} indexed"
-        for name, share in sorted(report.index_completeness.items())
-    )
     counts = f"{report.stored_doc_count}/{report.expected_doc_count} docs"
-    print(f"index:       {counts}{', ' + indexed if indexed else ''}")
-    if not report.is_complete:
+    print(f"index:       {counts}")
+    if report.stored_doc_count < report.expected_doc_count:
         print(
             "  ⚠ the collection holds less than the metadata promises; "
             "re-run index to finish it"
         )
-
-
-def print_derivation_status(command: str, unit: str, report: DerivationReport) -> None:
-    label = f"{command}:".ljust(12)
-    if report.error is not None:
-        print(f"{label} ⚠ unreadable: {report.error}")
-        return
-    if not report.exists:
-        print(f"{label} not built ({report.total} {unit} eligible)")
-        return
-
-    print(
-        f"{label} run_id={report.run_id}, {report.processed}/{report.total} {unit}"
-        f"{_rejected_suffix(report.rejected_count, report.unanchored_count)}"
-    )
-    if report.stale_reason is not None:
-        print(f"  ⚠ stale: {report.stale_reason}")
-        print(
-            f"  → {command} would create a new version; the {report.processed} historical units remain"
-        )
-    elif report.processed < report.total:
-        remaining = report.total - report.processed
-        print(f"  → {command} would resume on the remaining {remaining} {unit}")
 
 
 def print_index_progress(event: IndexProgressEvent) -> None:
@@ -378,84 +282,6 @@ def print_index_progress(event: IndexProgressEvent) -> None:
             f"skipped {event.skipped}, {event.rate:.2f} chunks/s",
             flush=True,
         )
-
-
-def print_analysis_progress(event: AnalysisBuildEvent) -> None:
-    if event.stage == "selected" and event.progress is not None:
-        print_progress(event.progress)
-        return
-    if event.stage == "skipped":
-        print(f"skipped {event.chapter_title}: {event.reason}", flush=True)
-        return
-    if event.stage == "analyzing":
-        print(
-            f"[{event.index:>5}/{event.total}] analyzing {event.chapter_title}",
-            flush=True,
-        )
-        return
-    if event.stage == "retry":
-        print(
-            f"        retry {event.attempt}/{event.retries}: {event.error}",
-            flush=True,
-        )
-        return
-    if event.stage == "analyzed":
-        print(
-            f"        characters={event.character_count},"
-            f" events={event.event_count}"
-            f"{_rejected_suffix(event.rejected_count, event.unanchored_count)}",
-            flush=True,
-        )
-
-
-def _rejected_suffix(rejected_count: int, unanchored_count: int | None) -> str:
-    """How many items were dropped and why, shown only when some were.
-
-    The two causes want opposite reactions — a quote its chunk does not contain
-    is the model failing, a predicate outside the vocabulary is the vocabulary
-    working — so a bare total gets read as the first when it is mostly the
-    second. A document older than that split has only the total to give.
-    """
-    if not rejected_count:
-        return ""
-    if unanchored_count is None:
-        return f", rejected={rejected_count} (cause not recorded)"
-    unreadable = rejected_count - unanchored_count
-    return (
-        f", rejected={rejected_count}"
-        f" (unanchored {unanchored_count}, unreadable {unreadable})"
-    )
-
-
-def print_chapter_analyses(chapters: list[ChapterAnalysis]) -> None:
-    if not chapters:
-        print("no chapter analysis available")
-        return
-    for chapter in chapters:
-        title = chapter.chapter_title or "(no chapter)"
-        print(
-            f"\n[{chapter.chapter_index}] {title} "
-            f"{chapter.source_path}:{chapter.line_start}-{chapter.line_end} "
-            f"chunks={len(chapter.chunk_ids)}"
-        )
-        summary = chapter.summary or "(withheld: chapter extends past the progress)"
-        print(f"summary: {summary}")
-        for mention in chapter.characters:
-            role = f" — {mention.role_in_chapter}" if mention.role_in_chapter else ""
-            print(f"  character: {mention.name}{role}")
-            print(f"    {chunk_provenance(mention)} {one_line(mention.evidence)}")
-        for event in chapter.events:
-            print(f"  event {event.order}: {event.description}")
-            print(f"    {chunk_provenance(event)} {one_line(event.evidence)}")
-
-
-def one_line(text: str) -> str:
-    """Evidence is stored as the source's own span, line breaks and indent included."""
-    return re.sub(r"\s+", " ", text).strip()
-
-
-def chunk_provenance(context: ChunkContext) -> str:
-    return f"{context.source_path}:{context.line_start}-{context.line_end}"
 
 
 def print_evidence(items: list[Evidence], *, full_text: bool = False) -> None:
@@ -511,6 +337,7 @@ def apply_global_overrides(
     args: argparse.Namespace,
 ) -> ReadFellowConfig:
     effective = config.model_copy(deep=True)
+    effective.paths.library_dir = args.library_dir
     effective.paths.index_dir = args.index_dir
     effective.paths.metadata_dir = args.metadata_dir
     effective.ollama.base_url = args.ollama_url
@@ -531,18 +358,6 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     config = apply_global_overrides(config, args)
     try:
-        if args.command == "db-init":
-            initialize_database(config)
-            print("database tables initialized")
-            return 0
-        if args.command == "import-json":
-            result = import_json(config, args.collection)
-            print(
-                f"{'already imported' if result.skipped else 'imported'}: collection={args.collection}, "
-                f"source_version_id={result.source_version_id}, "
-                f"analysis_run_id={result.analysis_run_id}"
-            )
-            return 0
         if args.command == "index":
             return command_index(args, config)
         if args.command == "search":
@@ -553,8 +368,6 @@ def main(argv: list[str] | None = None) -> int:
             return command_hybrid(args, config)
         if args.command == "fetch":
             return command_fetch(args, config)
-        if args.command == "analyze":
-            return command_analyze(args, config)
         if args.command == "status":
             return command_status(args, config)
     except Exception as exc:  # noqa: BLE001

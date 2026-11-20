@@ -1,14 +1,9 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import UTC, datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
-
-
-def utc_now_iso() -> str:
-    return datetime.now(UTC).replace(microsecond=0).isoformat()
 
 
 class ReadFellowModel(BaseModel):
@@ -47,11 +42,8 @@ class Chunk(ReadFellowModel):
 
 
 class IndexManifest(ReadFellowModel):
-    model_config = ConfigDict(extra="allow")
-
-    collection: str
-    collection_path: str
     source_path: str
+    source_hash: str
     model: str
     embedding_dimension: int
     chunk_count: int
@@ -134,7 +126,10 @@ class Evidence(ReadFellowModel):
 class ChapterBoundary(ReadFellowModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    index: int
+    ordinal: int
+    line_end: int
+    content_hash: str
+    text: str | None = None
     title: str
     line_start: int
     volume: int
@@ -230,28 +225,6 @@ class ChapterAnalysis(ReadFellowModel):
     events: list[ChapterEvent] = Field(default_factory=list)
     rejected_count: int = 0
     unanchored_count: int | None = None
-
-
-class AnalysisDocument(ReadFellowModel):
-    model_config = ConfigDict(extra="allow")
-
-    schema_version: int = 1
-    prompt_version: str = ""
-    collection: str = ""
-    source_path: str = ""
-    llm_model: str = ""
-    llm_endpoint: str = ""
-    response_format: str | None = None
-    settings: DerivationSettings = DerivationSettings()
-    chunk_text_hashes: dict[str, str] = Field(default_factory=dict)
-    created_at: str = Field(default_factory=utc_now_iso)
-    updated_at: str = Field(default_factory=utc_now_iso)
-    progress_limit: str = ""
-    selected_chapter_count: int = 0
-    processed_chapter_count: int = 0
-    rejected_count: int = 0
-    unanchored_count: int | None = None
-    chapters: list[ChapterAnalysis] = Field(default_factory=list)
 
 
 class OllamaEmbedRequest(ReadFellowModel):

@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
-from .chunking import CHAPTER_RE
-from .derivation import settings_changed, sum_or_unknown, write_json_document
 from .extraction import (
     EvidenceNotFound,
     as_list,
@@ -19,17 +16,11 @@ from .extraction import (
     resolve_evidence,
 )
 from .models import (
-    AnalysisDocument,
     ChapterAnalysis,
     ChapterEvent,
     CharacterMention,
     Chunk,
-    DerivationSettings,
-    IndexManifest,
-    ProgressFilter,
-    utc_now_iso,
 )
-from .store import metadata_path
 
 ANALYSIS_SCHEMA_VERSION = 2
 ANALYSIS_PROMPT_VERSION = "chapter-analysis-v1"
@@ -55,99 +46,6 @@ class ChapterGroup:
     index: int
     title: str
     chunks: tuple[Chunk, ...]
-
-
-def analysis_path(metadata_dir: Path, collection: str) -> Path:
-    return metadata_path(metadata_dir, collection) / "analysis.json"
-
-
-def read_analysis(path: Path) -> AnalysisDocument:
-    return AnalysisDocument.model_validate_json(path.read_text(encoding="utf-8"))
-
-
-def write_analysis(path: Path, document: AnalysisDocument) -> None:
-    finalize_analysis(document)
-    write_json_document(path, document)
-
-
-def empty_analysis(
-    *,
-    collection: str,
-    manifest: IndexManifest | None = None,
-    llm_model: str = "",
-    llm_endpoint: str = "",
-    response_format: str | None = None,
-    settings: DerivationSettings | None = None,
-) -> AnalysisDocument:
-    now = utc_now_iso()
-    return AnalysisDocument(
-        schema_version=ANALYSIS_SCHEMA_VERSION,
-        prompt_version=ANALYSIS_PROMPT_VERSION,
-        collection=collection,
-        source_path=manifest.source_path if manifest else "",
-        llm_model=llm_model,
-        llm_endpoint=llm_endpoint,
-        response_format=response_format,
-        settings=settings or DerivationSettings(),
-        created_at=now,
-        updated_at=now,
-    )
-
-
-def update_analysis_metadata(
-    document: AnalysisDocument,
-    *,
-    collection: str,
-    manifest: IndexManifest,
-    llm_model: str,
-    llm_endpoint: str,
-    response_format: str,
-    settings: DerivationSettings,
-    progress: ProgressFilter,
-    selected_chapter_count: int,
-) -> None:
-    document.schema_version = ANALYSIS_SCHEMA_VERSION
-    document.prompt_version = ANALYSIS_PROMPT_VERSION
-    document.collection = collection
-    document.source_path = manifest.source_path
-    document.llm_model = llm_model
-    document.llm_endpoint = llm_endpoint
-    document.response_format = response_format
-    document.settings = settings
-    document.updated_at = utc_now_iso()
-    document.progress_limit = progress.description
-    document.selected_chapter_count = selected_chapter_count
-    document.processed_chapter_count = len(document.chapters)
-
-
-def group_chapters(chunks: Sequence[Chunk]) -> list[ChapterGroup]:
-    groups: list[ChapterGroup] = []
-    current: list[Chunk] = []
-    current_title = ""
-    for chunk in chunks:
-        if current and chunk.chapter != current_title:
-            groups.append(ChapterGroup(len(groups) + 1, current_title, tuple(current)))
-            current = []
-        current_title = chunk.chapter
-        current.append(chunk)
-    if current:
-        groups.append(ChapterGroup(len(groups) + 1, current_title, tuple(current)))
-    return groups
-
-
-def complete_chapters(groups: Sequence[ChapterGroup]) -> list[ChapterGroup]:
-    """Chapters to analyze: everything except front matter and the last group.
-
-    Groups before the first CHAPTER_RE title are front matter, such as a book-title
-    line, and get no chapter notes. The last group may have been cut short by
-    `index --limit`, so it can never be told apart from a complete chapter and is
-    never analyzed.
-    """
-    start = next(
-        (index for index, group in enumerate(groups) if CHAPTER_RE.match(group.title)),
-        0,
-    )
-    return list(groups[start:-1])
 
 
 def chapter_char_budget(*, num_ctx: int, num_predict: int) -> int:
@@ -280,139 +178,6 @@ def parse_chapter_analysis(
         rejected_count=rejected.total,
         unanchored_count=rejected.unanchored,
     )
-
-
-def merge_chapter(
-    document: AnalysisDocument,
-    analysis: ChapterAnalysis,
-    group: ChapterGroup,
-) -> None:
-    document.chapters = [
-        chapter
-        for chapter in document.chapters
-        if chapter.chapter_index != analysis.chapter_index
-    ]
-    document.chapters.append(analysis)
-    for chunk in group.chunks:
-        document.chunk_text_hashes[chunk.id] = chunk.text_hash
-    finalize_analysis(document)
-
-
-def finalize_analysis(document: AnalysisDocument) -> None:
-    document.chapters = sorted(
-        document.chapters, key=lambda chapter: chapter.chapter_index
-    )
-    for chapter in document.chapters:
-        chapter.events = sorted(
-            chapter.events, key=lambda event: (event.order, event.chunk_index)
-        )
-    referenced = {
-        chunk_id for chapter in document.chapters for chunk_id in chapter.chunk_ids
-    }
-    document.chunk_text_hashes = {
-        chunk_id: text_hash
-        for chunk_id, text_hash in document.chunk_text_hashes.items()
-        if chunk_id in referenced
-    }
-    document.processed_chapter_count = len(document.chapters)
-    document.rejected_count = sum(
-        chapter.rejected_count for chapter in document.chapters
-    )
-    document.unanchored_count = sum_or_unknown(
-        chapter.unanchored_count for chapter in document.chapters
-    )
-
-
-def processed_chapter_keys(document: AnalysisDocument) -> set[tuple[int, str]]:
-    return {
-        (chapter.chapter_index, chapter.chapter_title) for chapter in document.chapters
-    }
-
-
-def analysis_staleness_reason(
-    document: AnalysisDocument,
-    groups: Sequence[ChapterGroup],
-    *,
-    collection: str,
-    source_path: str,
-    llm_model: str | None = None,
-    llm_endpoint: str | None = None,
-    response_format: str | None = None,
-    settings: DerivationSettings | None = None,
-) -> str | None:
-    if document.schema_version != ANALYSIS_SCHEMA_VERSION:
-        return "analysis schema version changed"
-    if document.prompt_version != ANALYSIS_PROMPT_VERSION:
-        return "analysis prompt changed"
-    if document.collection != collection or document.source_path != source_path:
-        return "analysis source metadata changed"
-    if llm_model is not None and document.llm_model != llm_model:
-        return "analysis generator model changed"
-    if llm_endpoint is not None and document.llm_endpoint != llm_endpoint:
-        return "analysis generator endpoint changed"
-    # Old runs did not record this setting. Guessing a default would either
-    # rebuild needlessly or mislabel json_object as json_schema. A resumed build
-    # records the current value, so subsequent changes can be detected.
-    if (
-        response_format is not None
-        and document.response_format is not None
-        and document.response_format != response_format
-    ):
-        return "analysis generator response format changed"
-    if settings is not None and settings_changed(document.settings, settings):
-        return "analysis settings changed"
-
-    indexes = [chapter.chapter_index for chapter in document.chapters]
-    if len(indexes) != len(set(indexes)):
-        return "analysis chapter metadata is inconsistent"
-
-    groups_by_index = {group.index: group for group in groups}
-    referenced: set[str] = set()
-    for chapter in document.chapters:
-        group = groups_by_index.get(chapter.chapter_index)
-        if group is None or group.title != chapter.chapter_title:
-            return "analysis chapters no longer match the indexed chunks"
-        if [chunk.id for chunk in group.chunks] != chapter.chunk_ids:
-            return "analysis chapter chunks changed"
-        for chunk in group.chunks:
-            if document.chunk_text_hashes.get(chunk.id) != chunk.text_hash:
-                return "analysis source chunk hashes changed"
-            referenced.add(chunk.id)
-    if set(document.chunk_text_hashes) != referenced:
-        return "analysis source chunk hashes are incomplete"
-    return None
-
-
-def filter_chapter(
-    chapter: ChapterAnalysis,
-    chunks_by_id: Mapping[str, Chunk],
-    progress: ProgressFilter | None,
-) -> ChapterAnalysis | None:
-    filtered = chapter.model_copy(deep=True)
-    if progress is None or (
-        progress.max_line_end is None and progress.max_chunk_index is None
-    ):
-        return filtered
-
-    visible = [
-        chunks_by_id[chunk_id]
-        for chunk_id in chapter.chunk_ids
-        if chunk_id in chunks_by_id and progress.allows(chunks_by_id[chunk_id])
-    ]
-    if not visible:
-        return None
-
-    filtered.characters = [
-        mention for mention in filtered.characters if progress.allows(mention)
-    ]
-    filtered.events = [event for event in filtered.events if progress.allows(event)]
-    if len(visible) != len(chapter.chunk_ids):
-        # The summary is generated across the whole chapter and has no
-        # per-sentence provenance, so it cannot be shown once part of the
-        # chapter is beyond the reading progress.
-        filtered.summary = ""
-        filtered.line_end = max(chunk.line_end for chunk in visible)
-    return filtered
 
 
 def _parse_character(item: Any, group: ChapterGroup) -> CharacterMention | None:

@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import ConfigDict, Field, SecretStr
+from pydantic import ConfigDict, Field
 
 from .models import ReadFellowModel
 
@@ -15,6 +15,7 @@ CONFIG_FILE = Path("config.yaml")
 class PathConfig(ReadFellowModel):
     model_config = ConfigDict(extra="forbid")
 
+    library_dir: Path = Path("library")
     index_dir: Path = Path("indexes")
     metadata_dir: Path = Path("metadata")
 
@@ -69,17 +70,12 @@ class DerivationConfig(ReadFellowModel):
 class ReadFellowConfig(ReadFellowModel):
     model_config = ConfigDict(extra="forbid")
 
-    database_url: SecretStr | None = None
     paths: PathConfig = PathConfig()
     ollama: OllamaConfig = OllamaConfig()
     openai: OpenAIConfig = OpenAIConfig()
     indexing: IndexingConfig = IndexingConfig()
     search: SearchConfig = SearchConfig()
     analysis: DerivationConfig = DerivationConfig()
-
-    def generation_model(self, derivation: DerivationConfig) -> str:
-        backend = self.openai if derivation.backend == "openai" else self.ollama
-        return backend.generation_model
 
     @classmethod
     def load(

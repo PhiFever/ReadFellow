@@ -1,28 +1,12 @@
 from __future__ import annotations
 
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
 
-from readfellow.models import IndexManifest
-from readfellow.progress import (
-    build_progress_filter,
-    chapter_boundaries,
-    line_limit_for_chapter,
-)
-
-
-def manifest_for(source: Path) -> IndexManifest:
-    return IndexManifest(
-        collection="sample",
-        collection_path="indexes/sample",
-        source_path=str(source),
-        model="test-model",
-        embedding_dimension=2,
-        chunk_count=0,
-        chunk_chars=100,
-        overlap_chars=10,
-    )
+from readfellow.chunking import read_chapters
+from readfellow.progress import build_progress_filter, line_limit_for_chapter
 
 
 def test_chapter_boundaries_and_progress_filter(tmp_path: Path) -> None:
@@ -32,16 +16,22 @@ def test_chapter_boundaries_and_progress_filter(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    chapters = chapter_boundaries(source)
+    chapters = read_chapters(source)
 
-    assert [(c.index, c.title, c.line_start) for c in chapters] == [
+    assert [(c.ordinal, c.title, c.line_start) for c in chapters] == [
         (1, "第一章 开始", 1),
         (2, "第二章 继续", 4),
         (3, "第三章 之后", 7),
     ]
 
+    chapter = chapters[0]
+    expected = "第一章 开始\n一\n\n"
+    assert (chapter.volume, chapter.number, chapter.line_end) == (1, 1, 3)
+    assert chapter.text == expected
+    assert chapter.content_hash == sha256(expected.encode()).hexdigest()
+
     progress = build_progress_filter(
-        manifest=manifest_for(source),
+        chapters=read_chapters(source),
         max_chapter="2",
     )
 
@@ -56,7 +46,7 @@ def test_progress_filter_combines_line_and_chunk_limits(tmp_path: Path) -> None:
     source.write_text("第一章 开始\n一\n第二章 继续\n二\n", encoding="utf-8")
 
     progress = build_progress_filter(
-        manifest=manifest_for(source),
+        chapters=read_chapters(source),
         max_chapter="2",
         max_line=3,
         max_chunk_index=4,
@@ -73,7 +63,7 @@ def test_progress_rejects_unknown_chapter(tmp_path: Path) -> None:
     source.write_text("第一章 开始\n一\n", encoding="utf-8")
 
     with pytest.raises(ValueError, match="not found"):
-        build_progress_filter(manifest=manifest_for(source), max_chapter="2")
+        build_progress_filter(chapters=read_chapters(source), max_chapter="2")
 
 
 @pytest.fixture
@@ -89,13 +79,13 @@ def two_volumes(tmp_path: Path) -> Path:
 
 
 def test_volume_chapter_limit(two_volumes: Path) -> None:
-    limit, chapter = line_limit_for_chapter(two_volumes, "2:2")
+    limit, chapter = line_limit_for_chapter(read_chapters(two_volumes), "2:2")
     assert (limit, chapter.volume, chapter.number, chapter.line_start) == (9, 2, 2, 7)
 
 
 def test_chapter_reference_is_ambiguous(two_volumes: Path) -> None:
     with pytest.raises(ValueError, match="ambiguous") as exc:
-        line_limit_for_chapter(two_volumes, "2")
+        line_limit_for_chapter(read_chapters(two_volumes), "2")
     lines = str(exc.value).splitlines()
     assert len(lines) == 3
     assert all(
@@ -110,4 +100,4 @@ def test_chapter_reference_is_ambiguous(two_volumes: Path) -> None:
 
 def test_volume_chapter_not_found(two_volumes: Path) -> None:
     with pytest.raises(ValueError, match="volume 2.*chapter 3.*not found"):
-        line_limit_for_chapter(two_volumes, "2:3")
+        line_limit_for_chapter(read_chapters(two_volumes), "2:3")

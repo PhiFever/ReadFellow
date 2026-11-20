@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import shutil
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -22,7 +21,6 @@ from zvec.model.param.query import Fts
 from .models import (
     Chunk,
     Evidence,
-    IndexManifest,
     ProgressFilter,
     QueryChunkFields,
     ZvecChunkFields,
@@ -46,10 +44,6 @@ STORED_OUTPUT_FIELDS = [
 
 def collection_path(index_dir: Path, collection: str) -> Path:
     return index_dir / collection
-
-
-def metadata_path(metadata_dir: Path, collection: str) -> Path:
-    return metadata_dir / collection
 
 
 def create_schema(collection: str, dimension: int) -> CollectionSchema:
@@ -342,51 +336,3 @@ def _evidence_from_doc(
         retrieval_mode=retrieval_mode,
         score=doc.score,
     )
-
-
-def write_manifest(
-    *,
-    metadata_dir: Path,
-    collection: str,
-    manifest: IndexManifest,
-    chunks: list[Chunk],
-) -> None:
-    meta = metadata_path(metadata_dir, collection)
-    meta.mkdir(parents=True, exist_ok=True)
-    (meta / "manifest.json").write_text(
-        json.dumps(manifest.model_dump(mode="json"), ensure_ascii=False, indent=2)
-        + "\n",
-        encoding="utf-8",
-    )
-    with (meta / "chunks.jsonl").open("w", encoding="utf-8") as file:
-        for chunk in chunks:
-            file.write(
-                json.dumps(chunk.model_dump(mode="json"), ensure_ascii=False) + "\n"
-            )
-
-
-def read_chunks(*, metadata_dir: Path, collection: str) -> list[Chunk]:
-    path = metadata_path(metadata_dir, collection) / "chunks.jsonl"
-    if not path.is_file():
-        raise FileNotFoundError(
-            f"chunk metadata not found: {path}; run the index command first"
-        )
-
-    chunks: list[Chunk] = []
-    with path.open("r", encoding="utf-8") as file:
-        for line_number, line in enumerate(file, start=1):
-            stripped = line.strip()
-            if not stripped:
-                continue
-            try:
-                chunks.append(Chunk.model_validate_json(stripped))
-            except ValueError as exc:
-                raise ValueError(
-                    f"invalid chunk metadata in {path}:{line_number}: {exc}"
-                ) from exc
-    return chunks
-
-
-def read_manifest(*, metadata_dir: Path, collection: str) -> IndexManifest:
-    path = metadata_path(metadata_dir, collection) / "manifest.json"
-    return IndexManifest.model_validate_json(path.read_text(encoding="utf-8"))

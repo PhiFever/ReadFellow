@@ -1,53 +1,25 @@
-# 索引与检索：机制和易踩的坑
+# 索引与检索
 
-改 `index`、`search` / `fts` / `fetch` / `hybrid`、进度过滤或 `store.py` 之前读这份。审查规则见 `CODING_STANDARDS.md`，已定的设计决策见 `docs/decisions.md`。
+每本书对应一个 `library/<collection>.db`。SQLite 表结构和生产用的 `SqliteChunkStore` 在 `library.py`。第 3 步对照检索结果时仍可用 `store.ZvecChunkStore.open_for_read` 读取旧索引。
 
-## 数据流
+## 建库与续跑
 
-索引：`chunk_document` → 用首个 chunk 探测 embedding 维度 → `ZvecChunkStore.open_for_write` → **先写 MySQL source_versions + chunks** → 按 `batch_size` 分批调 `store.upsert(batch, model=, embed=embedder.embed)`（比对 `text_hash` 决定 insert / update / skip，**只对真要写的 chunk 调 `embed`**）→ `store.commit(optimize=)`。
+`chunk_document` 按文本单元切块，记录行号、字节偏移和原文。chunk id 由源文件 SHA-256 的前 12 位和从 0 开始的六位序号组成。章节与切块共用 `iter_headings` 识别标题。章节正文包含标题、原有换行和空行，直到下一标题前一行。每个 chunk 按起始行关联章节，首个标题之前的 chunk 保留，所属章节为空。
 
-检索：读 manifest → `ZvecChunkStore.open_for_read`（`read_only=True, enable_mmap=True`）→ 构造 `ProgressFilter` → `store.search_vector/search_fts/fetch`，返回的已经是 `Evidence`。
+`index` 用固定的短文本探测模型的向量维度，随后在一个事务中写入书目和全书章节。书目记录源路径、源文件哈希、切块器版本、切块参数、embedding 模型和维度。这些值必须与已有书目逐项相同才能续跑。任一项改变，需加 `--rebuild` 重建库文件。库的 schema 版本由 `PRAGMA user_version` 记录。
 
-## zvec seam（`store.py`）
+每批只为新增或文本哈希有变化的 chunk 计算向量。chunk 原文、向量和对应的 FTS5 行一起提交。中断后，`status` 会显示已提交数与应有数，例如 `8/16 docs`。重跑原命令即可补齐。`--limit` 只限制本次索引的 chunk 数；去掉它重跑可以继续索引后面的内容。
 
-`store.py` 是唯一接触 zvec 的模块（ruff `TID251` 强制）。对外只有 `ChunkStore` Protocol 的 6 个方法：`upsert` / `commit` / `search_vector` / `search_fts` / `fetch` / `stats`。`stats` 返回 `StoreStats`（`doc_count` + `index_completeness`），只给 `status` 对账 manifest 用。
+## 查询与证据
 
-`ZvecChunkStore` 是生产 adapter，schema 定义、collection 打开/重建、`Doc` 转换、批内 text_hash 比对与 insert/update 拆分都在里面；测试里的 `InMemoryChunkStore` 是第二个 adapter。`Doc` / `Status` / `CollectionOption` 不跨 seam，检索结果直接以 `Evidence` 返回。旧 manifest / chunks JSON 读写工具仍在 `store.py`，只供导入与迁移测试。
+读取命令统一经过 `app._read_collection`。源文件在场时核对哈希，源文件缺失时使用库里保存的章节和原文。哈希或切块器版本不符会阻止读取；`status` 报告原因和实际行数。检索结果携带原文、chunk id、源路径和行范围。CLI 展示前 260 个字符，`fetch` 可按 id 取全文。
 
-## 切块与重建
+- 向量通道先用 SQL 限定进度，再用 NumPy 对小端 float32 向量求内积。Ollama 向量已做 L2 归一化。内积相同的 chunk 按序号升序排列。
+- 关键词通道对原文和查询都用 jieba 精确分词，去掉纯空白和标点。查询词分别加引号，用 OR 连接。FTS5 在同一条 SQL 里过滤进度并按 BM25 排序。
+- `hybrid` 按两条通道内的排名做 RRF 融合，返回各通道候选数及命中的排名。
 
-- 切块：先按空行切成 `TextUnit`（保留行号、字节偏移、当前章节标题），再按 `target_chars` 装窗 + 尾部 overlap 拼成 `Chunk`。章节由 `iter_headings` 识别：分隔线后的首个非空行，或匹配 `CHAPTER_RE` 的行；与当前标题只差空白的重复行不另分章。
-- **chunk id = `source_hash[:12]_%06d`**。改 `chunk_chars` / `overlap_chars` 会让 id 与行范围全部漂移，必须 `--rebuild`，否则旧 doc 残留在 collection 里。
-- `index --rebuild` 不删除 `metadata/<collection>/` 下的旧 JSON 备份。
-- **换 embedding 模型必须 `--rebuild`**：`open_for_write` 只在维度不匹配时报错，同维度的不同模型拦不住。
-- **`optimize()` 不能随便跳**。`--no-optimize` 只用于测写入速度；不 optimize 时持久化的中文 FTS 重开后可能查不到。
-- **索引不是原子发布**：embedding 中途失败会留下 metadata 完整而 collection 不完整的状态。`status` 用 `ChunkStore.stats()` 对账能检出，但写入本身仍未改成两阶段发布。
+## 进度
 
-## Embedding 与生成接口
+`--max-chapter V:N` 由库中的章节表换算出结束行。书内章号重回 1 时开启下一卷；章号撞号时列出候选与对应的 `--max-line`。章号、行号和 chunk 序号上限可以组合，取交集。不传进度参数时检索全书。
 
-- `ollama.py` 用纯 `urllib` 调 `/api/embed` 与 `/api/generate`。embedding 默认 L2 归一化。
-- 生成走**约束解码**：`format` 传 JSON schema（`ANALYSIS_RESPONSE_SCHEMA`），不传 `"json"`，因为后者只保证能解析，裸字符串在数组里也是合法 JSON。
-- 采样参数全部来自 `DerivationSettings`（Qwen3 官方 non-thinking 推荐值，temperature 0.7）。**不用贪心解码**：贪心会让 retry 逐字节重放同一个坏结果。
-- `openai_compat.py` 用 `json_schema` + `strict` 约束输出，写死关闭思考并逐次校验响应里没有思考内容；429 由 SDK 按 `retry-after` 重试。
-
-## 进度过滤
-
-`progress.py` 由「卷:书内章号」或行号算出 `ProgressFilter`，卷号由章号回到 1 推出，章号撞号时报错并列出每个候选的 `--max-line`。
-
-过滤有两条路径，新入口两边都要走：
-
-- `ProgressFilter` 整体传给 `ChunkStore`，zvec adapter 用它的 `expression`。
-- 进程内用 `ProgressFilter.allows(fields)`，fetch 走这条。
-
-`ChunkStore.fetch` **不施加进度限制**，因为只有它要区分「没这个 chunk」和「还没读到」。`fetch_chunk` 拿到 Evidence 后自己判，返回 `found` / `not_found` / `outside_progress` 三态，越界时不带 text。
-
-## 源文件校验
-
-`_validate_chunk_metadata_source` 校验数据库 chunks 的 source path 与源文件当前 hash，源文件改过就要求重新 index。它接收去重后的 `(source_path, source_hash)` 集合，外面包了两层：
-
-- `app._load_indexed_source`：给要读 chunks 原文的派生入口。
-- `app._load_manifest`：给 `search` / `fts` / `fetch`（`hybrid` 经由前两者），只查身份集合（`ArtifactStore.read_manifest`），不拉正文。
-
-检索路径也必须校验：源文件改过之后，存储的行号和 `--max-chapter` 算出的行号不在同一坐标系，会放行越界章节。
-
-唯一例外是 `collection_status`：它用 `ArtifactStore.read_source` 读取，再显式调 `_validate_chunk_metadata_source`，把异常 catch 成 `source_error` 字段，因为 status 的职责是把失效报出来。
+`ChunkStore` 的检索方法接收 `ProgressFilter`，过滤条件是 chunk 结束行和序号都不超过各自上限。旧 zvec 实现仍使用其 `expression` 字段。`fetch_chunk` 先按 id 取原文，再用 `allows()` 区分找不到和超出进度。越界时只返回状态。

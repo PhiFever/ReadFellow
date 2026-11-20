@@ -17,7 +17,9 @@ from readfellow.config import (
 def test_cli_defaults_come_from_config() -> None:
     config = ReadFellowConfig(
         paths=PathConfig(
-            index_dir=Path("custom-indexes"), metadata_dir=Path("custom-meta")
+            library_dir=Path("books"),
+            index_dir=Path("custom-indexes"),
+            metadata_dir=Path("custom-meta"),
         ),
         ollama=OllamaConfig(
             base_url="http://localhost:9999",
@@ -38,6 +40,7 @@ def test_cli_defaults_come_from_config() -> None:
     parser = build_parser(config)
 
     index_args = parser.parse_args(["index", "novel.txt"])
+    assert index_args.library_dir == Path("books")
     assert index_args.index_dir == Path("custom-indexes")
     assert index_args.metadata_dir == Path("custom-meta")
     assert index_args.ollama_url == "http://localhost:9999"
@@ -51,5 +54,3 @@ def test_cli_defaults_come_from_config() -> None:
     search_args = parser.parse_args(["search", "question"])
     assert search_args.collection == "books"
     assert search_args.top_k == 9
-
-    assert parser.parse_args(["analyze"]).llm_model == "cloud-test"

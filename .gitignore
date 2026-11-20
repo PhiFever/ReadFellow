@@ -12,6 +12,7 @@ wheels/
 
 # ReadFellow generated artifacts
 .cache/
+library/
 indexes/
 metadata/
 logs/

@@ -5,12 +5,12 @@ description = "Local document indexing and retrieval helpers for agent-assisted 
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "jieba>=0.42.1",
+    "numpy>=2.5.4",
     "openai>=3.13.0",
     "pydantic>=2.13.4",
-    "pymysql[rsa]>=1.1",
     "python-dotenv>=1.1",
     "pyyaml>=6.0.3",
-    "sqlalchemy>=2.0.52",
     "zvec>=0.5.1",
 ]
 
@@ -40,11 +40,10 @@ extend-select = ["TID251"]
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
 zvec = { msg = "zvec 只在 store.py 里 import，其余模块经 ChunkStore 访问" }
 openai = { msg = "openai 只在 openai_compat.py 里 import，其余模块经生成接口访问" }
-sqlalchemy = { msg = "sqlalchemy 只在 artifacts.py 和 artifact_schema.py 里 import，其余模块经 ArtifactStore 访问" }
+sqlite3 = { msg = "sqlite3 只在 library.py 里 import" }
 
 [tool.ruff.lint.per-file-ignores]
 "src/readfellow/store.py" = ["TID251"]
 "src/readfellow/openai_compat.py" = ["TID251"]
-"src/readfellow/artifacts.py" = ["TID251"]
-"src/readfellow/artifact_schema.py" = ["TID251"]
-"tests/**" = ["TID251"]
+"src/readfellow/library.py" = ["TID251"]
+"tests/test_openai_compat.py" = ["TID251"]

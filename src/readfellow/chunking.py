@@ -5,7 +5,7 @@ import re
 from collections.abc import Iterable, Iterator
 from pathlib import Path
 
-from .models import Chunk, TextUnit
+from .models import ChapterBoundary, Chunk, TextUnit
 
 CHAPTER_RE = re.compile(
     r"^\s*(第[0-9零〇一二两三四五六七八九十百千万]+[章节回部篇].*|"
@@ -201,3 +201,63 @@ def chunk_document(
 
     emit()
     return chunks
+
+
+_CHAPTER_NUMBER_RE = re.compile(r"^\d*第([0-9零〇一二两三四五六七八九十百千万]+)章")
+
+
+def _chapter_number(title: str) -> int | None:
+    match = _CHAPTER_NUMBER_RE.match(title)
+    if match is None:
+        return None
+    value = match[1]
+    if value.isdecimal():
+        return int(value)
+    digits = dict(zip("零〇一二两三四五六七八九", (0, 0, 1, 2, 2, 3, 4, 5, 6, 7, 8, 9)))
+    units = {"十": 10, "百": 100, "千": 1000, "万": 10000}
+    total = section = digit = 0
+    for char in value:
+        if char in digits:
+            digit = digits[char]
+        elif char in units:
+            unit = units[char]
+            if unit == 10000:
+                total += (section + digit) * unit
+                section = 0
+            else:
+                section += (digit or 1) * unit
+            digit = 0
+        else:
+            return None
+    return total + section + digit
+
+
+def read_chapters(source: Path) -> list[ChapterBoundary]:
+    boundaries: list[ChapterBoundary] = []
+    volume = 1
+    seen_number = False
+    lines = source.read_bytes().decode("utf-8").splitlines(keepends=True)
+    headings = list(iter_headings(lines))
+    for index, (line_start, title) in enumerate(headings):
+        line_end = (
+            headings[index + 1][0] - 1 if index + 1 < len(headings) else len(lines)
+        )
+        text = "".join(lines[line_start - 1 : line_end])
+        number = _chapter_number(title)
+        if number == 1 and seen_number:
+            volume += 1
+        if number is not None:
+            seen_number = True
+        boundaries.append(
+            ChapterBoundary(
+                ordinal=index + 1,
+                line_end=line_end,
+                text=text,
+                content_hash=sha256_text(text),
+                title=title,
+                line_start=line_start,
+                volume=volume,
+                number=number,
+            )
+        )
+    return boundaries
