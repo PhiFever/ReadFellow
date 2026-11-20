@@ -4,7 +4,7 @@
 
 ## 不变量
 
-- 返回给用户的内容都回落到存储的 chunk 原文 + `source_path:line_start-line_end`。
+- 返回给用户的内容都回落到存储的章节或 chunk 原文 + `source_path:line_start-line_end`。
 - 派生物与源文档不一致时 fail closed，不猜。
 - 有进度限制时，超出进度的文本不出现在任何输出里，包括没有逐值 provenance 的聚合信息。
 
@@ -18,7 +18,7 @@
 ## 检索入口
 
 - 新的检索或派生入口经 `app._read_collection` 校验源文件；`collection_status` 的 catch-and-report 是唯一例外，不照抄。
-- 新入口两条进度过滤路径都要走：`ProgressFilter` 传给 `SqliteChunkStore` 的检索方法，进程内用 `ProgressFilter.allows()`。
+- 检索按 chunk 过滤：`ProgressFilter` 传给 `SqliteChunkStore` 的检索方法，取回单个 chunk 时用 `ProgressFilter.allows()`。按章节读取时先裁到可见行，再统计字数、命中数或输出原文。
 
 ## 派生物与持久化
 

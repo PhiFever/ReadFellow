@@ -5,6 +5,12 @@ import re
 from .models import ChapterBoundary, ProgressFilter
 
 
+class AmbiguousChapter(ValueError):
+    def __init__(self, message: str, candidates: list[ChapterBoundary]):
+        super().__init__(message)
+        self.candidates = candidates
+
+
 def line_limit_for_chapter(
     chapters: list[ChapterBoundary], ref: str, *, source: str = "collection"
 ) -> tuple[int, ChapterBoundary]:
@@ -39,7 +45,7 @@ def line_limit_for_chapter(
             f"{chapter.title}: --max-line {chapter.line_end}"
             for chapter in candidates
         )
-        raise ValueError("\n".join(details))
+        raise AmbiguousChapter("\n".join(details), candidates)
     current = candidates[0]
     return current.line_end, current
 

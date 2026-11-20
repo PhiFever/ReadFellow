@@ -1,12 +1,12 @@
 # ReadFellow
 
-ReadFellow 是一个本地优先的 CLI 工作流：把长文档（主要是中文小说）切块、用 Ollama 生成 embedding、存进 每本书独立的 SQLite 库，让 agent 能按语义 / 全文检索出**原文段落**，并带着精确出处（`source_path:line_start-line_end`）与用户讨论。
+ReadFellow 是一个本地优先的 CLI 工作流：把长文档（主要是中文小说）切块、用 Ollama 生成 embedding、存进每本书独立的 SQLite 库，让 agent 能按语义 / 全文检索出**原文段落**，并带着精确出处（`source_path:line_start-line_end`）与用户讨论。
 
 三条贯穿全流程的不变量：
 
 1. **源文档是唯一事实依据**。index、metadata、analysis 都是派生物，派生物 stale 时 fail closed，不猜测。
-2. **检索只是导航，原始 chunk 才是证据**。任何输出都回落到存储的 chunk 原文 + 精确出处。
-3. **防剧透优先**。一旦设定阅读进度，超出进度的文本绝不出现在输出里。
+2. **讨论内容要有原文依据**。按章节阅读或检索到段落后，引用书库中的原文和对应的源文件行号。
+3. **防剧透优先**。读取前必须设置进度，输出只包含进度以内的内容。
 
 ---
 
@@ -31,7 +31,7 @@ ollama pull qwen3-embedding:8b      # embedding，4096 维
 curl -s http://127.0.0.1:11434/api/tags
 ```
 
-`index`、`search` 和 `hybrid` 需要 embedding 服务。`fts`、`fetch`、`status` 和测试都可以离线运行。
+`index`、`search` 和 `hybrid` 需要 embedding 服务。其他读取命令、进度管理、`status` 和测试都可以离线运行。
 
 ---
 
@@ -41,7 +41,13 @@ curl -s http://127.0.0.1:11434/api/tags
 # 1) 冒烟索引前 12 个 chunk，确认 Ollama 通路正常
 uv run readfellow index corpus/samples/赛博英雄传.txt --collection smoke --rebuild --limit 12
 
-# 2) 语义检索
+# 2) 按实际阅读进度设置边界，例如已读完第一卷第二章
+uv run readfellow progress set 1:2 --collection smoke
+uv run readfellow toc --collection smoke
+uv run readfellow read --chapters 2 --collection smoke
+uv run readfellow find 尤基 --collection smoke
+
+# 语义检索
 uv run readfellow search "尤基的父亲" --collection smoke --top-k 2
 
 # 3) 中文全文检索
@@ -128,9 +134,15 @@ uv run readfellow status --collection sample
 
 输出包含源路径、全书章节数、切块参数、向量模型和维度。`index: 8/16 docs` 表示应有 16 个 chunk，已经提交 8 个。沿用原参数再跑 `index`，省略 `--rebuild`，即可续上。
 
+### 3.6 `toc` / `read` / `find` — 按章节阅读
+
+`toc` 给出目录序号、卷章、标题、行范围和可读字数。用 `read --chapters A-B` 按目录序号翻阅，或用 `read --lines A-B` 按源文件行号读取。两个范围都接受单个数字。输出超过 60000 字符时可缩小范围继续阅读。
+
+`find 词 [--chapters A-B] [--limit N]` 在章节原文中查找区分大小写的精确子串，汇总可读范围里的命中行数和每章计数，默认展示前 50 条。三个命令都支持 `--json`。
+
 ## 4. 防剧透：阅读进度限制
 
-所有检索命令和 `fetch` 都接受同一组进度参数：
+每本书单独保存进度。首次读取前运行 `progress set V:N` 或 `progress set --line N`。已读完全书可用 `progress set --all`。用 `progress show` 查看。七个读取命令都接受以下单次限制。
 
 | 参数 | 语义 |
 |---|---|
@@ -144,13 +156,13 @@ uv run readfellow hybrid "武神"          --collection sample --max-chapter 1:5
 uv run readfellow fetch  <chunk-id>      --collection sample --max-chapter 1:50
 ```
 
-检索在 SQL 中按结束行和 chunk 序号过滤，`fetch` 在输出前检查进度。不传进度参数时可检索全书。
+检索在 SQL 中按结束行和 chunk 序号过滤，`fetch` 在输出前检查进度。省略单次参数时使用已存进度。要读到更远处，需要重新运行 `progress set`。
 
 ---
 
 ## 5. 书库与源文件
 
-`library/<collection>.db` 保存书目、完整章节、chunk 原文、FTS5 索引和向量。可以单独复制这个文件。源文件在场时会核对哈希，内容发生变化后需要重新运行 `index --rebuild`。源文件缺失时仍可用书库中的行号限制进度，检索和取回原文。
+`library/<collection>.db` 保存书目、完整章节、chunk 原文、FTS5 索引和向量。可以单独复制这个文件。源文件在场时会核对哈希，内容发生变化后需要重新运行 `index --rebuild`，然后重新设置进度。源文件缺失时仍可用书库中的行号限制进度，检索和取回原文。
 
 ## 6. 开发
 

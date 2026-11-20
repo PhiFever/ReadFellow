@@ -11,11 +11,30 @@ from pathlib import Path
 import jieba
 import numpy as np
 
-from .models import ChapterBoundary, Chunk, Evidence, IndexManifest, ProgressFilter
+from .models import (
+    ChapterBoundary,
+    Chunk,
+    Evidence,
+    IndexManifest,
+    ProgressFilter,
+    ReaderState,
+)
 
 jieba.setLogLevel(logging.WARNING)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+READER_SCHEMA = """
+CREATE TABLE IF NOT EXISTS reader_state (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    kind TEXT NOT NULL CHECK (kind IN ('all', 'chapter', 'line')),
+    value TEXT,
+    line_limit INTEGER,
+    source_hash TEXT NOT NULL,
+    set_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CHECK ((kind = 'all' AND value IS NULL AND line_limit IS NULL)
+        OR (kind != 'all' AND value IS NOT NULL AND line_limit IS NOT NULL AND line_limit > 0))
+)
+"""
 SCHEMA = """
 CREATE TABLE book (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -101,28 +120,74 @@ class SqliteChunkStore:
     ) -> Iterator[SqliteChunkStore]:
         if write:
             path.parent.mkdir(parents=True, exist_ok=True)
-            if rebuild:
-                path.unlink(missing_ok=True)
         elif not path.is_file():
             raise FileNotFoundError(
                 f"collection does not exist: {path}; run the index command first"
             )
-        new = write and not path.exists()
         uri = path.resolve().as_uri() + ("?mode=rwc" if write else "?mode=ro")
         with closing(sqlite3.connect(uri, uri=True)) as db:
             db.row_factory = sqlite3.Row
             db.execute("PRAGMA foreign_keys = ON")
-            if new:
-                db.executescript(
-                    f"BEGIN;\n{SCHEMA}\nPRAGMA user_version = {SCHEMA_VERSION};\nCOMMIT;"
-                )
-            if db.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION:
+            db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
+            version = db.execute("PRAGMA user_version").fetchone()[0]
+            if version == 1 and not write:
+                raise RuntimeError("run progress set to upgrade the library")
+            if version != SCHEMA_VERSION and not (
+                write and (version in (0, 1) or rebuild)
+            ):
                 raise RuntimeError(
                     f"unsupported library schema in {path}; run index --rebuild"
                 )
-            if not write:
-                db.execute("BEGIN")
+            if write:
+                if rebuild:
+                    for name in ("chunk_fts", "chunks", "chapters", "book"):
+                        db.execute(f"DROP TABLE IF EXISTS {name}")
+                if version == 0 or rebuild:
+                    for statement in SCHEMA.strip().rstrip(";").split(";"):
+                        db.execute(statement)
+                if version != SCHEMA_VERSION:
+                    db.execute(READER_SCHEMA)
+                    db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             yield cls(db)
+            if write:
+                db.commit()
+
+    def reader_state(self) -> ReaderState | None:
+        row = self._db.execute(
+            "SELECT kind, value, line_limit, source_hash, set_at FROM reader_state"
+        ).fetchone()
+        return ReaderState(**row) if row else None
+
+    def save_progress(
+        self, kind: str, value: str | None, line_limit: int | None, source_hash: str
+    ) -> ReaderState:
+        self._db.execute(
+            "INSERT OR REPLACE INTO reader_state (singleton, kind, value, line_limit, source_hash) VALUES (1, ?, ?, ?, ?)",
+            (kind, value, line_limit, source_hash),
+        )
+        state = self.reader_state()
+        assert state is not None
+        return state
+
+    def chunk_line_limit(self, index: int) -> int:
+        return self._db.execute(
+            "SELECT coalesce(max(line_end), 0) FROM chunks WHERE chunk_index <= ?",
+            (index,),
+        ).fetchone()[0]
+
+    def chapter_texts(
+        self, end: int | None, ordinals: tuple[int, int] | None, start: int = 1
+    ) -> Iterator[ChapterBoundary]:
+        first, last = ordinals or (None, None)
+        rows = self._db.execute(
+            """SELECT * FROM chapters
+               WHERE line_end >= :start AND (:end IS NULL OR line_start <= :end)
+                 AND (:first IS NULL OR ordinal BETWEEN :first AND :last)
+               ORDER BY ordinal""",
+            {"start": start, "end": end, "first": first, "last": last},
+        )
+        for row in rows:
+            yield ChapterBoundary(**row)
 
     def manifest(self) -> IndexManifest | None:
         row = self._db.execute("SELECT * FROM book").fetchone()
@@ -139,7 +204,6 @@ class SqliteChunkStore:
 
     def prepare(self, book: IndexManifest, chapters: list[ChapterBoundary]) -> None:
         with self._db as db:
-            db.execute("BEGIN IMMEDIATE")
             existing = self.manifest()
             if existing is not None:
                 if existing.model_dump(exclude={"chunk_count"}) != book.model_dump(

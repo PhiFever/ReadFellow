@@ -37,3 +37,11 @@ def book(tmp_path, embedder):
         encoding="utf-8",
     )
     return config, source
+
+
+@pytest.fixture
+def readable_book(book):
+    config, source = book
+    app.index_document(config, source, "books")
+    app.set_progress(config, "books")
+    return book

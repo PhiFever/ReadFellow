@@ -11,6 +11,7 @@ def test_semantic_search_is_configured_application_workflow(book, embedder):
     config.ollama.keep_alive = "5m"
     config.ollama.embedding_model = "manifest-embedding"
     app.index_document(config, source, "books")
+    app.set_progress(config, "books")
     config.ollama.embedding_model = "other"
     result = app.semantic_search(config, "修理", "books", top_k=1)
     assert embedder.settings[-1] == {
@@ -90,9 +91,8 @@ def test_front_matter_keeps_chunk_id_and_has_no_chapter(book):
         assert [row[1] for row in rows] == [None, 1, 2]
 
 
-def test_fts_search_returns_source_grounded_evidence(book):
-    config, source = book
-    app.index_document(config, source, "books")
+def test_fts_search_returns_source_grounded_evidence(readable_book):
+    config, source = readable_book
     result = app.fts_search(
         config, "尤基", "books", progress=ProgressLimit(max_chunk_index=0)
     )
@@ -105,9 +105,8 @@ def test_fts_search_returns_source_grounded_evidence(book):
     )
 
 
-def test_fetch_chunk_does_not_expose_text_outside_progress(book):
-    config, source = book
-    app.index_document(config, source, "books")
+def test_fetch_chunk_does_not_expose_text_outside_progress(readable_book):
+    config, _ = readable_book
     (hit,) = app.fts_search(config, "秘密", "books").evidence
     result = app.fetch_chunk(
         config, hit.chunk_id, "books", progress=ProgressLimit(max_line=2)
@@ -116,9 +115,10 @@ def test_fetch_chunk_does_not_expose_text_outside_progress(book):
     assert result.evidence is None
 
 
-def test_hybrid_ranks_multi_channel_agreement_above_a_single_channel_top_hit(book):
-    config, source = book
-    app.index_document(config, source, "books")
+def test_hybrid_ranks_multi_channel_agreement_above_a_single_channel_top_hit(
+    readable_book,
+):
+    config, _ = readable_book
     result = app.hybrid_search(config, "秘密", "books")
     assert result.evidence[0].chunk_index == 1
     assert [(m.mode, m.rank) for m in result.evidence[0].matches] == [
@@ -127,9 +127,8 @@ def test_hybrid_ranks_multi_channel_agreement_above_a_single_channel_top_hit(boo
     ]
 
 
-def test_hybrid_reports_channel_candidates(book):
-    config, source = book
-    app.index_document(config, source, "books")
+def test_hybrid_reports_channel_candidates(readable_book):
+    config, _ = readable_book
     result = app.hybrid_search(config, "秘密", "books", top_k=1)
     assert [(c.mode, c.candidates) for c in result.channels] == [
         ("vector", 2),
@@ -138,9 +137,10 @@ def test_hybrid_reports_channel_candidates(book):
     assert len(result.evidence) == 1
 
 
-def test_hybrid_fails_when_the_embedding_service_is_down(book, embedder, monkeypatch):
-    config, source = book
-    app.index_document(config, source, "books")
+def test_hybrid_fails_when_the_embedding_service_is_down(
+    readable_book, embedder, monkeypatch
+):
+    config, _ = readable_book
 
     def failed(self, text):
         raise RuntimeError("ollama is unreachable")

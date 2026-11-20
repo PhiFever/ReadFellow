@@ -4,16 +4,30 @@ import time
 from collections import defaultdict
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
 
 from .chunking import CHUNKER_VERSION, chunk_document, read_chapters, sha256_file
 from .config import ReadFellowConfig
 from .library import SqliteChunkStore
-from .models import Evidence, EvidenceMatch, IndexManifest, ProgressFilter
+from .models import (
+    ChapterBoundary,
+    ChapterHits,
+    Evidence,
+    EvidenceMatch,
+    FindResult,
+    IndexManifest,
+    LineHit,
+    ProgressFilter,
+    ReaderState,
+    ReadLine,
+    ReadResult,
+    TocEntry,
+    TocResult,
+)
 from .ollama import OllamaEmbedder
-from .progress import build_progress_filter
+from .progress import AmbiguousChapter, build_progress_filter, line_limit_for_chapter
 
 RRF_K = 60
 FAN_OUT_MULTIPLIER = 10
@@ -202,24 +216,27 @@ def index_document(
 
 
 @dataclass(frozen=True)
-class _IndexedBook:
+class _Book:
     store: SqliteChunkStore
     manifest: IndexManifest
-    progress: ProgressFilter
-    chapter_count: int
+    chapters: list[ChapterBoundary]
     source_error: str | None
 
 
 @contextmanager
-def _read_collection(
+def _open_book(
     config: ReadFellowConfig,
     collection: str,
-    progress: ProgressLimit | None = None,
     *,
     report_errors: bool = False,
-) -> Iterator[_IndexedBook]:
+    write: bool = False,
+) -> Iterator[_Book]:
     path = _library_path(config, collection)
-    with SqliteChunkStore.open(path) as store:
+    if write and not path.is_file():
+        raise FileNotFoundError(
+            f"collection does not exist: {path}; run the index command first"
+        )
+    with SqliteChunkStore.open(path, write=write) as store:
         manifest = store.manifest()
         if manifest is None:
             raise RuntimeError(
@@ -247,20 +264,244 @@ def _read_collection(
                     error = "chunk metadata is stale (source file hash changed); run index --rebuild"
         if error and not report_errors:
             raise RuntimeError(error)
+        yield _Book(store, manifest, chapters, error)
+
+
+def set_progress(
+    config: ReadFellowConfig,
+    collection: str,
+    *,
+    chapter: str | None = None,
+    line: int | None = None,
+) -> ReaderState:
+    if chapter is not None and line is not None:
+        raise ValueError("choose one progress limit")
+    with _open_book(config, collection, write=True) as book:
         limit = build_progress_filter(
-            chapters=chapters,
-            source=manifest.source_path,
-            **asdict(progress or ProgressLimit()),
+            chapters=book.chapters,
+            source=book.manifest.source_path,
+            max_chapter=chapter,
+            max_line=line,
         )
-        yield _IndexedBook(store, manifest, limit, len(chapters), error)
+        kind = (
+            "chapter" if chapter is not None else "line" if line is not None else "all"
+        )
+        value = str(line) if line is not None else chapter
+        return book.store.save_progress(
+            kind, value, limit.max_line_end, book.manifest.source_hash
+        )
+
+
+def _current_progress(book: _Book) -> ReaderState:
+    state = book.store.reader_state()
+    if state is None:
+        raise ValueError("reading progress is unset; run progress set")
+    if state.source_hash != book.manifest.source_hash:
+        raise ValueError("reading progress is stale; run progress set again")
+    return state
+
+
+def show_progress(config: ReadFellowConfig, collection: str) -> ReaderState:
+    with _open_book(config, collection) as book:
+        return _current_progress(book)
+
+
+@dataclass(frozen=True)
+class _IndexedBook(_Book):
+    progress: ProgressFilter
+
+    def chapter_line_limit(self) -> int | None:
+        end = self.progress.max_line_end
+        if self.progress.max_chunk_index is not None:
+            chunk_end = self.store.chunk_line_limit(self.progress.max_chunk_index)
+            return chunk_end if end is None else min(end, chunk_end)
+        return end
+
+
+@contextmanager
+def _read_collection(
+    config: ReadFellowConfig, collection: str, progress: ProgressLimit | None = None
+) -> Iterator[_IndexedBook]:
+    with _open_book(config, collection) as book:
+        state = _current_progress(book)
+        request = progress or ProgressLimit()
+        chapters = book.chapters
+        if request.max_line is None and request.max_chapter is None:
+            request = replace(
+                request,
+                max_chapter=state.value if state.kind == "chapter" else None,
+                max_line=state.line_limit if state.kind == "line" else None,
+            )
+        elif state.line_limit is not None:
+            message = "requested limit exceeds saved progress; use progress set to read further"
+            if request.max_line is not None and request.max_line > state.line_limit:
+                raise ValueError(message)
+            if request.max_chapter is not None:
+                # Resolve against the whole book, but keep later titles out of diagnostics.
+                try:
+                    chapter_limit, _ = line_limit_for_chapter(
+                        chapters, request.max_chapter, source=book.manifest.source_path
+                    )
+                except AmbiguousChapter as exc:
+                    if any(c.line_end > state.line_limit for c in exc.candidates):
+                        raise ValueError(
+                            "chapter is ambiguous; use --max-line within saved progress"
+                        ) from None
+                    raise
+                if chapter_limit > state.line_limit:
+                    raise ValueError(message)
+        limit = build_progress_filter(
+            chapters=chapters, source=book.manifest.source_path, **asdict(request)
+        )
+        yield _IndexedBook(
+            book.store, book.manifest, chapters, book.source_error, limit
+        )
+
+
+def _visible_chapters(
+    book: _IndexedBook,
+    end: int | None,
+    ordinals: tuple[int, int] | None = None,
+    start: int = 1,
+) -> Iterator[tuple[ChapterBoundary, list[str]]]:
+    for chapter in book.store.chapter_texts(end, ordinals, start):
+        assert chapter.text is not None
+        lines = chapter.text.splitlines()
+        if end is not None:
+            lines = lines[: end - chapter.line_start + 1]
+        yield chapter, lines
+
+
+def table_of_contents(
+    config: ReadFellowConfig, collection: str, *, progress: ProgressLimit | None = None
+) -> TocResult:
+    with _read_collection(config, collection, progress) as book:
+        entries = []
+        for chapter, lines in _visible_chapters(book, book.chapter_line_limit()):
+            end = chapter.line_start + len(lines) - 1
+            ref = str(chapter.volume)
+            if chapter.number is not None:
+                ref += f":{chapter.number}"
+            entries.append(
+                TocEntry(
+                    ordinal=chapter.ordinal,
+                    reference=ref,
+                    title=chapter.title,
+                    line_start=chapter.line_start,
+                    line_end=end,
+                    characters=sum(len("".join(line.split())) for line in lines),
+                    partial=end < chapter.line_end,
+                )
+            )
+        return TocResult(progress=book.progress.description, chapters=entries)
+
+
+def read_passage(
+    config: ReadFellowConfig,
+    collection: str,
+    *,
+    chapters: tuple[int, int] | None = None,
+    lines: tuple[int, int] | None = None,
+    progress: ProgressLimit | None = None,
+) -> ReadResult:
+    if (chapters is None) == (lines is None):
+        raise ValueError("choose --chapters or --lines")
+    with _read_collection(config, collection, progress) as book:
+        cap = book.chapter_line_limit()
+        if lines:
+            first, last = lines
+        else:
+            assert chapters is not None
+            selected = [
+                c for c in book.chapters if chapters[0] <= c.ordinal <= chapters[1]
+            ]
+            if not selected:
+                raise ValueError("no chapters in requested range")
+            first, last = selected[0].line_start, selected[-1].line_end
+        end = min(last, cap) if cap is not None else last
+        if first > end:
+            raise ValueError("requested range is outside reading progress")
+        result = ReadResult(
+            progress=book.progress.description,
+            lines=[],
+            clipped_at=end if end < last else None,
+            truncated=False,
+        )
+        remaining = 60000
+        for chapter, texts in _visible_chapters(book, end, chapters, first):
+            for number, text in enumerate(texts, chapter.line_start):
+                if number < first:
+                    continue
+                row = ReadLine(number=number, text=text)
+                size = len(row.numbered()) + 1
+                if size > remaining:
+                    room = remaining - (size - len(text))
+                    if room >= 0:
+                        result.lines.append(ReadLine(number=number, text=text[:room]))
+                    result.truncated = True
+                    return result
+                result.lines.append(row)
+                remaining -= size
+        if not result.lines:
+            raise ValueError("no chapter text in requested range")
+        return result
+
+
+def find_text(
+    config: ReadFellowConfig,
+    query: str,
+    collection: str,
+    *,
+    chapters: tuple[int, int] | None = None,
+    limit: int = 50,
+    progress: ProgressLimit | None = None,
+) -> FindResult:
+    if not query or limit < 0:
+        raise ValueError("find requires a nonempty term and a nonnegative limit")
+    with _read_collection(config, collection, progress) as book:
+        counts = []
+        hits = []
+        for chapter, texts in _visible_chapters(
+            book, book.chapter_line_limit(), chapters
+        ):
+            count = 0
+            for number, text in enumerate(texts, chapter.line_start):
+                offset = text.find(query)
+                if offset < 0:
+                    continue
+                count += 1
+                if len(hits) < limit:
+                    hits.append(
+                        LineHit(
+                            number=number,
+                            ordinal=chapter.ordinal,
+                            title=chapter.title,
+                            snippet=text[
+                                max(0, offset - 60) : offset + len(query) + 60
+                            ],
+                        )
+                    )
+            if count:
+                counts.append(
+                    ChapterHits(
+                        ordinal=chapter.ordinal, title=chapter.title, count=count
+                    )
+                )
+        return FindResult(
+            progress=book.progress.description,
+            total_lines=sum(c.count for c in counts),
+            total_chapters=len(counts),
+            chapters=counts,
+            hits=hits,
+        )
 
 
 def collection_status(config: ReadFellowConfig, collection: str) -> CollectionStatus:
-    with _read_collection(config, collection, report_errors=True) as book:
+    with _open_book(config, collection, report_errors=True) as book:
         return CollectionStatus(
             collection,
             book.manifest,
-            book.chapter_count,
+            len(book.chapters),
             book.source_error,
             IndexReport(book.manifest.chunk_count, book.store.chunk_count()),
         )

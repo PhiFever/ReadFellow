@@ -86,6 +86,66 @@ class ChapterBoundary(ReadFellowModel):
     number: int | None
 
 
+class ReaderState(ReadFellowModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    kind: Literal["all", "chapter", "line"]
+    value: str | None
+    line_limit: int | None
+    source_hash: str
+    set_at: str
+
+
+class TocEntry(ReadFellowModel):
+    ordinal: int
+    reference: str
+    title: str
+    line_start: int
+    line_end: int
+    characters: int
+    partial: bool
+
+
+class TocResult(ReadFellowModel):
+    progress: str
+    chapters: list[TocEntry]
+
+
+class ReadLine(ReadFellowModel):
+    number: int
+    text: str
+
+    def numbered(self) -> str:
+        return f"{self.number:6}\t{self.text}"
+
+
+class ReadResult(ReadFellowModel):
+    progress: str
+    lines: list[ReadLine]
+    clipped_at: int | None
+    truncated: bool
+
+
+class ChapterHits(ReadFellowModel):
+    ordinal: int
+    title: str
+    count: int
+
+
+class LineHit(ReadFellowModel):
+    number: int
+    ordinal: int
+    title: str
+    snippet: str
+
+
+class FindResult(ReadFellowModel):
+    progress: str
+    total_lines: int
+    total_chapters: int
+    chapters: list[ChapterHits]
+    hits: list[LineHit]
+
+
 class ProgressFields(ReadFellowModel):
     model_config = ConfigDict(extra="allow", from_attributes=True)
 

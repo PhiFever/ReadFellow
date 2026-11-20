@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
 from pathlib import Path
@@ -12,10 +13,15 @@ from .app import (
     IndexReport,
     ProgressLimit,
     collection_status,
+    find_text,
     fts_search,
     hybrid_search,
     index_document,
+    read_passage,
     semantic_search,
+    set_progress,
+    show_progress,
+    table_of_contents,
 )
 from .app import (
     fetch_chunk as fetch_chunk_workflow,
@@ -44,13 +50,16 @@ def build_parser(config: ReadFellowConfig) -> argparse.ArgumentParser:
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    def add_collection(command: argparse.ArgumentParser) -> None:
+        command.add_argument(
+            "--collection",
+            type=valid_collection_name,
+            default=config.indexing.default_collection,
+        )
+
     index = subparsers.add_parser("index", help="chunk and index a UTF-8 text document")
     index.add_argument("source", type=Path)
-    index.add_argument(
-        "--collection",
-        type=valid_collection_name,
-        default=config.indexing.default_collection,
-    )
+    add_collection(index)
     index.add_argument("--chunk-chars", type=int, default=config.indexing.chunk_chars)
     index.add_argument(
         "--overlap-chars", type=int, default=config.indexing.overlap_chars
@@ -68,11 +77,7 @@ def build_parser(config: ReadFellowConfig) -> argparse.ArgumentParser:
 
     search = subparsers.add_parser("search", help="semantic vector search")
     search.add_argument("query")
-    search.add_argument(
-        "--collection",
-        type=valid_collection_name,
-        default=config.indexing.default_collection,
-    )
+    add_collection(search)
     search.add_argument("--top-k", type=int, default=config.search.top_k)
     add_progress_args(search)
 
@@ -80,11 +85,7 @@ def build_parser(config: ReadFellowConfig) -> argparse.ArgumentParser:
         "fts", help="Chinese full-text search using jieba and SQLite FTS5"
     )
     fts.add_argument("query")
-    fts.add_argument(
-        "--collection",
-        type=valid_collection_name,
-        default=config.indexing.default_collection,
-    )
+    add_collection(fts)
     fts.add_argument("--top-k", type=int, default=config.search.top_k)
     add_progress_args(fts)
 
@@ -93,51 +94,92 @@ def build_parser(config: ReadFellowConfig) -> argparse.ArgumentParser:
         help="fuse vector and FTS retrieval into one ranked evidence list",
     )
     hybrid.add_argument("query")
-    hybrid.add_argument(
-        "--collection",
-        type=valid_collection_name,
-        default=config.indexing.default_collection,
-    )
+    add_collection(hybrid)
     hybrid.add_argument("--top-k", type=int, default=config.search.top_k)
     add_progress_args(hybrid)
 
     fetch = subparsers.add_parser("fetch", help="fetch one stored chunk by id")
     fetch.add_argument("chunk_id")
-    fetch.add_argument(
-        "--collection",
-        type=valid_collection_name,
-        default=config.indexing.default_collection,
-    )
+    add_collection(fetch)
     add_progress_args(fetch)
 
     status = subparsers.add_parser(
         "status",
         help="report what a collection holds and what a rebuild would do to it",
     )
-    status.add_argument(
-        "--collection",
-        type=valid_collection_name,
-        default=config.indexing.default_collection,
+    add_collection(status)
+
+    progress = subparsers.add_parser(
+        "progress", help="set or show saved reading progress"
     )
+    actions = progress.add_subparsers(dest="action", required=True)
+    set_cmd = actions.add_parser(
+        "set",
+        help="save the current reading boundary",
+        description="Choose exactly one of chapter, --line N, or --all.",
+    )
+    selection = set_cmd.add_mutually_exclusive_group(required=True)
+    selection.add_argument("chapter", nargs="?", help="in-book chapter N or V:N")
+    selection.add_argument(
+        "--line", type=int, metavar="N", help="read through source line N"
+    )
+    selection.add_argument(
+        "--all", action="store_true", help="mark the whole book as read"
+    )
+    add_collection(set_cmd)
+    add_collection(actions.add_parser("show", help="show the saved reading boundary"))
+
+    toc = subparsers.add_parser("toc", help="list chapters within progress")
+    read = subparsers.add_parser("read", help="read numbered source lines")
+    ranges = read.add_mutually_exclusive_group(required=True)
+    ranges.add_argument(
+        "--chapters", type=number_range, metavar="A[-B]", help="inclusive toc ordinals"
+    )
+    ranges.add_argument(
+        "--lines", type=number_range, metavar="A[-B]", help="inclusive source lines"
+    )
+    find = subparsers.add_parser(
+        "find", help="find lines containing an exact substring"
+    )
+    find.add_argument("term", help="case-sensitive substring")
+    find.add_argument(
+        "--chapters", type=number_range, metavar="A[-B]", help="inclusive toc ordinals"
+    )
+    find.add_argument(
+        "--limit", type=int, default=50, help="maximum example lines (default 50)"
+    )
+    for cmd in (toc, read, find):
+        add_collection(cmd)
+        add_progress_args(cmd)
+        cmd.add_argument("--json", action="store_true", help="print one JSON object")
 
     return parser
+
+
+def number_range(value: str) -> tuple[int, int]:
+    match = re.fullmatch(r"(\d+)(?:-(\d+))?", value)
+    if match:
+        first, last = int(match[1]), int(match[2] or match[1])
+        if 1 <= first <= last:
+            return first, last
+    raise argparse.ArgumentTypeError("expected N or A-B with 1 <= A <= B")
 
 
 def add_progress_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--max-chapter",
         type=str,
-        help="only use chunks up to this in-book chapter: N, or VOLUME:N such as 2:50",
+        help="read through this in-book chapter: N or VOLUME:N (such as 2:50)",
     )
     parser.add_argument(
         "--max-line",
         type=int,
-        help="only use chunks whose ending line is at or before this line",
+        help="read through this source line",
     )
     parser.add_argument(
         "--max-chunk-index",
         type=int,
-        help="only use chunks whose chunk_index is at or below this value",
+        help="limit reading to chunks through this zero-based index",
     )
 
 
@@ -229,6 +271,71 @@ def command_fetch(args: argparse.Namespace, config: ReadFellowConfig) -> int:
         raise RuntimeError(f"fetch returned no evidence for {args.chunk_id}")
     print_progress(result.progress)
     print_evidence([result.evidence], full_text=True)
+    return 0
+
+
+def command_progress(args: argparse.Namespace, config: ReadFellowConfig) -> int:
+    if args.action == "set":
+        state = set_progress(
+            config, args.collection, chapter=args.chapter, line=args.line
+        )
+    else:
+        state = show_progress(config, args.collection)
+    boundary = (
+        "all (whole book read)"
+        if state.kind == "all"
+        else f"{state.kind} {state.value} (through line {state.line_limit})"
+    )
+    print(f"progress: {boundary}\nset at: {state.set_at} UTC")
+    return 0
+
+
+def command_reading(args: argparse.Namespace, config: ReadFellowConfig) -> int:
+    progress = progress_limit_from_args(args)
+    if args.command == "toc":
+        result = table_of_contents(config, args.collection, progress=progress)
+        if not args.json:
+            for c in result.chapters:
+                partial = " (unfinished)" if c.partial else ""
+                print(
+                    f"{c.ordinal}\t{c.reference}\t{c.title}\t{c.line_start}-{c.line_end}\t{c.characters}{partial}"
+                )
+    elif args.command == "read":
+        result = read_passage(
+            config,
+            args.collection,
+            chapters=args.chapters,
+            lines=args.lines,
+            progress=progress,
+        )
+        if result.clipped_at is not None:
+            print(f"clipped to line {result.clipped_at}", file=sys.stderr)
+        if result.truncated:
+            print("60000 character limit reached; narrow the range", file=sys.stderr)
+        if not args.json:
+            for row in result.lines:
+                print(row.numbered())
+    else:
+        result = find_text(
+            config,
+            args.term,
+            args.collection,
+            chapters=args.chapters,
+            limit=args.limit,
+            progress=progress,
+        )
+        if not args.json:
+            print(
+                f"{result.total_lines} matching lines in {result.total_chapters} chapters"
+            )
+            for chapter in result.chapters:
+                print(f"{chapter.ordinal}\t{chapter.title}\t{chapter.count}")
+            for hit in result.hits:
+                print(f"{hit.number}\t{hit.ordinal}\t{hit.title}\t{hit.snippet}")
+    if args.json:
+        print(json.dumps(result.model_dump(), ensure_ascii=False))
+    elif result.progress:
+        print(f"progress limit: {result.progress}", file=sys.stderr)
     return 0
 
 
@@ -354,6 +461,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     config = apply_global_overrides(config, args)
     try:
+        if args.command == "progress":
+            return command_progress(args, config)
+        if args.command in ("toc", "read", "find"):
+            return command_reading(args, config)
         if args.command == "index":
             return command_index(args, config)
         if args.command == "search":

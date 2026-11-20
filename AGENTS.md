@@ -16,7 +16,10 @@ Python 一律走 `uv`。`index` / `search` / `hybrid` 要本地 Ollama 的 embed
 
 ```sh
 uv run readfellow index corpus/samples/<doc>.txt --collection sample --rebuild --limit 8  # 冒烟索引前 8 个 chunk
-uv run readfellow hybrid "问题" --collection sample --top-k 5 --max-chapter 1:50       # 检索 + 进度限制
+uv run readfellow progress set 1:50 --collection sample                                 # 按读者声明设置进度
+uv run readfellow toc --collection sample                                               # 查看进度内的目录
+uv run readfellow read --chapters 2 --collection sample                                 # 按目录序号取原文
+uv run readfellow hybrid "问题" --collection sample --top-k 5                           # 按已存进度检索
 uv run readfellow status --collection sample                                            # 集合体检
 uv run pytest                                        # 全量，离线，不需要模型服务；pre-commit hook 会跑它
 uvx ruff format . && uvx ruff check .                # ruff 不进 dev 依赖；import 边界由 TID251 检查
