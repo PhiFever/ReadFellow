@@ -18,7 +18,7 @@
 ## 检索入口
 
 - 新的检索或派生入口经 `app._read_collection` 校验源文件；`collection_status` 的 catch-and-report 是唯一例外，不照抄。
-- 新入口两条进度过滤路径都要走：`ProgressFilter` 传给 `ChunkStore`，进程内用 `ProgressFilter.allows()`。
+- 新入口两条进度过滤路径都要走：`ProgressFilter` 传给 `SqliteChunkStore` 的检索方法，进程内用 `ProgressFilter.allows()`。
 
 ## 派生物与持久化
 

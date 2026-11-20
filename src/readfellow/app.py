@@ -262,7 +262,7 @@ def collection_status(config: ReadFellowConfig, collection: str) -> CollectionSt
             book.manifest,
             book.chapter_count,
             book.source_error,
-            IndexReport(book.manifest.chunk_count, book.store.stats().doc_count),
+            IndexReport(book.manifest.chunk_count, book.store.chunk_count()),
         )
 
 

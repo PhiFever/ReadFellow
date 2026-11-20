@@ -1,6 +1,6 @@
 # 索引与检索
 
-每本书对应一个 `library/<collection>.db`。SQLite 表结构和生产用的 `SqliteChunkStore` 在 `library.py`。第 3 步对照检索结果时仍可用 `store.ZvecChunkStore.open_for_read` 读取旧索引。
+每本书对应一个 `library/<collection>.db`。SQLite 表结构和生产用的 `SqliteChunkStore` 在 `library.py`。
 
 ## 建库与续跑
 
@@ -22,4 +22,4 @@
 
 `--max-chapter V:N` 由库中的章节表换算出结束行。书内章号重回 1 时开启下一卷；章号撞号时列出候选与对应的 `--max-line`。章号、行号和 chunk 序号上限可以组合，取交集。不传进度参数时检索全书。
 
-`ChunkStore` 的检索方法接收 `ProgressFilter`，过滤条件是 chunk 结束行和序号都不超过各自上限。旧 zvec 实现仍使用其 `expression` 字段。`fetch_chunk` 先按 id 取原文，再用 `allows()` 区分找不到和超出进度。越界时只返回状态。
+`SqliteChunkStore` 的检索方法接收 `ProgressFilter`，过滤条件是 chunk 结束行和序号都不超过各自上限。`fetch_chunk` 先按 id 取原文，再用 `allows()` 区分找不到和超出进度。越界时只返回状态。

@@ -2,7 +2,7 @@
 
 ## 项目定位
 
-ReadFellow 是一个本地优先的 CLI 工作流：把长文档（主要是中文小说）切块、用 Ollama 生成 embedding、存进 zvec 本地向量库，让 agent 能按语义/全文检索出**原文段落**，并带着精确出处与用户讨论。
+ReadFellow 是一个本地优先的 CLI 工作流：把长文档（主要是中文小说）切块、用 Ollama 生成 embedding、每本书单独存进一个 SQLite 库，让 agent 能按语义/全文检索出**原文段落**，并带着精确出处与用户讨论。
 
 三条贯穿全代码的不变量：
 
@@ -29,17 +29,16 @@ CLI 只调用 app 工作流；app 编排领域逻辑并调用存储与模型接�
 - `cli.py`：argparse 薄 adapter。
 - `app.py`：CLI 之外唯一该调用的入口（`index_document`、`semantic_search`、`hybrid_search`、`collection_status` 等）。
 - `chunking.py`：切块与章节识别。`progress.py`：由「卷:书内章号」或行号算出 `ProgressFilter`。
-- `store.py`：唯一接触 zvec 的模块，对外是 `ChunkStore` Protocol。
 - `library.py` 负责 SQLite 表结构、事务和检索，是唯一接触 sqlite3 的模块。
 - `ollama.py` / `openai_compat.py`：embedding 与生成接口。
 - `analysis.py`：章节提示词、解析和引文锚定；`extraction.py`、`derivation.py` 提供抽取工具与派生骨架。
 - `models.py`：所有 Pydantic 模型。
 
-当前索引存放在 `library/<collection>.db`。第 3 步对照用的旧库位于 `indexes/<collection>/`。
+当前索引存放在 `library/<collection>.db`。
 
 ## 文档
 
-- 改 `index`、检索命令、进度过滤、`store.py`、`library.py` 或 `status` 前，读 `docs/retrieval.md`。
+- 改 `index`、检索命令、进度过滤、`library.py` 或 `status` 前，读 `docs/retrieval.md`。
 - 改章节分析的提示词、解析或引文锚定前，读 `docs/derivation.md`。
 - 提议改设计前，查 `docs/decisions.md`：已定的决策各一行，附原文出处。
 - 审查 diff 时按 `CODING_STANDARDS.md` 逐条核对。

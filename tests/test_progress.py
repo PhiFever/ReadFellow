@@ -35,7 +35,7 @@ def test_chapter_boundaries_and_progress_filter(tmp_path: Path) -> None:
         max_chapter="2",
     )
 
-    assert progress.expression == "line_end <= 6"
+    assert (progress.max_line_end, progress.max_chunk_index) == (6, None)
     assert progress.description == "through volume 1 chapter 2: 第二章 继续"
     assert progress.allows({"line_end": 6, "chunk_index": 10})
     assert not progress.allows({"line_end": 7, "chunk_index": 10})
@@ -52,7 +52,7 @@ def test_progress_filter_combines_line_and_chunk_limits(tmp_path: Path) -> None:
         max_chunk_index=4,
     )
 
-    assert progress.expression == "line_end <= 3 and chunk_index <= 4"
+    assert (progress.max_line_end, progress.max_chunk_index) == (3, 4)
     assert progress.allows({"line_end": 3, "chunk_index": 4})
     assert not progress.allows({"line_end": 4, "chunk_index": 4})
     assert not progress.allows({"line_end": 3, "chunk_index": 5})

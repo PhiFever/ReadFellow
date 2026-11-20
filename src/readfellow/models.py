@@ -36,10 +36,6 @@ class Chunk(ReadFellowModel):
     byte_end: int
     chapter: str
 
-    @property
-    def char_count(self) -> int:
-        return len(self.text)
-
 
 class IndexManifest(ReadFellowModel):
     source_path: str
@@ -50,52 +46,6 @@ class IndexManifest(ReadFellowModel):
     chunk_chars: int
     overlap_chars: int
     chunker_version: int = 0
-
-
-class ZvecChunkFields(ReadFellowModel):
-    source_path: str
-    source_hash: str
-    chunk_index: int
-    line_start: int
-    line_end: int
-    byte_start: int
-    byte_end: int
-    chapter: str
-    text_hash: str
-    char_count: int
-    model: str
-    text: str
-
-    @classmethod
-    def from_chunk(cls, chunk: Chunk, *, model: str) -> ZvecChunkFields:
-        return cls(
-            source_path=chunk.source_path,
-            source_hash=chunk.source_hash,
-            chunk_index=chunk.chunk_index,
-            line_start=chunk.line_start,
-            line_end=chunk.line_end,
-            byte_start=chunk.byte_start,
-            byte_end=chunk.byte_end,
-            chapter=chunk.chapter,
-            text_hash=chunk.text_hash,
-            char_count=chunk.char_count,
-            model=model,
-            text=chunk.text,
-        )
-
-
-class QueryChunkFields(ReadFellowModel):
-    model_config = ConfigDict(extra="allow")
-
-    source_path: str = ""
-    chunk_index: int = 0
-    line_start: int = 0
-    line_end: int = 0
-    byte_start: int = 0
-    byte_end: int = 0
-    chapter: str = ""
-    text_hash: str = ""
-    text: str = ""
 
 
 class EvidenceMatch(ReadFellowModel):
@@ -146,7 +96,6 @@ class ProgressFields(ReadFellowModel):
 class ProgressFilter(ReadFellowModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    expression: str | None
     description: str
     max_line_end: int | None = None
     max_chunk_index: int | None = None

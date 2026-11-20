@@ -10,8 +10,6 @@ from readfellow.config import ReadFellowConfig
 def test_root_config_yaml_loads() -> None:
     config = ReadFellowConfig.load(Path("config.yaml"))
 
-    assert config.paths.index_dir == Path("indexes")
-    assert config.paths.metadata_dir == Path("metadata")
     assert config.ollama.embedding_model == "qwen3-embedding:8b"
     assert config.ollama.generation_model == "qwen3:8b"
     assert config.analysis.backend == "openai"
@@ -24,8 +22,6 @@ def test_config_loads_nested_overrides(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         """
-paths:
-  index_dir: custom-indexes
 ollama:
   base_url: http://localhost:9999
   embedding_model: embed-test
@@ -41,8 +37,6 @@ search:
 
     config = ReadFellowConfig.load(config_path)
 
-    assert config.paths.index_dir == Path("custom-indexes")
-    assert config.paths.metadata_dir == Path("metadata")
     assert config.ollama.base_url == "http://localhost:9999"
     assert config.ollama.embedding_model == "embed-test"
     assert config.ollama.generation_model == "qwen3:8b"

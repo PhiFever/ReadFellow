@@ -5,13 +5,13 @@ import sqlite3
 import unicodedata
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import closing, contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 import jieba
 import numpy as np
 
 from .models import ChapterBoundary, Chunk, Evidence, IndexManifest, ProgressFilter
-from .store import StoreStats, UpsertOutcome
 
 jieba.setLogLevel(logging.WARNING)
 
@@ -82,6 +82,12 @@ def _limits(progress: ProgressFilter) -> tuple[str, list[int]]:
             clauses.append(f" AND {column} <= ?")
             values.append(maximum)
     return "".join(clauses), values
+
+
+@dataclass(frozen=True)
+class UpsertOutcome:
+    written: int
+    skipped: int
 
 
 class SqliteChunkStore:
@@ -268,7 +274,5 @@ class SqliteChunkStore:
         row = self._evidence_row(chunk_id)
         return Evidence(**row, retrieval_mode="fetch") if row else None
 
-    def stats(self) -> StoreStats:
-        return StoreStats(
-            self._db.execute("SELECT count(*) FROM chunks").fetchone()[0], {}
-        )
+    def chunk_count(self) -> int:
+        return self._db.execute("SELECT count(*) FROM chunks").fetchone()[0]

@@ -1,7 +1,5 @@
 paths:
   library_dir: library
-  index_dir: indexes
-  metadata_dir: metadata
 ollama:
   base_url: http://127.0.0.1:11434
   embedding_model: qwen3-embedding:8b

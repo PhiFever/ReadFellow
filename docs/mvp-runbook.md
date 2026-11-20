@@ -181,5 +181,5 @@ error: failed to analyze chapter 第一章 生锈的智人
 
 ```sh
 uv run readfellow index corpus/samples/赛博英雄传.txt --collection smoke --rebuild --limit 20
-rm -rf indexes/smoke metadata/smoke     # 不再需要时
+rm -f library/smoke.db     # 不再需要时
 ```

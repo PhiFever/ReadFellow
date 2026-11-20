@@ -38,8 +38,6 @@ def build_parser(config: ReadFellowConfig) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="readfellow")
     parser.add_argument("--config", type=Path, default=CONFIG_FILE)
     parser.add_argument("--library-dir", type=Path, default=config.paths.library_dir)
-    parser.add_argument("--index-dir", type=Path, default=config.paths.index_dir)
-    parser.add_argument("--metadata-dir", type=Path, default=config.paths.metadata_dir)
     parser.add_argument("--ollama-url", default=config.ollama.base_url)
     parser.add_argument("--model", default=config.ollama.embedding_model)
     parser.add_argument("--keep-alive", default=config.ollama.keep_alive)
@@ -338,8 +336,6 @@ def apply_global_overrides(
 ) -> ReadFellowConfig:
     effective = config.model_copy(deep=True)
     effective.paths.library_dir = args.library_dir
-    effective.paths.index_dir = args.index_dir
-    effective.paths.metadata_dir = args.metadata_dir
     effective.ollama.base_url = args.ollama_url
     effective.ollama.embedding_model = args.model
     effective.ollama.keep_alive = args.keep_alive

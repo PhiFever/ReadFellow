@@ -16,8 +16,6 @@ class PathConfig(ReadFellowModel):
     model_config = ConfigDict(extra="forbid")
 
     library_dir: Path = Path("library")
-    index_dir: Path = Path("indexes")
-    metadata_dir: Path = Path("metadata")
 
 
 class OllamaConfig(ReadFellowModel):

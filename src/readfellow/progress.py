@@ -52,7 +52,6 @@ def build_progress_filter(
     max_line: int | None = None,
     max_chunk_index: int | None = None,
 ) -> ProgressFilter:
-    clauses: list[str] = []
     descriptions: list[str] = []
     max_line_end: int | None = None
 
@@ -71,17 +70,12 @@ def build_progress_filter(
         max_line_end = max_line if max_line_end is None else min(max_line_end, max_line)
         descriptions.append(f"through line {max_line}")
 
-    if max_line_end is not None:
-        clauses.append(f"line_end <= {max_line_end}")
-
     if max_chunk_index is not None:
         if max_chunk_index < 0:
             raise ValueError("--max-chunk-index cannot be negative")
-        clauses.append(f"chunk_index <= {max_chunk_index}")
         descriptions.append(f"through chunk index {max_chunk_index}")
 
     return ProgressFilter(
-        expression=" and ".join(clauses) if clauses else None,
         description="; ".join(descriptions),
         max_line_end=max_line_end,
         max_chunk_index=max_chunk_index,
