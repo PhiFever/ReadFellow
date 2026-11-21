@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -85,6 +85,12 @@ class ChapterBoundary(ReadFellowModel):
     volume: int
     number: int | None
 
+    @property
+    def reference(self) -> str:
+        return (
+            str(self.volume) if self.number is None else f"{self.volume}:{self.number}"
+        )
+
 
 class ReaderState(ReadFellowModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -95,7 +101,7 @@ class ReaderState(ReadFellowModel):
     set_at: str
 
 
-class SummaryConfig(ReadFellowModel):
+class NoteConfig(ReadFellowModel):
     model_config = ConfigDict(frozen=True)
 
     prompt_version: str
@@ -109,9 +115,93 @@ class SummaryConfig(ReadFellowModel):
 
 
 class ChapterSummary(ReadFellowModel):
+    note_kind: ClassVar[str] = "summary"
     summary: str
     characters: list[str]
     tags: list[str]
+
+
+MomentKind = Literal["抉择", "冲突", "战斗", "揭示", "情感", "关系变化", "成长", "其他"]
+
+
+class MomentFields(ReadFellowModel):
+    characters: list[str]
+    kind: MomentKind
+    description: str
+    trait: str
+    importance: int = Field(strict=True, ge=1, le=5)
+    evidence: str
+
+
+class IdentityFields(ReadFellowModel):
+    alias: str
+    name: str
+    evidence: str
+
+
+class GeneratedMoments(ReadFellowModel):
+    moments: list[MomentFields]
+    identities: list[IdentityFields]
+
+
+class NoteLines(ReadFellowModel):
+    line_start: int
+    line_end: int
+
+
+class Moment(MomentFields, NoteLines):
+    hidden: bool
+
+
+class Identity(IdentityFields, NoteLines):
+    pass
+
+
+class ChapterMoments(ReadFellowModel):
+    note_kind: ClassVar[str] = "moments"
+    moments: list[Moment]
+    identities: list[Identity]
+    unanchored_count: int
+    name_rejected_count: int
+
+
+class NoteCitation(NoteLines):
+    source_path: str
+    evidence: str
+
+    def citation(self) -> str:
+        end = f"-{self.line_end}" if self.line_end != self.line_start else ""
+        return f"    {self.source_path}:{self.line_start}{end} {self.evidence}"
+
+
+class MomentEntry(MomentFields, NoteCitation):
+    def rendered(self) -> str:
+        trait = f"（{self.trait}）" if self.trait else ""
+        return f"[{self.importance} {self.kind}] {'、'.join(self.characters)}：{self.description}{trait}\n{self.citation()}"
+
+
+class IdentityEntry(IdentityFields, NoteCitation):
+    def rendered(self) -> str:
+        return f"= {self.alias} → {self.name}\n{self.citation()}"
+
+
+class NotesChapter(ReadFellowModel):
+    ordinal: int
+    reference: str
+    title: str
+    line_start: int
+    line_end: int
+    moments: list[MomentEntry]
+    identities: list[IdentityEntry]
+
+    def heading(self) -> str:
+        return f"{self.ordinal}\t{self.reference}\t{self.title}\t{self.line_start}-{self.line_end}"
+
+
+class NotesResult(ReadFellowModel):
+    progress: str
+    chapters: list[NotesChapter]
+    truncated: bool
 
 
 class TocEntry(ReadFellowModel):

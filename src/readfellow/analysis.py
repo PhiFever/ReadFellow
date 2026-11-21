@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, get_args
 
 from .extraction import (
     EvidenceNotFound,
@@ -18,10 +18,17 @@ from .extraction import (
 )
 from .models import (
     ChapterAnalysis,
+    ChapterBoundary,
     ChapterEvent,
+    ChapterMoments,
     ChapterSummary,
     CharacterMention,
     Chunk,
+    GeneratedMoments,
+    Identity,
+    IdentityFields,
+    Moment,
+    MomentKind,
 )
 
 ANALYSIS_SCHEMA_VERSION = 2
@@ -257,7 +264,7 @@ def _resolve_evidence(
 
 SUMMARY_PROMPT_VERSION = "chapter-summary-v1"
 SUMMARY_SCHEMA_VERSION = 1
-KINDS = ["抉择", "冲突", "战斗", "揭示", "情感", "关系变化", "成长", "其他"]
+KINDS = list(get_args(MomentKind))
 SUMMARY_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
@@ -294,3 +301,105 @@ def parse_summary(raw: str) -> ChapterSummary:
     ):
         raise ValueError("invalid chapter summary")
     return note
+
+
+MOMENTS_PROMPT_VERSION = "chapter-moments-v1"
+MOMENTS_SCHEMA_VERSION = 1
+MOMENTS_MAX_TOKENS = 3072
+MOMENTS_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["moments", "identities"],
+    "properties": {
+        "moments": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "characters",
+                    "kind",
+                    "description",
+                    "trait",
+                    "importance",
+                    "evidence",
+                ],
+                "properties": {
+                    "characters": {"type": "array", "items": {"type": "string"}},
+                    "kind": {"type": "string", "enum": KINDS},
+                    "description": {"type": "string"},
+                    "trait": {"type": "string"},
+                    "importance": {"type": "integer", "enum": [1, 2, 3, 4, 5]},
+                    "evidence": {"type": "string"},
+                },
+            },
+        },
+        "identities": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["alias", "name", "evidence"],
+                "properties": {
+                    "alias": {"type": "string"},
+                    "name": {"type": "string"},
+                    "evidence": {"type": "string"},
+                },
+            },
+        },
+    },
+}
+MOMENTS_PROMPT = """你在为一部长篇小说建立逐章笔记。下面是其中一章的全文。
+
+只依据这一章的原文，输出一个 JSON 对象：
+- moments：本章值得记住的关键时刻，按发生先后排列。每条包含：
+  - characters：参与的人物，照原文里的称呼写，每个称呼单独一项，不加括号、斜杠或注释。
+  - kind：从「抉择、冲突、战斗、揭示、情感、关系变化、成长、其他」里选一个。
+  - description：一句话写清发生了什么。分清谁知道什么；话是说出口的还是心里想的；事情已经发生还是只是承诺或计划；是叙述者交代的还是人物亲眼所见。
+  - trait：这一刻体现的人物性格侧面，没有就写空字符串。
+  - importance：1 到 5，只和本章其他时刻比。5 是本章的转折或高潮。
+  - evidence：支撑这一条的原文，逐字复制一句，不超过 60 字，不改写、不拼接、不加省略号。
+- identities：本章原文明确说出的「两个称呼指同一个人」，比如外号、代号、化名、头衔对应到姓名。alias 和 name 都必须照抄原文里的称呼，不能是「某某的母亲」「AI」这类身份描述。evidence 逐字复制一句同时出现这两个称呼的原文，不超过 60 字。原文没有明说就不要列，不要推测。
+
+不写前情，不推测后续，不评价。
+
+章节标题：{title}
+
+{text}"""
+
+
+def parse_moments(
+    raw: str, chapter: ChapterBoundary, first_line: Callable[[str], int]
+) -> ChapterMoments:
+    generated = GeneratedMoments.model_validate_json(raw)
+    result = ChapterMoments(
+        moments=[], identities=[], unanchored_count=0, name_rejected_count=0
+    )
+    text = chapter.text
+    assert text is not None
+    for item in [*generated.moments, *generated.identities]:
+        if isinstance(item, IdentityFields):
+            item.alias, item.name = item.alias.strip(), item.name.strip()
+            names = [item.alias, item.name]
+        else:
+            item.characters = [name.strip() for name in item.characters]
+            names = item.characters
+        hit = locate_evidence(item.evidence, text)
+        if hit is None or (
+            isinstance(item, IdentityFields)
+            and any(not locate_evidence(name, hit) for name in names)
+        ):
+            result.unanchored_count += 1
+            continue
+        if any(first_line(name) > chapter.line_end for name in names):
+            result.name_rejected_count += 1
+            continue
+        pos = text.find(hit)
+        start = text.count("\n", 0, pos) + 1
+        fields = item.model_dump()
+        fields.update(evidence=hit, line_start=start, line_end=start + hit.count("\n"))
+        if isinstance(item, IdentityFields):
+            result.identities.append(Identity(**fields))
+        else:
+            result.moments.append(Moment(**fields, hidden=False))
+    return result

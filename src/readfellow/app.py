@@ -19,18 +19,24 @@ from .library import SqliteChunkStore
 from .models import (
     ChapterBoundary,
     ChapterHits,
+    ChapterMoments,
     ChapterSummary,
     DerivationSettings,
     Evidence,
     EvidenceMatch,
     FindResult,
+    IdentityEntry,
     IndexManifest,
     LineHit,
+    Moment,
+    MomentEntry,
+    NoteConfig,
+    NotesChapter,
+    NotesResult,
     ProgressFilter,
     ReaderState,
     ReadLine,
     ReadResult,
-    SummaryConfig,
     TocEntry,
     TocResult,
 )
@@ -40,6 +46,7 @@ from .progress import AmbiguousChapter, build_progress_filter, line_limit_for_ch
 
 RRF_K = 60
 FAN_OUT_MULTIPLIER = 10
+READ_CHAR_LIMIT = 60000
 ChannelMode = Literal["vector", "fts"]
 
 
@@ -118,6 +125,14 @@ class IndexReport:
 
 
 @dataclass(frozen=True)
+class MomentCounts:
+    chapters: int
+    hidden: int
+    unanchored: int
+    name_rejected: int
+
+
+@dataclass(frozen=True)
 class CollectionStatus:
     collection: str
     manifest: IndexManifest
@@ -125,6 +140,7 @@ class CollectionStatus:
     source_error: str | None
     index: IndexReport
     summaries: tuple[int, int] | None
+    moments: MomentCounts | None
 
 
 def _library_path(config: ReadFellowConfig, collection: str) -> Path:
@@ -392,17 +408,16 @@ def table_of_contents(
     with _read_collection(config, collection, progress) as book:
         entries = []
         cap = book.chapter_line_limit()
-        notes = book.store.summary_notes(ordinals=chapters, visible_only=True, end=cap)
+        notes = book.store.notes(
+            ChapterSummary, ordinals=chapters, visible_only=True, end=cap
+        )
         for chapter, lines in _visible_chapters(book, cap, chapters):
             note = notes.get(chapter.content_hash)
             end = chapter.line_start + len(lines) - 1
-            ref = str(chapter.volume)
-            if chapter.number is not None:
-                ref += f":{chapter.number}"
             entries.append(
                 TocEntry(
                     ordinal=chapter.ordinal,
-                    reference=ref,
+                    reference=chapter.reference,
                     title=chapter.title,
                     line_start=chapter.line_start,
                     line_end=end,
@@ -446,7 +461,7 @@ def read_passage(
             clipped_at=end if end < last else None,
             truncated=False,
         )
-        remaining = 60000
+        remaining = READ_CHAR_LIMIT
         for chapter, texts in _visible_chapters(book, end, chapters, first):
             for number, text in enumerate(texts, chapter.line_start):
                 if number < first:
@@ -466,6 +481,73 @@ def read_passage(
         return result
 
 
+def read_notes(
+    config: ReadFellowConfig,
+    collection: str,
+    *,
+    chapters: tuple[int, int],
+    progress: ProgressLimit | None = None,
+) -> NotesResult:
+    with _read_collection(config, collection, progress) as book:
+        cap = book.chapter_line_limit()
+        notes = book.store.notes(
+            ChapterMoments, ordinals=chapters, visible_only=True, end=cap
+        )
+        result = NotesResult(
+            progress=book.progress.description, chapters=[], truncated=False
+        )
+        remaining = READ_CHAR_LIMIT
+        for c in book.chapters:
+            if not chapters[0] <= c.ordinal <= chapters[1] or (
+                cap is not None and c.line_end > cap
+            ):
+                continue
+            chapter = NotesChapter(
+                ordinal=c.ordinal,
+                reference=c.reference,
+                title=c.title,
+                line_start=c.line_start,
+                line_end=c.line_end,
+                moments=[],
+                identities=[],
+            )
+            note = notes.get(c.content_hash)
+            items = (
+                [m for m in note.moments if not m.hidden] + note.identities
+                if note
+                else []
+            )
+            size = len(chapter.heading()) + 1 + (0 if items else len("no notes\n"))
+            if size > remaining:
+                result.truncated = True
+                break
+            remaining -= size
+            for item in items:
+                fields = item.model_dump(exclude={"hidden"})
+                fields.update(
+                    source_path=book.manifest.source_path,
+                    line_start=c.line_start + item.line_start - 1,
+                    line_end=c.line_start + item.line_end - 1,
+                )
+                if isinstance(item, Moment):
+                    entry = MomentEntry(**fields)
+                    target = chapter.moments
+                else:
+                    entry = IdentityEntry(**fields)
+                    target = chapter.identities
+                size = len(entry.rendered()) + 1
+                if size > remaining:
+                    result.truncated = True
+                    break
+                remaining -= size
+                target.append(entry)
+            if not items or chapter.moments or chapter.identities:
+                result.chapters.append(chapter)
+            if result.truncated:
+                break
+        return result
+
+
 def find_text(
     config: ReadFellowConfig,
     query: str,
@@ -481,7 +563,9 @@ def find_text(
         counts = []
         hits = []
         cap = book.chapter_line_limit()
-        notes = book.store.summary_notes(ordinals=chapters, visible_only=True, end=cap)
+        notes = book.store.notes(
+            ChapterSummary, ordinals=chapters, visible_only=True, end=cap
+        )
         for chapter, texts in _visible_chapters(book, cap, chapters):
             count = 0
             for number, text in enumerate(texts, chapter.line_start):
@@ -560,39 +644,135 @@ class AnalyzeProgress:
 
 
 @dataclass(frozen=True)
-class AnalyzeResult:
+class AnalyzeRound:
     chapters: int
     cached: int
     written: int
     failures: dict[int, str]
+
+
+@dataclass(frozen=True)
+class AnalyzeResult:
+    summary: AnalyzeRound
+    moments: AnalyzeRound
     spoiler: int
+    hidden: int
 
 
-def _generate_summary(
+def _generate_note(
+    kind: str,
     generator: JsonGenerator,
     chapter: ChapterBoundary,
     first_line: Callable[[str], int],
     retries: int,
-) -> ChapterSummary:
-    def parse(raw: str) -> ChapterSummary:
+) -> ChapterSummary | ChapterMoments:
+    def parse(raw: str) -> ChapterSummary | ChapterMoments:
+        if kind == "moments":
+            return analysis.parse_moments(raw, chapter, first_line)
         note = analysis.parse_summary(raw)
         if any(first_line(name) > chapter.line_end for name in note.characters):
             raise CharacterOutsideChapter("character appears after chapter end")
         return note
 
-    def retry(attempt: int, exc: Exception) -> None:
+    def on_retry(attempt: int, exc: Exception) -> None:
         if isinstance(exc, GenerationRejected):
             raise exc
 
+    prompt, schema = (
+        (analysis.SUMMARY_PROMPT, analysis.SUMMARY_SCHEMA)
+        if kind == "summary"
+        else (analysis.MOMENTS_PROMPT, analysis.MOMENTS_SCHEMA)
+    )
     return generate_with_retry(
         generator,
-        analysis.SUMMARY_PROMPT.format(title=chapter.title, text=chapter.text),
+        prompt.format(title=chapter.title, text=chapter.text),
         parse,
-        schema=analysis.SUMMARY_SCHEMA,
+        schema=schema,
         retries=retries,
-        label="summary",
-        on_retry=retry,
+        label=kind,
+        on_retry=on_retry,
     )
+
+
+def _analyze_round(
+    config: ReadFellowConfig,
+    store: SqliteChunkStore,
+    selected: list[ChapterBoundary],
+    kind: str,
+    first_line: Callable[[str], int],
+    on_progress: Callable[[AnalyzeProgress], None] | None,
+) -> AnalyzeRound:
+    cloud = config.openai
+    if kind == "summary":
+        version, schema, tokens = (
+            analysis.SUMMARY_PROMPT_VERSION,
+            analysis.SUMMARY_SCHEMA_VERSION,
+            config.analysis.num_predict,
+        )
+    else:
+        version, schema, tokens = (
+            analysis.MOMENTS_PROMPT_VERSION,
+            analysis.MOMENTS_SCHEMA_VERSION,
+            analysis.MOMENTS_MAX_TOKENS,
+        )
+    settings = DerivationSettings(num_predict=tokens)
+    fingerprint = NoteConfig(
+        prompt_version=version,
+        schema_version=schema,
+        model=cloud.generation_model,
+        base_url=cloud.base_url,
+        response_format=cloud.response_format,
+        temperature=settings.temperature,
+        top_p=settings.top_p,
+        max_tokens=settings.num_predict,
+    )
+    config_id = store.activate_config(kind, fingerprint)
+    cached = store.cached_note_hashes(config_id)
+    pending = [c for c in selected if c.content_hash not in cached]
+    written = 0
+    failures = {}
+    if pending:
+        generator = OpenAICompatGenerator(
+            base_url=cloud.base_url,
+            model=cloud.generation_model,
+            response_format=cloud.response_format,
+            settings=settings,
+            requests_per_minute=cloud.requests_per_minute,
+        )
+
+        pool = ThreadPoolExecutor(config.analysis.concurrency)
+        try:
+            futures = {
+                pool.submit(
+                    _generate_note,
+                    kind,
+                    generator,
+                    c,
+                    first_line,
+                    config.analysis.retries,
+                ): c
+                for c in pending
+            }
+            for future in as_completed(futures):
+                chapter = futures[future]
+                try:
+                    note = future.result()
+                except RuntimeError as exc:
+                    cause = exc.__cause__ if type(exc) is RuntimeError else exc
+                    failures[chapter.ordinal] = (
+                        "character appears after chapter end"
+                        if isinstance(cause, CharacterOutsideChapter)
+                        else type(cause or exc).__name__
+                    )
+                    continue
+                store.write_note(config_id, chapter.content_hash, note)
+                written += 1
+                if on_progress:
+                    on_progress(AnalyzeProgress(written, len(pending), chapter.ordinal))
+        finally:
+            pool.shutdown(cancel_futures=True)
+
+    return AnalyzeRound(len(selected), len(selected) - len(pending), written, failures)
 
 
 def analyze(
@@ -605,102 +785,89 @@ def analyze(
     with _open_book(config, collection, write=True) as book:
         if config.analysis.backend != "openai":
             raise ValueError("analyze requires the openai backend")
-        cloud = config.openai
-        settings = DerivationSettings(num_predict=config.analysis.num_predict)
-        fingerprint = SummaryConfig(
-            prompt_version=analysis.SUMMARY_PROMPT_VERSION,
-            schema_version=analysis.SUMMARY_SCHEMA_VERSION,
-            model=cloud.generation_model,
-            base_url=cloud.base_url,
-            response_format=cloud.response_format,
-            temperature=settings.temperature,
-            top_p=settings.top_p,
-            max_tokens=settings.num_predict,
-        )
         texts = list(book.store.chapter_texts(None, None))
-        config_id = book.store.activate_summary(fingerprint)
-        first_line = _first_appearance(texts)
-        cached = book.store.cached_summary_hashes(config_id)
         selected = [
             c
             for c in texts
             if chapters is None or chapters[0] <= c.ordinal <= chapters[1]
         ]
-        pending = [c for c in selected if c.content_hash not in cached]
-        written = 0
-        failures = {}
-        if pending:
-            generator = OpenAICompatGenerator(
-                base_url=cloud.base_url,
-                model=cloud.generation_model,
-                response_format=cloud.response_format,
-                settings=settings,
-                requests_per_minute=cloud.requests_per_minute,
-            )
-
-            pool = ThreadPoolExecutor(config.analysis.concurrency)
-            try:
-                futures = {
-                    pool.submit(
-                        _generate_summary,
-                        generator,
-                        c,
-                        first_line,
-                        config.analysis.retries,
-                    ): c
-                    for c in pending
-                }
-                for future in as_completed(futures):
-                    chapter = futures[future]
-                    try:
-                        note = future.result()
-                    except RuntimeError as exc:
-                        cause = exc.__cause__ if type(exc) is RuntimeError else exc
-                        failures[chapter.ordinal] = (
-                            "character appears after chapter end"
-                            if isinstance(cause, CharacterOutsideChapter)
-                            else type(cause or exc).__name__
-                        )
-                        continue
-                    book.store.write_summary(config_id, chapter.content_hash, note)
-                    written += 1
-                    if on_progress:
-                        on_progress(
-                            AnalyzeProgress(written, len(pending), chapter.ordinal)
-                        )
-            finally:
-                pool.shutdown(cancel_futures=True)
-
+        first_line = _first_appearance(texts)
+        summary = _analyze_round(
+            config, book.store, selected, "summary", first_line, on_progress
+        )
+        moments = _analyze_round(
+            config, book.store, selected, "moments", first_line, on_progress
+        )
         with book.store.summary_scan():
             if book.store.manifest() != book.manifest:
                 raise RuntimeError("book changed during analyze; run analyze again")
-            notes = book.store.summary_notes()
-            names = {name for note in notes.values() for name in note.characters}
+            summaries = book.store.notes(ChapterSummary)
+            notes = book.store.notes(ChapterMoments)
+            names = {name for note in summaries.values() for name in note.characters}
+            for note in notes.values():
+                names.update(
+                    name for moment in note.moments for name in moment.characters
+                )
+                names.update(
+                    name
+                    for identity in note.identities
+                    for name in (identity.alias, identity.name)
+                )
+
+            # Identical chapters share a cache row. Scan it at the earliest occurrence.
             flags = {}
+            scanned = set()
             for c in texts:
-                note = notes.get(c.content_hash)
-                if note:
-                    flag = any(
-                        name in note.summary and first_line(name) > c.line_end
-                        for name in names
+                key = c.content_hash
+                if key in scanned:
+                    continue
+                scanned.add(key)
+                future_names = [name for name in names if first_line(name) > c.line_end]
+                if key in summaries:
+                    flags[key] = any(
+                        name in summaries[key].summary for name in future_names
                     )
-                    flags[c.content_hash] = flags.get(c.content_hash, False) or flag
-            book.store.set_spoilers(flags)
+                if key in notes:
+                    for moment in notes[key].moments:
+                        moment.hidden = any(
+                            name in moment.description or name in moment.trait
+                            for name in future_names
+                        )
+            book.store.set_spoilers("summary", flags)
+            book.store.set_spoilers("moments", dict.fromkeys(notes, False), notes)
             spoilers = sum(flags.get(c.content_hash, False) for c in texts)
-        return AnalyzeResult(
-            len(selected), len(selected) - len(pending), written, failures, spoilers
-        )
+            hidden = sum(
+                m.hidden
+                for c in texts
+                if c.content_hash in notes
+                for m in notes[c.content_hash].moments
+            )
+        return AnalyzeResult(summary, moments, spoilers, hidden)
 
 
 def collection_status(config: ReadFellowConfig, collection: str) -> CollectionStatus:
     with _open_book(config, collection, report_errors=True) as book:
+        moments = None
+        counts = book.store.note_counts("moments")
+        if counts is not None:
+            notes = book.store.notes(ChapterMoments)
+            current = [
+                notes[c.content_hash] for c in book.chapters if c.content_hash in notes
+            ]
+            moments = MomentCounts(
+                counts[0],
+                sum(m.hidden for n in current for m in n.moments),
+                sum(n.unanchored_count for n in current),
+                sum(n.name_rejected_count for n in current),
+            )
         return CollectionStatus(
             collection,
             book.manifest,
             len(book.chapters),
             book.source_error,
             IndexReport(book.manifest.chunk_count, book.store.chunk_count()),
-            book.store.summary_counts(),
+            book.store.note_counts("summary"),
+            moments,
         )
 
 

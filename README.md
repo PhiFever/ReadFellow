@@ -140,15 +140,17 @@ uv run readfellow status --collection sample
 
 `find 词 [--chapters A-B] [--limit N]` 在章节原文中查找区分大小写的精确子串，汇总可读范围里的命中行数和每章计数，默认展示前 50 条。整章可读且摘要通过防剧透检查时，`find` 在每章计数后附上摘要，`toc` 同时列出摘要和标签。三个命令都支持 `--json`。
 
-### 逐章生成摘要
+`uv run readfellow notes --collection sample --chapters 2-5` 按目录序号查看关键时刻和别名关系。每条附原文、源路径和行号。只列整章已读的章节，没有可见条目时显示 `no notes`。支持 `--json`，超过 60000 字符时会提示缩小范围。
 
-`uv run readfellow analyze --collection sample [--chapters A-B]` 将所选章节的全文发送到配置的 OpenAI 兼容端点。默认模型为 DeepSeek-V4-Flash，密钥取自环境变量或项目 `.env` 中的 `LLM_API_KEY`。省略范围时处理全书，生成范围独立于阅读进度。每章成功后立即保存，重跑会跳过已有笔记。失败时命令列出章节序号和错误类别，退出码为 1。
+### 逐章生成摘要和笔记
 
-`status` 的 `summaries` 行显示当前配置已生成多少章、还缺多少章，以及有多少章因剧透隐藏了摘要。
+`uv run readfellow analyze --collection sample [--chapters A-B]` 将所选章节的全文发送到配置的 OpenAI 兼容端点。默认模型为 DeepSeek-V4-Flash，密钥取自环境变量或项目 `.env` 中的 `LLM_API_KEY`。省略范围时处理全书，生成范围独立于阅读进度。先生成摘要，再逐章生成关键时刻和别名关系。两轮独立缓存，每章成功后立即保存。已有的 6a 摘要可以直接复用。命令分别汇报两轮的缓存、写入和失败章数，有失败时列出笔记类型、章节序号和原因，退出码为 1。
+
+`status` 的 `summaries` 行显示当前配置已生成多少章、还缺多少章，以及有多少章因剧透隐藏了摘要。`moments` 行列出已有笔记和待生成的章数、因剧透隐藏的关键时刻条数，以及因引文或人物称呼检查失败而丢弃的条数。
 
 ## 4. 防剧透：阅读进度限制
 
-每本书单独保存进度。首次读取前运行 `progress set V:N` 或 `progress set --line N`。已读完全书可用 `progress set --all`。用 `progress show` 查看。七个读取命令都接受以下单次限制。
+每本书单独保存进度。首次读取前运行 `progress set V:N` 或 `progress set --line N`。已读完全书可用 `progress set --all`。用 `progress show` 查看。八个读取命令都接受以下单次限制。
 
 | 参数 | 语义 |
 |---|---|

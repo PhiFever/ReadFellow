@@ -14,13 +14,14 @@ import numpy as np
 
 from .models import (
     ChapterBoundary,
+    ChapterMoments,
     ChapterSummary,
     Chunk,
     Evidence,
     IndexManifest,
+    NoteConfig,
     ProgressFilter,
     ReaderState,
-    SummaryConfig,
 )
 
 jieba.setLogLevel(logging.WARNING)
@@ -44,8 +45,8 @@ CREATE TABLE IF NOT EXISTS chapter_notes (
     PRIMARY KEY (config_id, content_hash)
 )
 """
-LATEST_SUMMARY = (
-    "(SELECT id FROM note_configs WHERE kind='summary' ORDER BY activated DESC LIMIT 1)"
+LATEST_NOTE = (
+    "(SELECT id FROM note_configs WHERE kind=:kind ORDER BY activated DESC LIMIT 1)"
 )
 READER_SCHEMA = """
 CREATE TABLE IF NOT EXISTS reader_state (
@@ -178,21 +179,21 @@ class SqliteChunkStore:
             if write:
                 db.commit()
 
-    def activate_summary(self, config: SummaryConfig) -> int:
+    def activate_config(self, kind: str, config: NoteConfig) -> int:
         fingerprint = json.dumps(
             config.model_dump(), sort_keys=True, ensure_ascii=False
         )
         with self._db as db:
             db.execute(
-                "INSERT OR IGNORE INTO note_configs(kind, fingerprint, activated) VALUES ('summary', ?, 0)",
-                (fingerprint,),
+                "INSERT OR IGNORE INTO note_configs(kind, fingerprint, activated) VALUES (?, ?, 0)",
+                (kind, fingerprint),
             )
             return db.execute(
                 "UPDATE note_configs SET activated=(SELECT max(activated)+1 FROM note_configs) WHERE fingerprint=? RETURNING id",
                 (fingerprint,),
             ).fetchone()[0]
 
-    def cached_summary_hashes(self, config_id: int) -> set[str]:
+    def cached_note_hashes(self, config_id: int) -> set[str]:
         return {
             row[0]
             for row in self._db.execute(
@@ -200,27 +201,36 @@ class SqliteChunkStore:
             )
         }
 
-    def summary_notes(
+    def notes[Note: (ChapterSummary, ChapterMoments)](
         self,
+        model: type[Note],
         *,
         ordinals: tuple[int, int] | None = None,
         visible_only: bool = False,
         end: int | None = None,
-    ) -> dict[str, ChapterSummary]:
+    ) -> dict[str, Note]:
         first, last = ordinals or (None, None)
         rows = self._db.execute(
             f"""
             SELECT n.content_hash, n.body FROM chapters c JOIN chapter_notes n USING(content_hash)
-            WHERE n.config_id={LATEST_SUMMARY} AND (:first IS NULL OR c.ordinal BETWEEN :first AND :last)
+            WHERE n.config_id={LATEST_NOTE} AND (:first IS NULL OR c.ordinal BETWEEN :first AND :last)
             AND (:end IS NULL OR c.line_end <= :end) AND (:visible=0 OR n.spoiler=0)
         """,
-            {"first": first, "last": last, "end": end, "visible": visible_only},
+            {
+                "kind": model.note_kind,
+                "first": first,
+                "last": last,
+                "end": end,
+                "visible": visible_only,
+            },
         )
-        return {key: ChapterSummary.model_validate_json(body) for key, body in rows}
+        return {key: model.model_validate_json(body) for key, body in rows}
 
-    def write_summary(self, config_id: int, key: str, note: ChapterSummary) -> None:
+    def write_note(
+        self, config_id: int, key: str, note: ChapterSummary | ChapterMoments
+    ) -> None:
         with self._db as db:
-            # Keep unscanned summaries hidden even if the process is interrupted.
+            # Keep unscanned notes hidden even if the process is interrupted.
             db.execute(
                 "INSERT OR IGNORE INTO chapter_notes(config_id, content_hash, body, spoiler) VALUES (?, ?, ?, 1)",
                 (config_id, key, note.model_dump_json()),
@@ -232,18 +242,34 @@ class SqliteChunkStore:
             db.execute("BEGIN IMMEDIATE")
             yield
 
-    def set_spoilers(self, flags: dict[str, bool]) -> None:
+    def set_spoilers(
+        self,
+        kind: str,
+        flags: dict[str, bool],
+        bodies: dict[str, ChapterMoments] | None = None,
+    ) -> None:
         self._db.executemany(
-            f"UPDATE chapter_notes SET spoiler=? WHERE config_id={LATEST_SUMMARY} AND content_hash=?",
-            ((flag, key) for key, flag in flags.items()),
+            f"UPDATE chapter_notes SET spoiler=:flag, body=coalesce(:body, body) WHERE config_id={LATEST_NOTE} AND content_hash=:key",
+            (
+                {
+                    "flag": flag,
+                    "body": bodies[key].model_dump_json() if bodies else None,
+                    "kind": kind,
+                    "key": key,
+                }
+                for key, flag in flags.items()
+            ),
         )
 
-    def summary_counts(self) -> tuple[int, int] | None:
-        row = self._db.execute(f"""
+    def note_counts(self, kind: str) -> tuple[int, int] | None:
+        row = self._db.execute(
+            f"""
             SELECT count(c.ordinal), coalesce(sum(n.spoiler), 0)
             FROM chapters c JOIN chapter_notes n USING(content_hash)
-            WHERE n.config_id={LATEST_SUMMARY} HAVING {LATEST_SUMMARY} IS NOT NULL
-        """).fetchone()
+            WHERE n.config_id={LATEST_NOTE} HAVING {LATEST_NOTE} IS NOT NULL
+        """,
+            {"kind": kind},
+        ).fetchone()
         return (row[0], row[1]) if row else None
 
     def reader_state(self) -> ReaderState | None:

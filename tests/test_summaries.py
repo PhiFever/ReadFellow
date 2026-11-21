@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from readfellow import app, cli
+from readfellow.openai_compat import GenerationRejected
 
 
 @pytest.fixture
@@ -16,6 +17,8 @@ def summaries(readable_book, monkeypatch):
     fake = SimpleNamespace(answer=lambda prompt: ("修理机器。", ["尤基"]))
 
     def generate(prompt, schema):
+        if "moments" in schema["properties"]:
+            return json.dumps({"moments": [], "identities": []})
         calls.append(prompt)
         summary, characters = fake.answer(prompt)
         return json.dumps(
@@ -35,17 +38,39 @@ def run(*args):
     return cli.main([*args, "--collection", "books"])
 
 
+def test_analyze_does_not_retry_generation_rejected(summaries, monkeypatch, capsys):
+    calls = []
+
+    def reject(prompt, schema):
+        calls.append("summary" if "summary" in schema["properties"] else "moments")
+        raise GenerationRejected("terminal response")
+
+    monkeypatch.setattr(
+        app,
+        "OpenAICompatGenerator",
+        lambda **kwargs: SimpleNamespace(generate_json=reject),
+    )
+    assert run("analyze", "--chapters", "1") == 1
+    lines = capsys.readouterr().out.splitlines()
+    assert "summary\t1\tGenerationRejected" in lines
+    assert "moments\t1\tGenerationRejected" in lines
+    assert calls == ["summary", "moments"]
+
+
 def test_analyze_resumes_from_committed_notes(summaries, capsys):
     _, _, _, calls = summaries
     assert run("analyze") == 0
     first = capsys.readouterr()
-    assert first.out.strip() == "chapters 2  cached 0  written 2  failed 0  spoiler 0"
+    assert first.out.splitlines() == [
+        "summary  chapters 2  cached 0  written 2  failed 0  spoiler 0",
+        "moments  chapters 2  cached 0  written 2  failed 0  hidden 0",
+    ]
     assert {line.split()[1] for line in first.err.splitlines()} == {"1", "2"}
     assert run("analyze") == 0
-    assert (
-        capsys.readouterr().out.strip()
-        == "chapters 2  cached 2  written 0  failed 0  spoiler 0"
-    )
+    assert capsys.readouterr().out.splitlines() == [
+        "summary  chapters 2  cached 2  written 0  failed 0  spoiler 0",
+        "moments  chapters 2  cached 2  written 0  failed 0  hidden 0",
+    ]
     assert len(calls) == 2
 
 

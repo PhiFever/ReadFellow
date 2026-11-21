@@ -19,6 +19,7 @@ from .app import (
     fts_search,
     hybrid_search,
     index_document,
+    read_notes,
     read_passage,
     semantic_search,
     set_progress,
@@ -133,6 +134,7 @@ def build_parser(config: ReadFellowConfig) -> argparse.ArgumentParser:
 
     toc = subparsers.add_parser("toc", help="list chapters within progress")
     read = subparsers.add_parser("read", help="read numbered source lines")
+    notes = subparsers.add_parser("notes", help="read chapter moments and identities")
     ranges = read.add_mutually_exclusive_group(required=True)
     ranges.add_argument(
         "--chapters", type=number_range, metavar="A[-B]", help="inclusive toc ordinals"
@@ -145,20 +147,21 @@ def build_parser(config: ReadFellowConfig) -> argparse.ArgumentParser:
     )
     find.add_argument("term", help="case-sensitive substring")
     analyze_cmd = subparsers.add_parser(
-        "analyze", help="generate and cache chapter summaries"
+        "analyze", help="generate and cache summaries and chapter notes"
     )
     add_collection(analyze_cmd)
-    for cmd in (analyze_cmd, find, toc):
+    for cmd in (analyze_cmd, find, toc, notes):
         cmd.add_argument(
             "--chapters",
             type=number_range,
+            required=cmd is notes,
             metavar="A[-B]",
             help="inclusive toc ordinals",
         )
     find.add_argument(
         "--limit", type=int, default=50, help="maximum example lines (default 50)"
     )
-    for cmd in (toc, read, find):
+    for cmd in (toc, read, find, notes):
         add_collection(cmd)
         add_progress_args(cmd)
         cmd.add_argument("--json", action="store_true", help="print one JSON object")
@@ -323,11 +326,20 @@ def command_reading(args: argparse.Namespace, config: ReadFellowConfig) -> int:
         )
         if result.clipped_at is not None:
             print(f"clipped to line {result.clipped_at}", file=sys.stderr)
-        if result.truncated:
-            print("60000 character limit reached; narrow the range", file=sys.stderr)
         if not args.json:
             for row in result.lines:
                 print(row.numbered())
+    elif args.command == "notes":
+        result = read_notes(
+            config, args.collection, chapters=args.chapters, progress=progress
+        )
+        if not args.json:
+            for chapter in result.chapters:
+                print(chapter.heading())
+                if not chapter.moments and not chapter.identities:
+                    print("no notes")
+                for entry in [*chapter.moments, *chapter.identities]:
+                    print(entry.rendered())
     else:
         result = find_text(
             config,
@@ -346,6 +358,8 @@ def command_reading(args: argparse.Namespace, config: ReadFellowConfig) -> int:
                 print(f"{chapter.ordinal}\t{chapter.title}\t{chapter.count}{suffix}")
             for hit in result.hits:
                 print(f"{hit.number}\t{hit.ordinal}\t{hit.title}\t{hit.snippet}")
+    if args.command in ("read", "notes") and result.truncated:
+        print("60000 character limit reached; narrow the range", file=sys.stderr)
     if args.json:
         print(json.dumps(result.model_dump(), ensure_ascii=False))
     elif result.progress:
@@ -360,12 +374,18 @@ def command_analyze(args: argparse.Namespace, config: ReadFellowConfig) -> int:
     result = analyze(
         config, args.collection, chapters=args.chapters, on_progress=progress
     )
-    print(
-        f"chapters {result.chapters}  cached {result.cached}  written {result.written}  failed {len(result.failures)}  spoiler {result.spoiler}"
+    rounds = (
+        ("summary", result.summary, "spoiler", result.spoiler),
+        ("moments", result.moments, "hidden", result.hidden),
     )
-    for ordinal, reason in sorted(result.failures.items()):
-        print(f"{ordinal}\t{reason}")
-    return int(bool(result.failures))
+    for kind, stats, label, count in rounds:
+        print(
+            f"{kind}  chapters {stats.chapters}  cached {stats.cached}  written {stats.written}  failed {len(stats.failures)}  {label} {count}"
+        )
+    for kind, stats, _, _ in rounds:
+        for ordinal, reason in sorted(stats.failures.items()):
+            print(f"{kind}\t{ordinal}\t{reason}")
+    return int(bool(result.summary.failures or result.moments.failures))
 
 
 def command_status(args: argparse.Namespace, config: ReadFellowConfig) -> int:
@@ -385,6 +405,13 @@ def command_status(args: argparse.Namespace, config: ReadFellowConfig) -> int:
         count, spoilers = status.summaries
         print(
             f"summaries: {count}/{status.chapter_count}, pending {status.chapter_count - count}, spoiler {spoilers}"
+        )
+    moments = status.moments
+    if moments is None:
+        print("moments: none")
+    else:
+        print(
+            f"moments: {moments.chapters}/{status.chapter_count}, pending {status.chapter_count - moments.chapters}, hidden {moments.hidden}, unanchored {moments.unanchored}, name-rejected {moments.name_rejected}"
         )
     if status.source_error is not None:
         print(f"  ⚠ {status.source_error}")
@@ -501,7 +528,7 @@ def main(argv: list[str] | None = None) -> int:
             return command_analyze(args, config)
         if args.command == "progress":
             return command_progress(args, config)
-        if args.command in ("toc", "read", "find"):
+        if args.command in ("toc", "read", "find", "notes"):
             return command_reading(args, config)
         if args.command == "index":
             return command_index(args, config)
