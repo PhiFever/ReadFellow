@@ -303,7 +303,7 @@ def parse_summary(raw: str) -> ChapterSummary:
     return note
 
 
-MOMENTS_PROMPT_VERSION = "chapter-moments-v1"
+MOMENTS_PROMPT_VERSION = "chapter-moments-v2"
 MOMENTS_SCHEMA_VERSION = 1
 MOMENTS_MAX_TOKENS = 3072
 MOMENTS_SCHEMA = {
@@ -359,7 +359,9 @@ MOMENTS_PROMPT = """你在为一部长篇小说建立逐章笔记。下面是其
   - trait：这一刻体现的人物性格侧面，没有就写空字符串。
   - importance：1 到 5，只和本章其他时刻比。5 是本章的转折或高潮。
   - evidence：支撑这一条的原文，逐字复制一句，不超过 60 字，不改写、不拼接、不加省略号。
-- identities：本章原文明确说出的「两个称呼指同一个人」，比如外号、代号、化名、头衔对应到姓名。alias 和 name 都必须照抄原文里的称呼，不能是「某某的母亲」「AI」这类身份描述。evidence 逐字复制一句同时出现这两个称呼的原文，不超过 60 字。原文没有明说就不要列，不要推测。
+- identities：本章原文里明确写出「两个称呼指同一个人」的地方，比如外号、代号、化名、头衔紧挨着姓名（「“铁拳”张三」「副队长李四」），改口换称呼（「老王……不对，该叫你王队长了」），或者说明真名。
+  alias 和 name 都必须是 evidence 那一句里原样出现的称呼，不要换成你知道的全名、正式名或别处的叫法。比如那句只写了「老王」和「王队长」，就写 alias「老王」、name「王队长」，即使你知道他全名叫王大锤。两个称呼不能相同，也不能是「某某的母亲」「AI」「巨汉」这类身份描述。
+  evidence 逐字复制一句同时出现这两个称呼的原文，不超过 60 字。前面章节交代过的关系，本章原文再次明写，也照样列出；同一对称呼本章只列一次。原文没有明说就不要列，不要推测。
 
 不写前情，不推测后续，不评价。
 
@@ -385,10 +387,16 @@ def parse_moments(
             item.characters = [name.strip() for name in item.characters]
             names = item.characters
         hit = locate_evidence(item.evidence, text)
-        if hit is None or (
-            isinstance(item, IdentityFields)
-            and any(not locate_evidence(name, hit) for name in names)
-        ):
+        if hit is not None and isinstance(item, IdentityFields):
+            short, long = sorted(names, key=len)
+            short_evidence = hit.replace(long, "") if short in long else hit
+            if (
+                short == long
+                or not locate_evidence(long, hit)
+                or not locate_evidence(short, short_evidence)
+            ):
+                hit = None
+        if hit is None:
             result.unanchored_count += 1
             continue
         if any(first_line(name) > chapter.line_end for name in names):
@@ -403,3 +411,23 @@ def parse_moments(
         else:
             result.moments.append(Moment(**fields, hidden=False))
     return result
+
+
+LINKS_PROMPT_VERSION = "identity-links-v1"
+LINKS_SCHEMA_VERSION = 1
+LINKS_MAX_TOKENS = 512
+LINKS_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["same", "reason"],
+    "properties": {"same": {"type": "boolean"}, "reason": {"type": "string"}},
+}
+LINKS_PROMPT = """下面是一部长篇小说里的一段原文。
+
+只根据这段原文判断：读到这里的读者，能不能确定「{a}」和「{b}」指的是同一个人物？
+- 能确定，same 写 true。比如外号、头衔紧挨着姓名，人物改口换称呼，自报或说明真名，简称和全名。
+- 下面几种情况 same 写 false：两个称呼写的是不同的人，比如「某某的亲兵」「某某的姐姐」；其中一个只是泛称或身份描述，比如「巨汉」「镇长」「匪徒」；只凭这段原文确定不了。
+- reason 用一句话说明依据。
+
+原文：
+{context}"""

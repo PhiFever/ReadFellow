@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 from bisect import bisect_right
-from collections import defaultdict
+from collections import defaultdict, deque
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
@@ -12,11 +12,19 @@ from pathlib import Path
 from typing import Any, Literal
 
 from . import analysis
-from .chunking import CHUNKER_VERSION, chunk_document, read_chapters, sha256_file
+from .chunking import (
+    CHUNKER_VERSION,
+    chunk_document,
+    read_chapters,
+    sha256_file,
+    sha256_text,
+)
 from .config import ReadFellowConfig
 from .derivation import JsonGenerator, generate_with_retry
 from .library import SqliteChunkStore
 from .models import (
+    AliasEntry,
+    AliasesResult,
     ChapterBoundary,
     ChapterHits,
     ChapterMoments,
@@ -26,8 +34,12 @@ from .models import (
     EvidenceMatch,
     FindResult,
     IdentityEntry,
+    IdentityLink,
     IndexManifest,
     LineHit,
+    LinkDecision,
+    LinkEvidence,
+    LinkSource,
     Moment,
     MomentEntry,
     NoteConfig,
@@ -141,6 +153,7 @@ class CollectionStatus:
     index: IndexReport
     summaries: tuple[int, int] | None
     moments: MomentCounts | None
+    links: tuple[int, int] | None
 
 
 def _library_path(config: ReadFellowConfig, collection: str) -> Path:
@@ -548,6 +561,47 @@ def read_notes(
         return result
 
 
+def aliases(
+    config: ReadFellowConfig,
+    name: str,
+    collection: str,
+    *,
+    progress: ProgressLimit | None = None,
+) -> AliasesResult:
+    name = name.strip()
+    with _read_collection(config, collection, progress) as book:
+        chapters = {chapter.ordinal: chapter for chapter in book.chapters}
+        neighbors = defaultdict(set)
+        earliest = {}
+        for link in book.store.visible_links(book.chapter_line_limit()):
+            neighbors[link.alias].add(link.name)
+            neighbors[link.name].add(link.alias)
+            earliest.setdefault(frozenset((link.alias, link.name)), link)
+
+        seen = {name}
+        queue = deque([name])
+        while queue:
+            new = neighbors[queue.popleft()] - seen
+            seen.update(new)
+            queue.extend(new)
+
+        return AliasesResult(
+            progress=book.progress.description,
+            name=name,
+            links=[
+                AliasEntry(
+                    **link.model_dump(
+                        exclude={"source", "content_hash", "same", "reason"}
+                    ),
+                    title=chapters[link.ordinal].title,
+                    source_path=book.manifest.source_path,
+                )
+                for link in earliest.values()
+                if link.alias in seen
+            ],
+        )
+
+
 def find_text(
     config: ReadFellowConfig,
     query: str,
@@ -652,11 +706,26 @@ class AnalyzeRound:
 
 
 @dataclass(frozen=True)
+class LinkRound:
+    candidates: int
+    cached: int
+    judged: int
+    failures: list[tuple[int, str]]
+    accepted: int
+
+
+@dataclass(frozen=True)
 class AnalyzeResult:
     summary: AnalyzeRound
     moments: AnalyzeRound
+    links: LinkRound
     spoiler: int
     hidden: int
+
+
+def _on_generation_retry(attempt: int, exc: Exception) -> None:
+    if isinstance(exc, GenerationRejected):
+        raise exc
 
 
 def _generate_note(
@@ -674,10 +743,6 @@ def _generate_note(
             raise CharacterOutsideChapter("character appears after chapter end")
         return note
 
-    def on_retry(attempt: int, exc: Exception) -> None:
-        if isinstance(exc, GenerationRejected):
-            raise exc
-
     prompt, schema = (
         (analysis.SUMMARY_PROMPT, analysis.SUMMARY_SCHEMA)
         if kind == "summary"
@@ -690,31 +755,31 @@ def _generate_note(
         schema=schema,
         retries=retries,
         label=kind,
-        on_retry=on_retry,
+        on_retry=_on_generation_retry,
     )
 
 
-def _analyze_round(
-    config: ReadFellowConfig,
-    store: SqliteChunkStore,
-    selected: list[ChapterBoundary],
-    kind: str,
-    first_line: Callable[[str], int],
-    on_progress: Callable[[AnalyzeProgress], None] | None,
-) -> AnalyzeRound:
+def _generation_config(
+    config: ReadFellowConfig, store: SqliteChunkStore, kind: str
+) -> tuple[int, DerivationSettings]:
     cloud = config.openai
-    if kind == "summary":
-        version, schema, tokens = (
+    version, schema, tokens = {
+        "summary": (
             analysis.SUMMARY_PROMPT_VERSION,
             analysis.SUMMARY_SCHEMA_VERSION,
             config.analysis.num_predict,
-        )
-    else:
-        version, schema, tokens = (
+        ),
+        "moments": (
             analysis.MOMENTS_PROMPT_VERSION,
             analysis.MOMENTS_SCHEMA_VERSION,
             analysis.MOMENTS_MAX_TOKENS,
-        )
+        ),
+        "links": (
+            analysis.LINKS_PROMPT_VERSION,
+            analysis.LINKS_SCHEMA_VERSION,
+            analysis.LINKS_MAX_TOKENS,
+        ),
+    }[kind]
     settings = DerivationSettings(num_predict=tokens)
     fingerprint = NoteConfig(
         prompt_version=version,
@@ -726,53 +791,234 @@ def _analyze_round(
         top_p=settings.top_p,
         max_tokens=settings.num_predict,
     )
-    config_id = store.activate_config(kind, fingerprint)
+    return store.activate_config(kind, fingerprint), settings
+
+
+def _generate_pending[Item, Result](
+    config: ReadFellowConfig,
+    settings: DerivationSettings,
+    pending: list[Item],
+    generate: Callable[[JsonGenerator, Item], Result],
+    write: Callable[[Item, Result], None],
+    ordinal: Callable[[Item], int],
+    on_progress: Callable[[AnalyzeProgress], None] | None,
+) -> list[tuple[Item, str]]:
+    if not pending:
+        return []
+    cloud = config.openai
+    generator = OpenAICompatGenerator(
+        base_url=cloud.base_url,
+        model=cloud.generation_model,
+        response_format=cloud.response_format,
+        settings=settings,
+        requests_per_minute=cloud.requests_per_minute,
+    )
+    failures = []
+    written = 0
+    pool = ThreadPoolExecutor(config.analysis.concurrency)
+    try:
+        futures = {pool.submit(generate, generator, item): item for item in pending}
+        for future in as_completed(futures):
+            item = futures[future]
+            try:
+                result = future.result()
+            except RuntimeError as exc:
+                cause = exc.__cause__ if type(exc) is RuntimeError else exc
+                reason = (
+                    "character appears after chapter end"
+                    if isinstance(cause, CharacterOutsideChapter)
+                    else type(cause or exc).__name__
+                )
+                failures.append((item, reason))
+                continue
+            write(item, result)
+            written += 1
+            if on_progress:
+                on_progress(AnalyzeProgress(written, len(pending), ordinal(item)))
+    finally:
+        pool.shutdown(cancel_futures=True)
+    return failures
+
+
+def _analyze_round(
+    config: ReadFellowConfig,
+    store: SqliteChunkStore,
+    selected: list[ChapterBoundary],
+    kind: str,
+    first_line: Callable[[str], int],
+    on_progress: Callable[[AnalyzeProgress], None] | None,
+) -> AnalyzeRound:
+    config_id, settings = _generation_config(config, store, kind)
     cached = store.cached_note_hashes(config_id)
     pending = [c for c in selected if c.content_hash not in cached]
-    written = 0
-    failures = {}
-    if pending:
-        generator = OpenAICompatGenerator(
-            base_url=cloud.base_url,
-            model=cloud.generation_model,
-            response_format=cloud.response_format,
-            settings=settings,
-            requests_per_minute=cloud.requests_per_minute,
+    failures = _generate_pending(
+        config,
+        settings,
+        pending,
+        lambda generator, c: _generate_note(
+            kind, generator, c, first_line, config.analysis.retries
+        ),
+        lambda c, note: store.write_note(config_id, c.content_hash, note),
+        lambda c: c.ordinal,
+        on_progress,
+    )
+    return AnalyzeRound(
+        len(selected),
+        len(selected) - len(pending),
+        len(pending) - len(failures),
+        {chapter.ordinal: reason for chapter, reason in failures},
+    )
+
+
+def _moment_names(note: ChapterMoments) -> set[str]:
+    names = {name for moment in note.moments for name in moment.characters}
+    names.update(
+        name for identity in note.identities for name in (identity.alias, identity.name)
+    )
+    return {name.strip() for name in names if name.strip()}
+
+
+@dataclass(frozen=True)
+class _LinkCandidate:
+    evidence: LinkEvidence
+    prompt: str
+    input_hash: str
+
+
+def _link_candidates(
+    notes: dict[str, ChapterMoments], chapters: list[ChapterBoundary]
+) -> list[_LinkCandidate]:
+    names = sorted({name for note in notes.values() for name in _moment_names(note)})
+    contained = [
+        (short, long)
+        for long in names
+        for short in names
+        if short != long and short in long
+    ]
+    given_names = {long: long.split("·")[0].strip() for long in names if "·" in long}
+    given_names = {long: short for long, short in given_names.items() if short in names}
+    counts = defaultdict(int)
+    seen = set()
+    candidates = []
+
+    def scan_chapter(chapter: ChapterBoundary, note: ChapterMoments) -> None:
+        assert chapter.text is not None
+        lines = chapter.text.splitlines()
+
+        def add(
+            alias: str, name: str, source: LinkSource, first: int, last: int, quote: str
+        ) -> None:
+            start = chapter.line_start + first
+            key = (frozenset((alias, name)), start)
+            if key in seen:
+                return
+            seen.add(key)
+            evidence = LinkEvidence(
+                alias=alias,
+                name=name,
+                source=source,
+                ordinal=chapter.ordinal,
+                content_hash=chapter.content_hash,
+                line_start=start,
+                line_end=chapter.line_start + last,
+                evidence=quote,
+            )
+            context = "\n".join(lines[max(0, first - 2) : last + 3])
+            prompt = analysis.LINKS_PROMPT.format(a=alias, b=name, context=context)
+            candidates.append(_LinkCandidate(evidence, prompt, sha256_text(prompt)))
+
+        for item in note.identities:
+            add(
+                item.alias,
+                item.name,
+                "identity",
+                item.line_start - 1,
+                item.line_end - 1,
+                item.evidence,
+            )
+        for index, line in enumerate(lines):
+            for short, long in contained:
+                pair = (short, long)
+                if (
+                    counts[pair] < 3
+                    and long in line
+                    and short in line.replace(long, "")
+                ):
+                    counts[pair] += 1
+                    add(short, long, "contains", index, index, line.strip())
+            for long in list(given_names):
+                if long in line:
+                    add(
+                        given_names.pop(long),
+                        long,
+                        "given_name",
+                        index,
+                        index,
+                        line.strip(),
+                    )
+
+    for chapter in sorted(chapters, key=lambda c: c.ordinal):
+        if chapter.content_hash in notes:
+            scan_chapter(chapter, notes[chapter.content_hash])
+    return sorted(candidates, key=lambda item: item.evidence.line_start)
+
+
+def _judge_links(
+    config: ReadFellowConfig,
+    store: SqliteChunkStore,
+    candidates: list[_LinkCandidate],
+    on_progress: Callable[[AnalyzeProgress], None] | None,
+) -> tuple[int, dict[str, LinkEvidence], LinkRound]:
+    config_id, settings = _generation_config(config, store, "links")
+    cached = store.cached_link_hashes(config_id)
+    # Identical model inputs share a verdict. Cite the earliest occurrence.
+    unique: dict[str, _LinkCandidate] = {}
+    for candidate in candidates:
+        unique.setdefault(candidate.input_hash, candidate)
+    pending = [c for key, c in unique.items() if key not in cached]
+
+    def generate(generator: JsonGenerator, candidate: _LinkCandidate) -> LinkDecision:
+        return generate_with_retry(
+            generator,
+            candidate.prompt,
+            LinkDecision.model_validate_json,
+            schema=analysis.LINKS_SCHEMA,
+            retries=config.analysis.retries,
+            label="links",
+            on_retry=_on_generation_retry,
         )
 
-        pool = ThreadPoolExecutor(config.analysis.concurrency)
-        try:
-            futures = {
-                pool.submit(
-                    _generate_note,
-                    kind,
-                    generator,
-                    c,
-                    first_line,
-                    config.analysis.retries,
-                ): c
-                for c in pending
-            }
-            for future in as_completed(futures):
-                chapter = futures[future]
-                try:
-                    note = future.result()
-                except RuntimeError as exc:
-                    cause = exc.__cause__ if type(exc) is RuntimeError else exc
-                    failures[chapter.ordinal] = (
-                        "character appears after chapter end"
-                        if isinstance(cause, CharacterOutsideChapter)
-                        else type(cause or exc).__name__
-                    )
-                    continue
-                store.write_note(config_id, chapter.content_hash, note)
-                written += 1
-                if on_progress:
-                    on_progress(AnalyzeProgress(written, len(pending), chapter.ordinal))
-        finally:
-            pool.shutdown(cancel_futures=True)
+    def write(candidate: _LinkCandidate, decision: LinkDecision) -> None:
+        link = IdentityLink(**candidate.evidence.model_dump(), **decision.model_dump())
+        store.write_link(config_id, candidate.input_hash, link)
 
-    return AnalyzeRound(len(selected), len(selected) - len(pending), written, failures)
+    failures = _generate_pending(
+        config,
+        settings,
+        pending,
+        generate,
+        write,
+        lambda c: c.evidence.ordinal,
+        on_progress,
+    )
+    errors = {candidate.input_hash: reason for candidate, reason in failures}
+    failed_candidates = [
+        (c.evidence.ordinal, errors[c.input_hash])
+        for c in candidates
+        if c.input_hash in errors
+    ]
+    judged = len(pending) - len(failures)
+    return (
+        config_id,
+        {key: c.evidence for key, c in unique.items()},
+        LinkRound(
+            len(candidates),
+            len(candidates) - judged - len(failed_candidates),
+            judged,
+            failed_candidates,
+            0,
+        ),
+    )
 
 
 def analyze(
@@ -798,21 +1044,28 @@ def analyze(
         moments = _analyze_round(
             config, book.store, selected, "moments", first_line, on_progress
         )
+        candidate_notes = book.store.notes(ChapterMoments)
+        candidates = _link_candidates(candidate_notes, texts)
+        link_config, current_links, links = _judge_links(
+            config, book.store, candidates, on_progress
+        )
         with book.store.summary_scan():
             if book.store.manifest() != book.manifest:
                 raise RuntimeError("book changed during analyze; run analyze again")
             summaries = book.store.notes(ChapterSummary)
             notes = book.store.notes(ChapterMoments)
+            if (
+                notes != candidate_notes
+                and _link_candidates(notes, texts) != candidates
+            ):
+                raise RuntimeError("moments changed during analyze; run analyze again")
+            accepted = book.store.publish_links(link_config, current_links)
+            links = replace(
+                links, accepted=sum(c.input_hash in accepted for c in candidates)
+            )
             names = {name for note in summaries.values() for name in note.characters}
             for note in notes.values():
-                names.update(
-                    name for moment in note.moments for name in moment.characters
-                )
-                names.update(
-                    name
-                    for identity in note.identities
-                    for name in (identity.alias, identity.name)
-                )
+                names.update(_moment_names(note))
 
             # Identical chapters share a cache row. Scan it at the earliest occurrence.
             flags = {}
@@ -842,7 +1095,7 @@ def analyze(
                 if c.content_hash in notes
                 for m in notes[c.content_hash].moments
             )
-        return AnalyzeResult(summary, moments, spoilers, hidden)
+        return AnalyzeResult(summary, moments, links, spoilers, hidden)
 
 
 def collection_status(config: ReadFellowConfig, collection: str) -> CollectionStatus:
@@ -868,6 +1121,7 @@ def collection_status(config: ReadFellowConfig, collection: str) -> CollectionSt
             IndexReport(book.manifest.chunk_count, book.store.chunk_count()),
             book.store.note_counts("summary"),
             moments,
+            book.store.link_counts(),
         )
 
 

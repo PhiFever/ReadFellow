@@ -37,6 +37,8 @@ def notebook(book, monkeypatch):
     def generate(prompt, schema):
         if "summary" in schema["properties"]:
             return json.dumps({"summary": "本章结束。", "characters": [], "tags": []})
+        if "same" in schema["properties"]:
+            return json.dumps({"same": True, "reason": "原文明确说明了真名。"})
         calls.append(prompt)
         if "第一章 开始" in prompt:
             return json.dumps(first)
@@ -95,6 +97,15 @@ def test_late_character_rejects_only_that_moment(notebook, capsys):
 def test_identity_needs_both_names_in_evidence(notebook, capsys):
     config, _, _, second, _ = notebook
     second["identities"][0]["evidence"] = "老罗就是"
+    app.analyze(config, "books", chapters=(2, 2))
+    (chapter,) = notes(capsys, "2")
+    assert chapter["identities"] == []
+    assert app.collection_status(config, "books").moments.unanchored == 1
+
+
+def test_identity_needs_short_name_outside_long_name(notebook, capsys):
+    config, _, _, second, _ = notebook
+    second["identities"][0]["alias"] = "明"
     app.analyze(config, "books", chapters=(2, 2))
     (chapter,) = notes(capsys, "2")
     assert chapter["identities"] == []

@@ -185,6 +185,35 @@ class IdentityEntry(IdentityFields, NoteCitation):
         return f"= {self.alias} → {self.name}\n{self.citation()}"
 
 
+class LinkDecision(ReadFellowModel, frozen=True):
+    same: bool = Field(strict=True)
+    reason: str
+
+
+LinkSource = Literal["identity", "contains", "given_name"]
+
+
+class LinkEvidence(IdentityFields, NoteLines, frozen=True):
+    source: LinkSource
+    ordinal: int
+    content_hash: str
+
+
+class IdentityLink(LinkEvidence, LinkDecision, frozen=True):
+    pass
+
+
+class AliasEntry(IdentityFields, NoteCitation, frozen=True):
+    ordinal: int
+    title: str
+
+
+class AliasesResult(ReadFellowModel, frozen=True):
+    progress: str
+    name: str
+    links: list[AliasEntry]
+
+
 class NotesChapter(ReadFellowModel):
     ordinal: int
     reference: str

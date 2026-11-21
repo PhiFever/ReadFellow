@@ -64,12 +64,14 @@ def test_analyze_resumes_from_committed_notes(summaries, capsys):
     assert first.out.splitlines() == [
         "summary  chapters 2  cached 0  written 2  failed 0  spoiler 0",
         "moments  chapters 2  cached 0  written 2  failed 0  hidden 0",
+        "links  candidates 0  cached 0  judged 0  failed 0  accepted 0",
     ]
     assert {line.split()[1] for line in first.err.splitlines()} == {"1", "2"}
     assert run("analyze") == 0
     assert capsys.readouterr().out.splitlines() == [
         "summary  chapters 2  cached 2  written 0  failed 0  spoiler 0",
         "moments  chapters 2  cached 2  written 0  failed 0  hidden 0",
+        "links  candidates 0  cached 0  judged 0  failed 0  accepted 0",
     ]
     assert len(calls) == 2
 

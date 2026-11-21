@@ -18,7 +18,9 @@ from .models import (
     ChapterSummary,
     Chunk,
     Evidence,
+    IdentityLink,
     IndexManifest,
+    LinkEvidence,
     NoteConfig,
     ProgressFilter,
     ReaderState,
@@ -26,7 +28,7 @@ from .models import (
 
 jieba.setLogLevel(logging.WARNING)
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 NOTE_CONFIG_SCHEMA = """
 CREATE TABLE IF NOT EXISTS note_configs (
     id INTEGER PRIMARY KEY,
@@ -43,6 +45,15 @@ CREATE TABLE IF NOT EXISTS chapter_notes (
     spoiler INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (config_id, content_hash)
+)
+"""
+LINK_SCHEMA = """
+CREATE TABLE IF NOT EXISTS identity_links (
+    config_id INTEGER NOT NULL REFERENCES note_configs(id),
+    input_hash TEXT NOT NULL,
+    body TEXT NOT NULL,
+    current INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (config_id, input_hash)
 )
 """
 LATEST_NOTE = (
@@ -158,7 +169,7 @@ class SqliteChunkStore:
             if version < SCHEMA_VERSION and not write:
                 raise RuntimeError("run progress set to upgrade the library")
             if version != SCHEMA_VERSION and not (
-                write and (version in (0, 1, 2) or rebuild)
+                write and (version in (0, 1, 2, 3) or rebuild)
             ):
                 raise RuntimeError(
                     f"unsupported library schema in {path}; run index --rebuild"
@@ -174,6 +185,7 @@ class SqliteChunkStore:
                     db.execute(READER_SCHEMA)
                     db.execute(NOTE_CONFIG_SCHEMA)
                     db.execute(NOTE_SCHEMA)
+                    db.execute(LINK_SCHEMA)
                     db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             yield cls(db)
             if write:
@@ -269,6 +281,73 @@ class SqliteChunkStore:
             WHERE n.config_id={LATEST_NOTE} HAVING {LATEST_NOTE} IS NOT NULL
         """,
             {"kind": kind},
+        ).fetchone()
+        return (row[0], row[1]) if row else None
+
+    def cached_link_hashes(self, config_id: int) -> set[str]:
+        rows = self._db.execute(
+            "SELECT input_hash FROM identity_links WHERE config_id=?", (config_id,)
+        )
+        return {key for (key,) in rows}
+
+    def write_link(self, config_id: int, key: str, link: IdentityLink) -> None:
+        with self._db as db:
+            db.execute(
+                "INSERT OR IGNORE INTO identity_links(config_id, input_hash, body) VALUES (?, ?, ?)",
+                (config_id, key, link.model_dump_json()),
+            )
+
+    def publish_links(self, config_id: int, links: dict[str, LinkEvidence]) -> set[str]:
+        (latest,) = self._db.execute(
+            f"SELECT {LATEST_NOTE}", {"kind": "links"}
+        ).fetchone()
+        if latest != config_id:
+            raise RuntimeError(
+                "links configuration changed during analyze; run analyze again"
+            )
+        # A cached verdict may now cite a different absolute line after a rebuild.
+        self._db.execute("UPDATE identity_links SET current=0 WHERE current=1")
+        self._db.executemany(
+            "UPDATE identity_links SET current=1, body=json_patch(body, ?) WHERE config_id=? AND input_hash=?",
+            ((link.model_dump_json(), config_id, key) for key, link in links.items()),
+        )
+
+        rows = self._db.execute(
+            "SELECT input_hash FROM identity_links WHERE config_id=? AND current=1 AND json_extract(body, '$.same')",
+            (config_id,),
+        )
+        return {key for (key,) in rows}
+
+    def visible_links(self, end: int | None) -> Iterator[IdentityLink]:
+        rows = self._db.execute(
+            f"""SELECT l.body, c.line_start, c.text FROM identity_links l JOIN chapters c
+                ON c.ordinal=json_extract(l.body, '$.ordinal')
+                AND c.content_hash=json_extract(l.body, '$.content_hash')
+                WHERE l.config_id={LATEST_NOTE} AND l.current=1
+                AND json_extract(l.body, '$.same') AND (:end IS NULL OR c.line_end<=:end)
+                ORDER BY c.ordinal, json_extract(l.body, '$.line_start'), l.input_hash""",
+            {"kind": "links", "end": end},
+        )
+        last_ordinal = None
+        for body, chapter_start, text in rows:
+            link = IdentityLink.model_validate_json(body)
+            if link.ordinal != last_ordinal:
+                lines = text.splitlines(keepends=True)
+                last_ordinal = link.ordinal
+            # Earlier chapters can shift this citation without changing its chapter hash.
+            first = link.line_start - chapter_start
+            last = link.line_end - chapter_start
+            if 0 <= first <= last < len(lines) and link.evidence in "".join(
+                lines[first : last + 1]
+            ):
+                yield link
+
+    def link_counts(self) -> tuple[int, int] | None:
+        row = self._db.execute(
+            f"""SELECT count(*), coalesce(sum(json_extract(body, '$.same')), 0)
+                FROM identity_links WHERE config_id={LATEST_NOTE} AND current=1
+                HAVING {LATEST_NOTE} IS NOT NULL""",
+            {"kind": "links"},
         ).fetchone()
         return (row[0], row[1]) if row else None
 

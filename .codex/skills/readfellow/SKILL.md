@@ -27,13 +27,14 @@ uv run readfellow read --lines 9000-9400 --collection sample
 uv run readfellow find "尤基" --collection sample --limit 20  # exact substring, per-chapter counts
 uv run readfellow find "尤基" --chapters 2-40 --collection sample
 uv run readfellow notes --chapters 55-65 --collection sample  # per-chapter moments and aliases
+uv run readfellow aliases 向山 --collection sample  # every name linked to this one, with quotes
 uv run readfellow search "query text" --collection sample --top-k 5
 uv run readfellow hybrid "query text" --collection sample --top-k 5
 uv run readfellow fetch <chunk-id> --collection sample
 uv run readfellow status --collection sample
 ```
 
-`toc`, `read`, `find`, and `notes` accept `--json`.
+`toc`, `read`, `find`, `notes`, and `aliases` accept `--json`.
 
 ## Workflow
 
@@ -42,13 +43,14 @@ uv run readfellow status --collection sample
 3. For names, items, and terms, run `find`. It is an exact substring match, so two-character names work, and its per-chapter counts show where to read.
    - When a chapter has a summary, `toc` and `find` print it, and `toc` also prints its plot tags, at the end of that chapter's row. Use them to choose which chapters to read, for example to find the climax of an arc. The full-book `toc` with summaries is long, so use `toc --chapters A-B` for the stretch you care about. A summary is a model's one-line digest. It is navigation, not evidence: read the chapter before you state what happens in it.
    - `notes --chapters A-B` lists each chapter's key moments (kind, importance 1–5 within that chapter, characters, a one-line description, the trait it shows) and the aliases the text states, each with a quoted line and its `source_path:line`. Use it to pick scenes for an arc's highlights or a character's portrayal, then `read` around the cited lines. Notes are model output too: the quote is original text, the description is not. Aliases are raw per-chapter claims and are not merged across chapters.
+   - `aliases <name>` lists every name connected to this one within progress, such as a nickname, a short name, or a real name. Each link shows the chapter and the quoted line that states it. Run it before `find` when a character goes by several names, then search each one. A model checked each link against its quote, so it can be wrong, and generic terms such as 「医生」 may show up as names. Read the quote before you rely on a link. An empty result means no link is established within progress.
 4. Read the relevant chapters or lines with `read`. Output above 60000 characters is truncated; narrow the range when that happens.
 5. For vague or thematic questions where you do not know where to look, use `search` or `hybrid`, then `fetch` or `read` the hits before relying on them.
 6. Answer from the text you read. Cite `source_path:line` or a line range, and the chapter title. Label inference and interpretation separately from what the text says.
 
 ## Spoiler Control
 
-The saved progress applies to every reading command (`toc`, `read`, `find`, `notes`, `search`, `fts`, `hybrid`, `fetch`). Text beyond it is never returned.
+The saved progress applies to every reading command (`toc`, `read`, `find`, `notes`, `aliases`, `search`, `fts`, `hybrid`, `fetch`). Text beyond it is never returned.
 
 - `progress set V:N` means the chapter titled 第N章 in volume V. Volumes are inferred from chapter numbers restarting at 1, and plain `N` works only when that number is unique. If `progress set` reports the number as ambiguous, confirm the chapter title with the user and use the `--line` value listed for that candidate. If the chapter is not found, ask the user for the title instead of guessing a nearby number.
 - `--max-chapter`, `--max-line`, and `--max-chunk-index` on a single command can only narrow the saved progress, never widen it. Asking for more is an error.
@@ -62,7 +64,7 @@ The saved progress applies to every reading command (`toc`, `read`, `find`, `not
 - Use `--limit 8` for a smoke test before a full build.
 - Changing the source file, the chunk settings, or the embedding model requires `index --rebuild`. A rebuild keeps the saved progress, though a changed source makes it stale.
 - `index`, `search`, and `hybrid` need the local Ollama embedding model. `progress`, `toc`, `read`, `find`, and `fetch` do not.
-- `analyze --collection <name> [--chapters A-B]` generates the per-chapter summaries through the cloud model in `config.yaml`. It ignores reading progress and prints only counts. It generates the per-chapter moments and aliases for `notes` in a second pass. It skips chapters that already have notes, so an interrupted run resumes when you run it again. `status` shows the `summaries` and `moments` lines. Run it only when the user asks for it.
+- `analyze --collection <name> [--chapters A-B]` generates the per-chapter summaries through the cloud model in `config.yaml`. It ignores reading progress and prints only counts. It generates the per-chapter moments and aliases for `notes` in a second pass. A third pass checks candidate alias links for `aliases` across every chapter that has notes. It skips chapters that already have notes, so an interrupted run resumes when you run it again. `status` shows the `summaries` and `moments` lines. Run it only when the user asks for it.
 - `library/` is a local artifact and is ignored by git.
 
 ## Answering Rules

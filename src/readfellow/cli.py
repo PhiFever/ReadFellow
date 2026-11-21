@@ -13,6 +13,7 @@ from .app import (
     IndexProgressEvent,
     IndexReport,
     ProgressLimit,
+    aliases,
     analyze,
     collection_status,
     find_text,
@@ -135,6 +136,10 @@ def build_parser(config: ReadFellowConfig) -> argparse.ArgumentParser:
     toc = subparsers.add_parser("toc", help="list chapters within progress")
     read = subparsers.add_parser("read", help="read numbered source lines")
     notes = subparsers.add_parser("notes", help="read chapter moments and identities")
+    alias_cmd = subparsers.add_parser(
+        "aliases", help="list confirmed aliases within progress"
+    )
+    alias_cmd.add_argument("name", help="character name to look up")
     ranges = read.add_mutually_exclusive_group(required=True)
     ranges.add_argument(
         "--chapters", type=number_range, metavar="A[-B]", help="inclusive toc ordinals"
@@ -161,7 +166,7 @@ def build_parser(config: ReadFellowConfig) -> argparse.ArgumentParser:
     find.add_argument(
         "--limit", type=int, default=50, help="maximum example lines (default 50)"
     )
-    for cmd in (toc, read, find, notes):
+    for cmd in (toc, read, find, notes, alias_cmd):
         add_collection(cmd)
         add_progress_args(cmd)
         cmd.add_argument("--json", action="store_true", help="print one JSON object")
@@ -329,6 +334,14 @@ def command_reading(args: argparse.Namespace, config: ReadFellowConfig) -> int:
         if not args.json:
             for row in result.lines:
                 print(row.numbered())
+    elif args.command == "aliases":
+        result = aliases(config, args.name, args.collection, progress=progress)
+        if not args.json:
+            print(result.name if result.links else f"{result.name}: no aliases")
+            for link in result.links:
+                print(
+                    f"{link.alias} = {link.name}\t{link.ordinal}\t{link.title}\t{link.citation().lstrip()}"
+                )
     elif args.command == "notes":
         result = read_notes(
             config, args.collection, chapters=args.chapters, progress=progress
@@ -382,10 +395,18 @@ def command_analyze(args: argparse.Namespace, config: ReadFellowConfig) -> int:
         print(
             f"{kind}  chapters {stats.chapters}  cached {stats.cached}  written {stats.written}  failed {len(stats.failures)}  {label} {count}"
         )
+    links = result.links
+    print(
+        f"links  candidates {links.candidates}  cached {links.cached}  judged {links.judged}  failed {len(links.failures)}  accepted {links.accepted}"
+    )
     for kind, stats, _, _ in rounds:
         for ordinal, reason in sorted(stats.failures.items()):
             print(f"{kind}\t{ordinal}\t{reason}")
-    return int(bool(result.summary.failures or result.moments.failures))
+    for ordinal, reason in sorted(links.failures):
+        print(f"links\t{ordinal}\t{reason}")
+    return int(
+        bool(result.summary.failures or result.moments.failures or links.failures)
+    )
 
 
 def command_status(args: argparse.Namespace, config: ReadFellowConfig) -> int:
@@ -413,6 +434,11 @@ def command_status(args: argparse.Namespace, config: ReadFellowConfig) -> int:
         print(
             f"moments: {moments.chapters}/{status.chapter_count}, pending {status.chapter_count - moments.chapters}, hidden {moments.hidden}, unanchored {moments.unanchored}, name-rejected {moments.name_rejected}"
         )
+    if status.links is None:
+        print("links: none")
+    else:
+        candidates, accepted = status.links
+        print(f"links: candidates {candidates}, accepted {accepted}")
     if status.source_error is not None:
         print(f"  ⚠ {status.source_error}")
 
@@ -528,7 +554,7 @@ def main(argv: list[str] | None = None) -> int:
             return command_analyze(args, config)
         if args.command == "progress":
             return command_progress(args, config)
-        if args.command in ("toc", "read", "find", "notes"):
+        if args.command in ("toc", "read", "find", "notes", "aliases"):
             return command_reading(args, config)
         if args.command == "index":
             return command_index(args, config)
