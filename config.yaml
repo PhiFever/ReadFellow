@@ -7,9 +7,10 @@ ollama:
   keep_alive: 30m
   num_ctx: 16384
 openai:
-  base_url: https://api.b.ai/v1
-  generation_model: qwen3.8-flash
+  base_url: https://developer.amd.com.cn/radeon/api/v1
+  generation_model: DeepSeek-V4-Flash
   num_ctx: 65536
+  requests_per_minute: 20
 indexing:
   default_collection: sample
   chunk_chars: 2400
@@ -19,5 +20,6 @@ search:
   top_k: 5
 analysis:
   backend: openai
-  num_predict: 4096
+  num_predict: 1024
+  concurrency: 5
   retries: 2

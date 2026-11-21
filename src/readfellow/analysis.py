@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -18,6 +19,7 @@ from .extraction import (
 from .models import (
     ChapterAnalysis,
     ChapterEvent,
+    ChapterSummary,
     CharacterMention,
     Chunk,
 )
@@ -251,3 +253,44 @@ def _resolve_evidence(
             f"{label} evidence matches no chunk in chapter {group.title}"
         )
     return chunk, resolve_evidence(evidence, chunk.text, label=label, chunk_id=chunk.id)
+
+
+SUMMARY_PROMPT_VERSION = "chapter-summary-v1"
+SUMMARY_SCHEMA_VERSION = 1
+KINDS = ["抉择", "冲突", "战斗", "揭示", "情感", "关系变化", "成长", "其他"]
+SUMMARY_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["summary", "characters", "tags"],
+    "properties": {
+        "summary": {"type": "string"},
+        "characters": {"type": "array", "maxItems": 6, "items": {"type": "string"}},
+        "tags": {"type": "array", "items": {"type": "string", "enum": KINDS}},
+    },
+}
+SUMMARY_PROMPT = """你在为一部长篇小说建立逐章索引。下面是其中一章的全文。
+
+只依据这一章的原文，输出一个 JSON 对象：
+- summary：一句话，60 字以内，只写本章发生的事。不写前情，不推测后续，不评价。
+- characters：本章的主要人物，照原文里的称呼写，最多 6 个。不要加括号或注释。
+- tags：本章包含的情节类型，从「抉择、冲突、战斗、揭示、情感、关系变化、成长、其他」里选，可以多选。
+
+章节标题：{title}
+
+{text}"""
+
+
+def parse_summary(raw: str) -> ChapterSummary:
+    note = ChapterSummary.model_validate(json.loads(raw))
+    note.summary = note.summary.strip()
+    note.characters = list(
+        dict.fromkeys(name.strip() for name in note.characters if name.strip())
+    )
+    note.tags = list(dict.fromkeys(note.tags))
+    if (
+        not note.summary
+        or len(note.characters) > 6
+        or any(tag not in KINDS for tag in note.tags)
+    ):
+        raise ValueError("invalid chapter summary")
+    return note

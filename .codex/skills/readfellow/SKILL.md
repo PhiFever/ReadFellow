@@ -21,6 +21,7 @@ uv run readfellow progress set 1:50 --collection sample    # through volume 1, c
 uv run readfellow progress set --line 88000 --collection sample
 uv run readfellow progress set --all --collection sample   # finished the book
 uv run readfellow toc --collection sample                  # chapters within progress
+uv run readfellow toc --chapters 40-80 --collection sample # a range, with chapter summaries
 uv run readfellow read --chapters 12-14 --collection sample   # toc ordinals, numbered lines
 uv run readfellow read --lines 9000-9400 --collection sample
 uv run readfellow find "尤基" --collection sample --limit 20  # exact substring, per-chapter counts
@@ -36,8 +37,9 @@ uv run readfellow status --collection sample
 ## Workflow
 
 1. Run `progress show`. If progress is unset or stale, ask the user how far they have read and run `progress set` with that point. Do not set `--all` unless the user says they finished the book.
-2. Run `toc` to see the chapters within progress. Chapter ranges in `read` and `find` use the ordinal in the first `toc` column, not the in-book chapter number, because in-book numbers repeat across volumes.
+2. Run `toc` to see the chapters within progress. Chapter ranges in `read`, `find`, and `toc --chapters` use the ordinal in the first `toc` column, not the in-book chapter number, because in-book numbers repeat across volumes.
 3. For names, items, and terms, run `find`. It is an exact substring match, so two-character names work, and its per-chapter counts show where to read.
+   - When a chapter has a summary, `toc` and `find` print it, and `toc` also prints its plot tags, at the end of that chapter's row. Use them to choose which chapters to read, for example to find the climax of an arc. The full-book `toc` with summaries is long, so use `toc --chapters A-B` for the stretch you care about. A summary is a model's one-line digest. It is navigation, not evidence: read the chapter before you state what happens in it.
 4. Read the relevant chapters or lines with `read`. Output above 60000 characters is truncated; narrow the range when that happens.
 5. For vague or thematic questions where you do not know where to look, use `search` or `hybrid`, then `fetch` or `read` the hits before relying on them.
 6. Answer from the text you read. Cite `source_path:line` or a line range, and the chapter title. Label inference and interpretation separately from what the text says.
@@ -58,6 +60,7 @@ The saved progress applies to every reading command (`toc`, `read`, `find`, `sea
 - Use `--limit 8` for a smoke test before a full build.
 - Changing the source file, the chunk settings, or the embedding model requires `index --rebuild`. A rebuild keeps the saved progress, though a changed source makes it stale.
 - `index`, `search`, and `hybrid` need the local Ollama embedding model. `progress`, `toc`, `read`, `find`, and `fetch` do not.
+- `analyze --collection <name> [--chapters A-B]` generates the per-chapter summaries through the cloud model in `config.yaml`. It ignores reading progress and prints only counts. It skips chapters that already have summaries, so an interrupted run resumes when you run it again. `status` shows the `summaries` line. Run it only when the user asks for it.
 - `library/` is a local artifact and is ignored by git.
 
 ## Answering Rules

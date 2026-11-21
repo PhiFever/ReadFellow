@@ -95,6 +95,25 @@ class ReaderState(ReadFellowModel):
     set_at: str
 
 
+class SummaryConfig(ReadFellowModel):
+    model_config = ConfigDict(frozen=True)
+
+    prompt_version: str
+    schema_version: int
+    model: str
+    base_url: str
+    response_format: str
+    temperature: float
+    top_p: float
+    max_tokens: int
+
+
+class ChapterSummary(ReadFellowModel):
+    summary: str
+    characters: list[str]
+    tags: list[str]
+
+
 class TocEntry(ReadFellowModel):
     ordinal: int
     reference: str
@@ -103,6 +122,8 @@ class TocEntry(ReadFellowModel):
     line_end: int
     characters: int
     partial: bool
+    summary: str | None = None
+    tags: list[str] = Field(default_factory=list)
 
 
 class TocResult(ReadFellowModel):
@@ -126,6 +147,7 @@ class ReadResult(ReadFellowModel):
 
 
 class ChapterHits(ReadFellowModel):
+    summary: str | None = None
     ordinal: int
     title: str
     count: int

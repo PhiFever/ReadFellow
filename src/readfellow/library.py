@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 import unicodedata
@@ -13,16 +14,39 @@ import numpy as np
 
 from .models import (
     ChapterBoundary,
+    ChapterSummary,
     Chunk,
     Evidence,
     IndexManifest,
     ProgressFilter,
     ReaderState,
+    SummaryConfig,
 )
 
 jieba.setLogLevel(logging.WARNING)
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+NOTE_CONFIG_SCHEMA = """
+CREATE TABLE IF NOT EXISTS note_configs (
+    id INTEGER PRIMARY KEY,
+    kind TEXT NOT NULL,
+    fingerprint TEXT NOT NULL UNIQUE,
+    activated INTEGER NOT NULL
+)
+"""
+NOTE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS chapter_notes (
+    config_id INTEGER NOT NULL REFERENCES note_configs(id),
+    content_hash TEXT NOT NULL,
+    body TEXT NOT NULL,
+    spoiler INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (config_id, content_hash)
+)
+"""
+LATEST_SUMMARY = (
+    "(SELECT id FROM note_configs WHERE kind='summary' ORDER BY activated DESC LIMIT 1)"
+)
 READER_SCHEMA = """
 CREATE TABLE IF NOT EXISTS reader_state (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -130,10 +154,10 @@ class SqliteChunkStore:
             db.execute("PRAGMA foreign_keys = ON")
             db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version == 1 and not write:
+            if version < SCHEMA_VERSION and not write:
                 raise RuntimeError("run progress set to upgrade the library")
             if version != SCHEMA_VERSION and not (
-                write and (version in (0, 1) or rebuild)
+                write and (version in (0, 1, 2) or rebuild)
             ):
                 raise RuntimeError(
                     f"unsupported library schema in {path}; run index --rebuild"
@@ -147,10 +171,80 @@ class SqliteChunkStore:
                         db.execute(statement)
                 if version != SCHEMA_VERSION:
                     db.execute(READER_SCHEMA)
+                    db.execute(NOTE_CONFIG_SCHEMA)
+                    db.execute(NOTE_SCHEMA)
                     db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             yield cls(db)
             if write:
                 db.commit()
+
+    def activate_summary(self, config: SummaryConfig) -> int:
+        fingerprint = json.dumps(
+            config.model_dump(), sort_keys=True, ensure_ascii=False
+        )
+        with self._db as db:
+            db.execute(
+                "INSERT OR IGNORE INTO note_configs(kind, fingerprint, activated) VALUES ('summary', ?, 0)",
+                (fingerprint,),
+            )
+            return db.execute(
+                "UPDATE note_configs SET activated=(SELECT max(activated)+1 FROM note_configs) WHERE fingerprint=? RETURNING id",
+                (fingerprint,),
+            ).fetchone()[0]
+
+    def cached_summary_hashes(self, config_id: int) -> set[str]:
+        return {
+            row[0]
+            for row in self._db.execute(
+                "SELECT content_hash FROM chapter_notes WHERE config_id=?", (config_id,)
+            )
+        }
+
+    def summary_notes(
+        self,
+        *,
+        ordinals: tuple[int, int] | None = None,
+        visible_only: bool = False,
+        end: int | None = None,
+    ) -> dict[str, ChapterSummary]:
+        first, last = ordinals or (None, None)
+        rows = self._db.execute(
+            f"""
+            SELECT n.content_hash, n.body FROM chapters c JOIN chapter_notes n USING(content_hash)
+            WHERE n.config_id={LATEST_SUMMARY} AND (:first IS NULL OR c.ordinal BETWEEN :first AND :last)
+            AND (:end IS NULL OR c.line_end <= :end) AND (:visible=0 OR n.spoiler=0)
+        """,
+            {"first": first, "last": last, "end": end, "visible": visible_only},
+        )
+        return {key: ChapterSummary.model_validate_json(body) for key, body in rows}
+
+    def write_summary(self, config_id: int, key: str, note: ChapterSummary) -> None:
+        with self._db as db:
+            # Keep unscanned summaries hidden even if the process is interrupted.
+            db.execute(
+                "INSERT OR IGNORE INTO chapter_notes(config_id, content_hash, body, spoiler) VALUES (?, ?, ?, 1)",
+                (config_id, key, note.model_dump_json()),
+            )
+
+    @contextmanager
+    def summary_scan(self) -> Iterator[None]:
+        with self._db as db:
+            db.execute("BEGIN IMMEDIATE")
+            yield
+
+    def set_spoilers(self, flags: dict[str, bool]) -> None:
+        self._db.executemany(
+            f"UPDATE chapter_notes SET spoiler=? WHERE config_id={LATEST_SUMMARY} AND content_hash=?",
+            ((flag, key) for key, flag in flags.items()),
+        )
+
+    def summary_counts(self) -> tuple[int, int] | None:
+        row = self._db.execute(f"""
+            SELECT count(c.ordinal), coalesce(sum(n.spoiler), 0)
+            FROM chapters c JOIN chapter_notes n USING(content_hash)
+            WHERE n.config_id={LATEST_SUMMARY} HAVING {LATEST_SUMMARY} IS NOT NULL
+        """).fetchone()
+        return (row[0], row[1]) if row else None
 
     def reader_state(self) -> ReaderState | None:
         row = self._db.execute(

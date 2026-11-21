@@ -7,11 +7,13 @@ import sys
 from pathlib import Path
 
 from .app import (
+    AnalyzeProgress,
     ChannelStatus,
     IndexDocumentOptions,
     IndexProgressEvent,
     IndexReport,
     ProgressLimit,
+    analyze,
     collection_status,
     find_text,
     fts_search,
@@ -142,9 +144,17 @@ def build_parser(config: ReadFellowConfig) -> argparse.ArgumentParser:
         "find", help="find lines containing an exact substring"
     )
     find.add_argument("term", help="case-sensitive substring")
-    find.add_argument(
-        "--chapters", type=number_range, metavar="A[-B]", help="inclusive toc ordinals"
+    analyze_cmd = subparsers.add_parser(
+        "analyze", help="generate and cache chapter summaries"
     )
+    add_collection(analyze_cmd)
+    for cmd in (analyze_cmd, find, toc):
+        cmd.add_argument(
+            "--chapters",
+            type=number_range,
+            metavar="A[-B]",
+            help="inclusive toc ordinals",
+        )
     find.add_argument(
         "--limit", type=int, default=50, help="maximum example lines (default 50)"
     )
@@ -293,12 +303,15 @@ def command_progress(args: argparse.Namespace, config: ReadFellowConfig) -> int:
 def command_reading(args: argparse.Namespace, config: ReadFellowConfig) -> int:
     progress = progress_limit_from_args(args)
     if args.command == "toc":
-        result = table_of_contents(config, args.collection, progress=progress)
+        result = table_of_contents(
+            config, args.collection, chapters=args.chapters, progress=progress
+        )
         if not args.json:
             for c in result.chapters:
+                suffix = f"\t{c.summary}\t{','.join(c.tags)}" if c.summary else ""
                 partial = " (unfinished)" if c.partial else ""
                 print(
-                    f"{c.ordinal}\t{c.reference}\t{c.title}\t{c.line_start}-{c.line_end}\t{c.characters}{partial}"
+                    f"{c.ordinal}\t{c.reference}\t{c.title}\t{c.line_start}-{c.line_end}\t{c.characters}{partial}{suffix}"
                 )
     elif args.command == "read":
         result = read_passage(
@@ -329,7 +342,8 @@ def command_reading(args: argparse.Namespace, config: ReadFellowConfig) -> int:
                 f"{result.total_lines} matching lines in {result.total_chapters} chapters"
             )
             for chapter in result.chapters:
-                print(f"{chapter.ordinal}\t{chapter.title}\t{chapter.count}")
+                suffix = f"\t{chapter.summary}" if chapter.summary else ""
+                print(f"{chapter.ordinal}\t{chapter.title}\t{chapter.count}{suffix}")
             for hit in result.hits:
                 print(f"{hit.number}\t{hit.ordinal}\t{hit.title}\t{hit.snippet}")
     if args.json:
@@ -337,6 +351,21 @@ def command_reading(args: argparse.Namespace, config: ReadFellowConfig) -> int:
     elif result.progress:
         print(f"progress limit: {result.progress}", file=sys.stderr)
     return 0
+
+
+def command_analyze(args: argparse.Namespace, config: ReadFellowConfig) -> int:
+    def progress(event: AnalyzeProgress) -> None:
+        print(f"[{event.written}/{event.total}] {event.ordinal}", file=sys.stderr)
+
+    result = analyze(
+        config, args.collection, chapters=args.chapters, on_progress=progress
+    )
+    print(
+        f"chapters {result.chapters}  cached {result.cached}  written {result.written}  failed {len(result.failures)}  spoiler {result.spoiler}"
+    )
+    for ordinal, reason in sorted(result.failures.items()):
+        print(f"{ordinal}\t{reason}")
+    return int(bool(result.failures))
 
 
 def command_status(args: argparse.Namespace, config: ReadFellowConfig) -> int:
@@ -350,6 +379,13 @@ def command_status(args: argparse.Namespace, config: ReadFellowConfig) -> int:
     )
     print(f"chapters:    {status.chapter_count}")
     print(f"embedding:   {manifest.model}, dim {manifest.embedding_dimension}")
+    if status.summaries is None:
+        print("summaries: none")
+    else:
+        count, spoilers = status.summaries
+        print(
+            f"summaries: {count}/{status.chapter_count}, pending {status.chapter_count - count}, spoiler {spoilers}"
+        )
     if status.source_error is not None:
         print(f"  ⚠ {status.source_error}")
 
@@ -461,6 +497,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     config = apply_global_overrides(config, args)
     try:
+        if args.command == "analyze":
+            return command_analyze(args, config)
         if args.command == "progress":
             return command_progress(args, config)
         if args.command in ("toc", "read", "find"):

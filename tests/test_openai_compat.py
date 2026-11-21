@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 import pytest
+from openai import RateLimitError
 from openai.types.chat import ChatCompletion
 
 from readfellow.models import DerivationSettings
@@ -64,14 +65,7 @@ def test_generation_sends_schema_and_sampling_settings():
         },
         "temperature": 0.6,
         "top_p": 0.8,
-        "presence_penalty": 0.5,
         "max_tokens": 512,
-        "extra_body": {
-            "top_k": 30,
-            "min_p": 0.1,
-            "repetition_penalty": 1.1,
-            "enable_thinking": False,
-        },
     }
 
 
@@ -129,3 +123,33 @@ def test_api_key_from_dotenv_or_missing(tmp_path, monkeypatch, has_dotenv):
                 model="cloud-test",
                 settings=DerivationSettings(),
             )
+
+
+@pytest.mark.parametrize(
+    "headers, delays", [([{"retry-after": "3"}], [3]), ([{}, {}], [2, 4])]
+)
+def test_rate_limit_backoff(headers, delays):
+    client = FakeClient()
+    responses = iter(headers)
+    waits = []
+
+    def create(**kwargs):
+        header = next(responses, None)
+        if header is None:
+            return client.response
+        raise RateLimitError(
+            "at capacity",
+            response=SimpleNamespace(status_code=429, headers=header, request=object()),
+            body=None,
+        )
+
+    client.chat.completions.create = create
+    generator = OpenAICompatGenerator(
+        base_url="https://example.test",
+        model="cloud-test",
+        settings=DerivationSettings(),
+        client=client,
+        sleep=waits.append,
+    )
+    assert generator.generate_json("原文", {}) == '{"summary":"正文"}'
+    assert waits == delays

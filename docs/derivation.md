@@ -1,6 +1,8 @@
 # 章节分析
 
-第 2 步已下线 `analyze`。第 6 步将以逐章笔记缓存重新提供章节分析。
+`analyze [--chapters A-B]` 读取书库中的整章原文，为每章生成一句摘要、最多六个人物称呼和情节标签。解析失败、人物称呼在全书找不到或首次出现晚于本章末行时，会重新生成本章。所有章处理完毕后，用当前笔记中的全部人物称呼检查摘要，隐藏提前提及后文人物的摘要，并统计章数。完全命中缓存时也会重做这次检查。
+
+`note_configs` 记录提示词和结构版本、模型、端点、输出格式和采样参数。每次运行启用对应配置，旧配置仍可复用。`chapter_notes` 按配置和章节正文哈希保存笔记、剧透标记和生成时间。工作线程并发请求模型，主线程逐章提交结果。切块参数变化后可以复用所有笔记，修改正文后只需补写内容变化的章。
 
 `analysis.py` 保留构造章节提示词、估算上下文预算、去除重叠文本、解析人物与事件、将引文锚定到原文的纯函数，以及 prompt 和 schema 版本常量。`extraction.py` 提供通用解析与证据定位工具，领域词汇留在 `analysis.py`。`derivation.py` 保留 `JsonGenerator`、`generate_with_retry`（生成加解析算一次尝试）和 `sum_or_unknown`。
 
@@ -8,7 +10,7 @@
 
 - `ollama.py` 用纯 `urllib` 调 `/api/generate`。生成走**约束解码**：`format` 传 JSON schema（`ANALYSIS_RESPONSE_SCHEMA`），不传 `"json"`，因为后者只保证能解析，裸字符串在数组里也是合法 JSON。
 - 采样参数全部来自 `DerivationSettings`（Qwen3 官方 non-thinking 推荐值，temperature 0.7）。**不用贪心解码**：贪心会让 retry 逐字节重放同一个坏结果。
-- `openai_compat.py` 用 `json_schema` + `strict` 约束输出，写死关闭思考并逐次校验响应里没有思考内容；429 由 SDK 按 `retry-after` 重试。
+- `openai_compat.py` 用 `json_schema` + `strict` 约束输出，采样参数只传 `temperature`、`top_p` 和 `max_tokens`。收到思考内容或非零思考 token 时，该章失败。首次请求与 429 重试共用每分钟的请求配额。429 优先按 `retry-after` 等待，缺少该响应头时依次等 2、4、8 秒，最多等 30 秒，最多重试 15 次。
 
 ## 证据锚定与丢弃计数
 

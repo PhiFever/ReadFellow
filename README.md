@@ -136,9 +136,15 @@ uv run readfellow status --collection sample
 
 ### 3.6 `toc` / `read` / `find` — 按章节阅读
 
-`toc` 给出目录序号、卷章、标题、行范围和可读字数。用 `read --chapters A-B` 按目录序号翻阅，或用 `read --lines A-B` 按源文件行号读取。两个范围都接受单个数字。输出超过 60000 字符时可缩小范围继续阅读。
+`toc [--chapters A-B]` 给出目录序号、卷章、标题、行范围和可读字数。用 `read --chapters A-B` 按目录序号翻阅，或用 `read --lines A-B` 按源文件行号读取。两个范围都接受单个数字。输出超过 60000 字符时可缩小范围继续阅读。
 
-`find 词 [--chapters A-B] [--limit N]` 在章节原文中查找区分大小写的精确子串，汇总可读范围里的命中行数和每章计数，默认展示前 50 条。三个命令都支持 `--json`。
+`find 词 [--chapters A-B] [--limit N]` 在章节原文中查找区分大小写的精确子串，汇总可读范围里的命中行数和每章计数，默认展示前 50 条。整章可读且摘要通过防剧透检查时，`find` 在每章计数后附上摘要，`toc` 同时列出摘要和标签。三个命令都支持 `--json`。
+
+### 逐章生成摘要
+
+`uv run readfellow analyze --collection sample [--chapters A-B]` 将所选章节的全文发送到配置的 OpenAI 兼容端点。默认模型为 DeepSeek-V4-Flash，密钥取自环境变量或项目 `.env` 中的 `LLM_API_KEY`。省略范围时处理全书，生成范围独立于阅读进度。每章成功后立即保存，重跑会跳过已有笔记。失败时命令列出章节序号和错误类别，退出码为 1。
+
+`status` 的 `summaries` 行显示当前配置已生成多少章、还缺多少章，以及有多少章因剧透隐藏了摘要。
 
 ## 4. 防剧透：阅读进度限制
 

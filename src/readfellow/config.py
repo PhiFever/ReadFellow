@@ -34,6 +34,7 @@ class OpenAIConfig(ReadFellowModel):
     base_url: str = "https://api.b.ai/v1"
     generation_model: str = "qwen3.8-flash"
     num_ctx: int = 65536
+    requests_per_minute: int | None = Field(default=None, gt=0)
     # json_object for servers without schema-constrained decoding; the prompts
     # spell out the JSON shape, and parsing still validates every item.
     response_format: Literal["json_schema", "json_object"] = "json_schema"

@@ -13,7 +13,7 @@ def test_root_config_yaml_loads() -> None:
     assert config.ollama.embedding_model == "qwen3-embedding:8b"
     assert config.ollama.generation_model == "qwen3:8b"
     assert config.analysis.backend == "openai"
-    assert config.openai.generation_model == "qwen3.8-flash"
+    assert config.openai.generation_model == "DeepSeek-V4-Flash"
     assert config.indexing.chunk_chars == 2400
     assert config.indexing.overlap_chars == 240
 
